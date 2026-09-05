@@ -1,0 +1,9 @@
+.DS_Store
+xcuserdata/
+DerivedData/
+/macos/build/
+/macos/VeloKit.xcframework/
+/VeloKit/build/
+/VeloKit/zig-cache/
+/VeloKit/zig-out/
+/VeloKit/zig-pkg/
