@@ -66,6 +66,9 @@ precondition(new.keyEquivalent == "n")
 let closeMenuItem = menuItem("Close Window")
 precondition(closeMenuItem.menu === new.menu)
 precondition(!delegate.validateMenuItem(closeMenuItem))
+for title in ["Find…", "Command Palette…"] {
+  precondition(!delegate.validateMenuItem(menuItem(title)))
+}
 precondition(app.sendAction(new.action!, to: new.target, from: new))
 drain()
 let first = delegate.windows[0]
@@ -86,6 +89,36 @@ for text in ["\u{1b}", "\u{F700}", "\u{F8FF}"] {
     $0.text == nil
   })
 }
+
+// AppKit may already have removed our tracked accessory during a style change.
+let unrelatedAccessory = NSTitlebarAccessoryViewController()
+unrelatedAccessory.view = NSView(frame: NSRect(x: 0, y: 0, width: 20, height: 20))
+first.window!.addTitlebarAccessoryViewController(unrelatedAccessory)
+first.titleAccessory = NSTitlebarAccessoryViewController()
+first.applyWindowSettings()
+precondition(first.window!.titlebarAccessoryViewControllers.contains(unrelatedAccessory))
+first.window!.removeTitlebarAccessoryViewController(at: 0)
+for (index, style) in ["hidden", "native", "transparent", "hidden", "native"].enumerated() {
+  let scrollbar = index.isMultiple(of: 2) ? "never" : "system"
+  let updated = try AppConfiguration.parse(Data(("""
+  [terminal]
+  command = "/bin/sh"
+  shell_integration = "none"
+  theme = ""
+  confirm_close_surface = false
+  window_save_state = "never"
+  window_title_font_family = "Menlo"
+  macos_titlebar_style = "\(style)"
+  scrollbar = "\(scrollbar)"
+  """).utf8))
+  try first.runtime!.updateConfiguration(updated)
+  first.chrome!.scrollState = ghostty_action_scrollbar_s(total: 100, offset: 0, len: 10)
+  first.applyWindowSettings()
+  precondition(first.chrome!.showScroll == (scrollbar == "system"))
+  precondition((first.titleAccessory == nil) == (style == "hidden"))
+}
+try first.runtime!.updateConfiguration(settings)
+first.applyWindowSettings()
 
 precondition(app.sendAction(new.action!, to: new.target, from: new))
 drain()

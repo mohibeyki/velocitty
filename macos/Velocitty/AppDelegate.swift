@@ -59,6 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
       alert.addButton(withTitle: "Use Defaults")
       alert.addButton(withTitle: "Quit")
       guard alert.runModal() == .alertFirstButtonReturn else {
+        if !pendingFiles.isEmpty { NSApp.reply(toOpenOrPrint: .cancel) }
         NSApp.terminate(nil)
         return
       }
@@ -66,6 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         runtime = try TerminalRuntime(settings: .defaults())
       } catch {
         configurationAlert(error).runModal()
+        if !pendingFiles.isEmpty { NSApp.reply(toOpenOrPrint: .failure) }
         NSApp.terminate(nil)
         return
       }
@@ -77,7 +79,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     updateMenuShortcuts()
     if native.value("initial-window", true) { newWindow() }
     if !pendingFiles.isEmpty {
-      insertFiles(pendingFiles)
+      NSApp.reply(toOpenOrPrint: insertFiles(pendingFiles) ? .success : .failure)
       pendingFiles.removeAll()
     }
     scheduleQuitIfNeeded()
@@ -164,7 +166,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   @objc func closeWindow() { activeWindow?.window?.performClose(nil) }
 
   func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-    menuItem.action != #selector(closeWindow) || activeWindow != nil
+    switch menuItem.action {
+    case #selector(closeWindow), #selector(showCommands), #selector(findTerminal),
+      #selector(findNext), #selector(findPrevious):
+      return activeWindow?.runtime?.view?.surface != nil
+    default:
+      return true
+    }
   }
 
   func closeAllWindows() {
@@ -172,16 +180,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   }
 
   func application(_ sender: NSApplication, openFiles filenames: [String]) {
-    if runtime == nil { pendingFiles.append(contentsOf: filenames) } else { insertFiles(filenames) }
-    sender.reply(toOpenOrPrint: .success)
+    guard !filenames.isEmpty else {
+      sender.reply(toOpenOrPrint: .success)
+      return
+    }
+    if runtime == nil {
+      pendingFiles.append(contentsOf: filenames)
+      return // Reply after startup has created a destination.
+    }
+    sender.reply(toOpenOrPrint: insertFiles(filenames) ? .success : .failure)
   }
 
-  func insertFiles(_ filenames: [String]) {
+  func insertFiles(_ filenames: [String]) -> Bool {
     openWindow()
+    guard let surface = activeWindow?.runtime?.view?.surface else { return false }
     let text = ShellInput.paths(filenames)
-    if let surface = activeWindow?.runtime?.view?.surface {
-      text.withCString { velokit_surface_text(surface, $0, UInt(text.utf8.count)) }
-    }
+    text.withCString { velokit_surface_text(surface, $0, UInt(text.utf8.count)) }
+    return true
   }
 
   func refreshAppearance() {
@@ -478,6 +493,15 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
 
   func applyWindowSettings() {
     guard let window else { return }
+    chrome?.refreshVisibility()
+    // Detach before changing styles; borderless windows have no titlebar controller.
+    if let titleAccessory {
+      if let index = window.titlebarAccessoryViewControllers.firstIndex(of: titleAccessory) {
+        window.removeTitlebarAccessoryViewController(at: index)
+      }
+      self.titleAccessory = nil
+      titleLabel = nil
+    }
     let titlebar = native.string("macos-titlebar-style", "transparent")
     if native.string("window-decoration") == "none" || titlebar == "hidden" {
       window.styleMask.remove(.titled)
@@ -492,12 +516,6 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
         native.string("macos-window-buttons") == "hidden"
     }
     window.colorSpace = native.string("window-colorspace") == "display-p3" ? .displayP3 : .sRGB
-    if let titleAccessory {
-      window.removeTitlebarAccessoryViewController(
-        at: window.titlebarAccessoryViewControllers.firstIndex(of: titleAccessory) ?? 0)
-      self.titleAccessory = nil
-      titleLabel = nil
-    }
     let family = native.string("window-title-font-family")
     let foreground =
       runtime?.settings.options.contains {
@@ -507,7 +525,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
       runtime?.settings.options.contains {
         $0.key == "window-titlebar-background" && !$0.value.isEmpty
       } == true
-    if !family.isEmpty || foreground || background {
+    if window.styleMask.contains(.titled) && (!family.isEmpty || foreground || background) {
       let accessory = NSTitlebarAccessoryViewController()
       let label = NSTextField(labelWithString: window.title)
       label.frame = NSRect(x: 0, y: 0, width: 400, height: 24)

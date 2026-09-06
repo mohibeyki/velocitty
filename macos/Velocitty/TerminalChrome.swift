@@ -92,7 +92,7 @@ final class TerminalChrome: NSView, NSSearchFieldDelegate {
     for view in [search, count, previous, next, close] { view.isHidden = !searching }
     let policy = NativeSettings(config: terminal.config).string("scrollbar", "system")
     scroller.scrollerStyle = NSScroller.preferredScrollerStyle
-    showScroll = policy != "never" && (policy == "always" || scrollState.total > scrollState.len)
+    showScroll = policy != "never" && scrollState.total > scrollState.len
     scroller.isHidden = !showScroll
     if scroller.scrollerStyle == .legacy { scroller.alphaValue = 1 }
     needsLayout = true
