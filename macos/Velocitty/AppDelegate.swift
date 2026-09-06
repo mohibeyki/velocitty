@@ -47,7 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self?.updateMenuShortcuts()
         }
         appearanceObservation = NSApp.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
-            DispatchQueue.main.async { self?.reloadConfiguration(nil) }
+            DispatchQueue.main.async { self?.refreshAppearance() }
         }
 
         let runtime: TerminalRuntime
@@ -382,6 +382,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         alert.messageText = "Could not load configuration"
         alert.informativeText = error.localizedDescription
         return alert
+    }
+
+    func refreshAppearance() {
+        guard let runtime else { return }
+        do { try runtime.updateConfiguration(runtime.settings); applyWindowSettings() }
+        catch { NSLog("Appearance update failed: %@", error.localizedDescription) }
     }
 
     @objc func reloadConfiguration(_ sender: Any?) {

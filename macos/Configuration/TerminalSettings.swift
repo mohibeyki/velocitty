@@ -4,6 +4,7 @@
 // Unsupported options are explicit errors, never silently accepted no-ops.
 public enum TerminalSettings {
     public static let supported: Set<String> = [
+        "middle-click-action",
         "resize-overlay",
         "resize-overlay-position",
         "resize-overlay-duration",
@@ -224,7 +225,6 @@ public enum TerminalSettings {
         "macos-icon-ghost-color": "Needs configurable application icon generation/loading; the app has fixed artwork.",
         "macos-icon-screen-color": "Needs configurable application icon generation/loading; the app has fixed artwork.",
         "macos-shortcuts": "Needs Shortcuts integration and authorization handling.",
-        "middle-click-action": "Needs middle-click event handling and primary-selection clipboard support.",
         "quick-terminal-animation-duration": "Needs a quick-terminal window and activation/focus handling.",
         "quick-terminal-autohide": "Needs a quick-terminal window and activation/focus handling.",
         "quick-terminal-keyboard-interactivity": "Needs a quick-terminal window and activation/focus handling.",

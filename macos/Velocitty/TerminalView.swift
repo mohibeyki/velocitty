@@ -172,7 +172,8 @@ final class TerminalView: NSView, NSTextInputClient {
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard window?.firstResponder === self, let surface else { return false }
         return withKey(event, action: GHOSTTY_ACTION_PRESS) { key in
-            guard velokit_surface_key_is_binding(surface, key, nil) else { return false }
+            var flags = ghostty_binding_flags_e(rawValue: 0)
+            guard velokit_surface_key_is_binding(surface, key, &flags), flags.rawValue & GHOSTTY_BINDING_FLAGS_CONSUMED.rawValue != 0 else { return false }
             return velokit_surface_key(surface, key)
         }
     }
@@ -180,7 +181,9 @@ final class TerminalView: NSView, NSTextInputClient {
     override func keyDown(with event: NSEvent) {
         guard let surface else { return }
         if withKey(event, action: GHOSTTY_ACTION_PRESS, { key in
-            velokit_surface_key_is_binding(surface, key, nil) && velokit_surface_key(surface, key)
+            guard velokit_surface_key_is_binding(surface, key, nil) else { return false }
+            _ = velokit_surface_key(surface, key)
+            return true
         }) { return }
         let translated = velokit_surface_key_translation_mods(surface, Int32(ghosttyMods(event.modifierFlags).rawValue))
         if event.modifierFlags.contains(.option), translated & Int32(GHOSTTY_MODS_ALT.rawValue) == 0 {
@@ -300,18 +303,7 @@ final class TerminalView: NSView, NSTextInputClient {
             _ = withKey(event, action: GHOSTTY_ACTION_PRESS, overrideText: text) { velokit_surface_key(surface, $0) }
             return
         }
-        var keyEvent = ghostty_input_key_s(
-            action: GHOSTTY_ACTION_PRESS,
-            mods: GHOSTTY_MODS_NONE,
-            consumed_mods: GHOSTTY_MODS_NONE,
-            keycode: 0,
-            text: nil,
-            unshifted_codepoint: 0,
-            composing: false)
-        text.withCString { pointer in
-            keyEvent.text = pointer
-            _ = velokit_surface_key(surface, keyEvent)
-        }
+        text.withCString { velokit_surface_text(surface, $0, UInt(text.utf8.count)) }
     }
 
     override func doCommand(by selector: Selector) {

@@ -91,7 +91,11 @@ final class RuntimeContext: NSObject {
             }
 
         case GHOSTTY_ACTION_RELOAD_CONFIG:
-            DispatchQueue.main.async { (NSApp.delegate as? AppDelegate)?.reloadConfiguration(nil) }
+            let soft = action.action.reload_config.soft
+            DispatchQueue.main.async {
+                let delegate = NSApp.delegate as? AppDelegate
+                if soft { delegate?.refreshAppearance() } else { delegate?.reloadConfiguration(nil) }
+            }
 
         case GHOSTTY_ACTION_OPEN_CONFIG:
             DispatchQueue.main.async {
@@ -199,39 +203,22 @@ final class RuntimeContext: NSObject {
         return context.handleAction(target: target, action: action)
     }
 
+    static let clipboardTypes: [(String, NSPasteboard.PasteboardType)] = [("text/plain", .string), ("text/html", .html), ("image/png", .png)]
+    static func pasteboard(_ location: ghostty_clipboard_e) -> NSPasteboard {
+        location == GHOSTTY_CLIPBOARD_STANDARD ? .general : NSPasteboard(name: .init("app.velocitty.selection"))
+    }
     static let readClipboard: ghostty_runtime_read_clipboard_cb = {
-        userdata, location, state, _, _, _ in
-        guard location == GHOSTTY_CLIPBOARD_STANDARD,
-              let view = RuntimeContext.fromSurfaceUserdata(userdata),
-              let surface = view.surface,
-              let string = NSPasteboard.general.string(forType: .string)
-        else {
-            return GHOSTTY_CLIPBOARD_READ_UNAVAILABLE
+        userdata, location, state, requested, requestedCount, wantsAvailable in
+        guard let view = RuntimeContext.fromSurfaceUserdata(userdata), let surface = view.surface else { return GHOSTTY_CLIPBOARD_READ_UNAVAILABLE }
+        let board = RuntimeContext.pasteboard(location)
+        let requestedTypes = (0..<requestedCount).compactMap { requested?[$0].map { String(cString: $0) } }
+        let available = RuntimeContext.clipboardTypes.filter { board.availableType(from: [$0.1]) != nil }
+        let items = available.compactMap { mime, type -> (String, Data)? in
+            guard requestedTypes.isEmpty ? mime == "text/plain" : requestedTypes.contains(mime), let bytes = board.data(forType: type) else { return nil }
+            return (mime, bytes)
         }
-
-        var bytes = Array(string.utf8)
-        if bytes.isEmpty { bytes = [0] }
-        let mime = "text/plain"
-        mime.withCString { mimePtr in
-            bytes.withUnsafeBufferPointer { buffer in
-                let data = UnsafeRawPointer(buffer.baseAddress!).assumingMemoryBound(to: CChar.self)
-                var content = ghostty_clipboard_content_s(
-                    mime: mimePtr,
-                    data: data,
-                    len: string.utf8.count)
-                withUnsafePointer(to: &content) { contentPointer in
-                    var complete = ghostty_clipboard_complete_s(
-                        contents: contentPointer,
-                        contents_len: 1,
-                        available: nil,
-                        available_len: 0,
-                        confirmed: false,
-                        remember: false)
-                    velokit_surface_complete_clipboard_request(surface, &complete, state)
-                }
-            }
-        }
-
+        guard wantsAvailable || !items.isEmpty else { return GHOSTTY_CLIPBOARD_READ_UNAVAILABLE }
+        RuntimeContext.completeClipboard(items, surface: surface, state: state, confirmed: false, available: wantsAvailable ? available.map { $0.0 } : [])
         return GHOSTTY_CLIPBOARD_READ_STARTED
     }
 
@@ -244,6 +231,8 @@ final class RuntimeContext: NSObject {
             guard let item = request.pointee.contents?[index], let mime = item.mime, let data = item.data else { return nil }
             return (String(cString: mime), Data(bytes: data, count: item.len))
         }
+        let available = (0..<request.pointee.available_len).compactMap { request.pointee.available?[$0].map { String(cString: $0) } }
+        let canRemember = request.pointee.can_remember
         let name = request.pointee.name.map { String(cString: $0) } ?? "The terminal"
         DispatchQueue.main.async { [weak view] in
             guard let view, view.surface == surface, let window = view.window else { return }
@@ -252,18 +241,23 @@ final class RuntimeContext: NSObject {
             alert.informativeText = "\(name) requested clipboard content or a paste requiring confirmation.\n\n" + String(String(data: items.first?.1 ?? Data(), encoding: .utf8)?.prefix(500) ?? "")
             alert.addButton(withTitle: "Allow Once")
             alert.addButton(withTitle: "Cancel")
+            alert.showsSuppressionButton = canRemember
+            alert.suppressionButton?.title = "Remember for this terminal"
             alert.beginSheetModal(for: window) { [weak view] response in
                 guard view?.surface == surface else { return }
                 guard response == .alertFirstButtonReturn else {
                     velokit_surface_deny_clipboard_request(surface, state)
                     return
                 }
-                RuntimeContext.completeClipboard(items, surface: surface, state: state, confirmed: true)
+                RuntimeContext.completeClipboard(items, surface: surface, state: state, confirmed: true, available: available, remember: canRemember && alert.suppressionButton?.state == .on)
             }
         }
     }
 
-    static func completeClipboard(_ items: [(String, Data)], surface: ghostty_surface_t, state: UnsafeMutableRawPointer?, confirmed: Bool) {
+    static func completeClipboard(_ items: [(String, Data)], surface: ghostty_surface_t, state: UnsafeMutableRawPointer?, confirmed: Bool, available: [String] = [], remember: Bool = false) {
+        let names = available.map { strdup($0) }
+        defer { names.forEach { free($0) } }
+        let pointers = names.map { UnsafePointer($0) }
         let mime = items.map { strdup($0.0) }
         let bytes = items.map { item -> UnsafeMutablePointer<CChar> in
             let pointer = UnsafeMutablePointer<CChar>.allocate(capacity: max(1, item.1.count))
@@ -272,15 +266,17 @@ final class RuntimeContext: NSObject {
         }
         defer { mime.forEach { free($0) }; bytes.forEach { $0.deallocate() } }
         let contents = items.indices.map { ghostty_clipboard_content_s(mime: UnsafePointer(mime[$0]), data: UnsafePointer(bytes[$0]), len: items[$0].1.count) }
-        contents.withUnsafeBufferPointer {
-            var complete = ghostty_clipboard_complete_s(contents: $0.baseAddress, contents_len: $0.count, available: nil, available_len: 0, confirmed: confirmed, remember: false)
-            velokit_surface_complete_clipboard_request(surface, &complete, state)
+        contents.withUnsafeBufferPointer { contents in
+            pointers.withUnsafeBufferPointer { names in
+                var complete = ghostty_clipboard_complete_s(contents: contents.baseAddress, contents_len: contents.count, available: names.baseAddress, available_len: names.count, confirmed: confirmed, remember: remember)
+                velokit_surface_complete_clipboard_request(surface, &complete, state)
+            }
         }
     }
 
     static let writeClipboard: ghostty_runtime_write_clipboard_cb = {
         userdata, location, content, length, needsConfirmation in
-        guard location == GHOSTTY_CLIPBOARD_STANDARD, let content else { return }
+        guard let content else { return }
         let items = (0..<length).compactMap { index -> (NSPasteboard.PasteboardType, Data)? in
             let item = content[index]
             guard let mime = item.mime, let data = item.data else { return nil }
@@ -297,8 +293,9 @@ final class RuntimeContext: NSObject {
         let view = RuntimeContext.fromSurfaceUserdata(userdata)
         DispatchQueue.main.async { [weak view] in
             let write = {
-                NSPasteboard.general.clearContents()
-                for (type, data) in items { NSPasteboard.general.setData(data, forType: type) }
+                let board = RuntimeContext.pasteboard(location)
+                board.clearContents()
+                for (type, data) in items { board.setData(data, forType: type) }
             }
             guard needsConfirmation else { write(); return }
             guard let window = view?.window else { return }

@@ -49,7 +49,7 @@ final class TerminalRuntime {
 
         var runtimeConfig = ghostty_runtime_config_s(
             userdata: Unmanaged.passUnretained(context).toOpaque(),
-            supports_selection_clipboard: false,
+            supports_selection_clipboard: true,
             wakeup_cb: RuntimeContext.wakeup,
             action_cb: RuntimeContext.action,
             read_clipboard_cb: RuntimeContext.readClipboard,
