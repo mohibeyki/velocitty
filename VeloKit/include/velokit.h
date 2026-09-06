@@ -1098,6 +1098,9 @@ typedef enum {
 //-------------------------------------------------------------------
 // Private application calls
 
+bool velokit_config_trigger(ghostty_config_t, const char*, ghostty_input_trigger_s*);
+bool velokit_config_global_trigger(ghostty_config_t, uintptr_t, ghostty_input_trigger_s*);
+uint32_t velokit_keycode_for_key(ghostty_input_key_e);
 bool velokit_config_get(ghostty_config_t, void*, const char*, uintptr_t);
 void velokit_app_set_color_scheme(ghostty_app_t, int);
 void velokit_app_keyboard_changed(ghostty_app_t);

@@ -12,6 +12,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var appearanceObservation: NSKeyValueObservation?
     var quitTimer: Timer?
     var closing = false
+    var palette: CommandPalette?
+    var shortcuts: GlobalShortcuts?
     var passwordInput = false
     var manualSecureInput = false
     var secureInputEnabled = false
@@ -33,6 +35,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         installMainMenu()
         keyboardObservation = DistributedNotificationCenter.default().addObserver(forName: NSNotification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String), object: nil, queue: .main) { [weak self] _ in
             if let app = self?.runtime?.app { velokit_app_keyboard_changed(app) }
+            self?.shortcuts?.reload()
+            self?.updateMenuShortcuts()
         }
         appearanceObservation = NSApp.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
             DispatchQueue.main.async { self?.reloadConfiguration(nil) }
@@ -60,6 +64,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         self.runtime = runtime
+        shortcuts = GlobalShortcuts(owner: self)
+        shortcuts?.reload()
+        updateMenuShortcuts()
         if native.value("initial-window", true) { openWindow() }
         if native.string("macos-hidden") == "always" { NSApp.hide(nil) }
     }
@@ -256,6 +263,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         previous.keyEquivalentModifierMask = [.command, .shift]
         previous.target = self
 
+        let commands = editMenu.addItem(withTitle: "Command Palette…", action: #selector(showCommands), keyEquivalent: "p")
+        commands.keyEquivalentModifierMask = [.command, .shift]
+        commands.target = self
         let windowMenu = NSMenu(title: "Window")
         let windowMenuItem = NSMenuItem()
         windowMenuItem.submenu = windowMenu
@@ -271,6 +281,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.mainMenu = mainMenu
     }
 
+    @objc func showCommands() {
+        if palette?.isVisible == true { palette?.close(); return }
+        guard let terminal = runtime?.view else { return }
+        let palette = CommandPalette(terminal: terminal)
+        self.palette = palette
+        palette.center()
+        palette.makeKeyAndOrderFront(nil)
+        palette.makeFirstResponder(palette.query)
+    }
+
     @objc func findTerminal() { runtime?.view?.performSurfaceAction("start_search") }
     @objc func findNext() { runtime?.view?.performSurfaceAction("navigate_search:next") }
     @objc func findPrevious() { runtime?.view?.performSurfaceAction("navigate_search:previous") }
@@ -284,12 +304,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return alert
     }
 
-    @objc private func reloadConfiguration(_ sender: Any?) {
+    @objc func reloadConfiguration(_ sender: Any?) {
         guard let runtime else { return }
         do {
             try runtime.updateConfiguration(AppConfiguration.load())
             applyWindowSettings()
             updateSecureInput()
+            shortcuts?.reload()
+        updateMenuShortcuts()
         } catch {
             configurationAlert(error).runModal()
         }
@@ -426,4 +448,121 @@ extension AppDelegate {
     }
     func windowDidBecomeKey(_ notification: Notification) { updateSecureInput() }
     func windowDidResignKey(_ notification: Notification) { updateSecureInput(forceOff: true) }
+}
+
+final class GlobalShortcuts {
+    var handler: EventHandlerRef?
+    var registrations: [EventHotKeyRef] = []
+    var events: [UInt32: ghostty_input_key_s] = [:]
+    weak var owner: AppDelegate?
+
+    init(owner: AppDelegate) {
+        self.owner = owner
+        var type = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        InstallEventHandler(GetApplicationEventTarget(), { _, event, data in
+            guard let event, let data else { return OSStatus(eventNotHandledErr) }
+            let shortcuts = Unmanaged<GlobalShortcuts>.fromOpaque(data).takeUnretainedValue()
+            var id = EventHotKeyID()
+            guard GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &id) == noErr,
+                  let key = shortcuts.events[id.id], let app = shortcuts.owner?.runtime?.app else { return OSStatus(eventNotHandledErr) }
+            return velokit_app_key(app, key) ? noErr : OSStatus(eventNotHandledErr)
+        }, 1, &type, Unmanaged.passUnretained(self).toOpaque(), &handler)
+    }
+
+    func reload() {
+        registrations.forEach { UnregisterEventHotKey($0) }
+        registrations.removeAll(); events.removeAll()
+        guard let config = owner?.runtime?.config else { return }
+        var index: UInt = 0
+        var trigger = ghostty_input_trigger_s()
+        while velokit_config_global_trigger(config, index, &trigger) {
+            defer { index += 1 }
+            var code = UInt32.max
+            if trigger.tag == GHOSTTY_TRIGGER_PHYSICAL { code = velokit_keycode_for_key(trigger.key.physical) }
+            else if trigger.tag == GHOSTTY_TRIGGER_UNICODE { code = Self.keycode(for: trigger.key.unicode) ?? UInt32.max }
+            guard code < 128 else { NSLog("Global shortcut %lu cannot be represented by this keyboard layout", index); continue }
+            let raw = trigger.mods.rawValue
+            var mods: UInt32 = 0
+            if raw & GHOSTTY_MODS_SHIFT.rawValue != 0 { mods |= UInt32(shiftKey) }
+            if raw & GHOSTTY_MODS_CTRL.rawValue != 0 { mods |= UInt32(controlKey) }
+            if raw & GHOSTTY_MODS_ALT.rawValue != 0 { mods |= UInt32(optionKey) }
+            if raw & GHOSTTY_MODS_SUPER.rawValue != 0 { mods |= UInt32(cmdKey) }
+            let id = UInt32(index + 1)
+            var reference: EventHotKeyRef?
+            let status = RegisterEventHotKey(code, mods, EventHotKeyID(signature: 0x56454C4F, id: id), GetApplicationEventTarget(), 0, &reference)
+            guard status == noErr, let reference else { NSLog("Global shortcut %u could not be registered (%d)", id, status); continue }
+            registrations.append(reference)
+            var event = ghostty_input_key_s()
+            event.action = GHOSTTY_ACTION_PRESS
+            event.keycode = code
+            event.mods = trigger.mods
+            event.unshifted_codepoint = trigger.tag == GHOSTTY_TRIGGER_UNICODE ? trigger.key.unicode : 0
+            events[id] = event
+        }
+    }
+
+    static func character(for code: UInt32) -> String? {
+        guard code < 128, let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
+              let pointer = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else { return nil }
+        let data = Unmanaged<CFData>.fromOpaque(pointer).takeUnretainedValue()
+        let layout = UnsafeRawPointer(CFDataGetBytePtr(data)).assumingMemoryBound(to: UCKeyboardLayout.self)
+        var dead: UInt32 = 0
+        var length = 0
+        var chars = [UniChar](repeating: 0, count: 4)
+        guard UCKeyTranslate(layout, UInt16(code), UInt16(kUCKeyActionDown), 0, UInt32(LMGetKbdType()), OptionBits(kUCKeyTranslateNoDeadKeysBit), &dead, 4, &length, &chars) == noErr, length > 0 else { return nil }
+        return String(utf16CodeUnits: chars, count: length)
+    }
+
+    static func keycode(for scalar: UInt32) -> UInt32? {
+        guard let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
+              let pointer = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else { return nil }
+        let data = Unmanaged<CFData>.fromOpaque(pointer).takeUnretainedValue()
+        let layout = UnsafeRawPointer(CFDataGetBytePtr(data)).assumingMemoryBound(to: UCKeyboardLayout.self)
+        for key in UInt16(0)..<128 {
+            var dead: UInt32 = 0
+            var length = 0
+            var chars = [UniChar](repeating: 0, count: 4)
+            if UCKeyTranslate(layout, key, UInt16(kUCKeyActionDown), 0, UInt32(LMGetKbdType()), OptionBits(kUCKeyTranslateNoDeadKeysBit), &dead, 4, &length, &chars) == noErr,
+               length == 1, UInt32(chars[0]) == scalar { return UInt32(key) }
+        }
+        return nil
+    }
+    deinit {
+        registrations.forEach { UnregisterEventHotKey($0) }
+        if let handler { RemoveEventHandler(handler) }
+    }
+}
+
+extension AppDelegate {
+    func updateMenuShortcuts() {
+        guard let config = runtime?.config else { return }
+        let actions = ["Copy": "copy_to_clipboard", "Paste": "paste_from_clipboard", "Select All": "select_all",
+                       "Find…": "start_search", "Find Next": "navigate_search:next", "Find Previous": "navigate_search:previous",
+                       "Command Palette…": "toggle_command_palette", "Reload Configuration": "reload_config",
+                       "Close Window": "close_surface", "Quit Velocitty": "quit"]
+        func update(_ menu: NSMenu) {
+            for item in menu.items {
+                if let submenu = item.submenu { update(submenu) }
+                guard let action = actions[item.title] else { continue }
+                item.keyEquivalent = ""
+                var trigger = ghostty_input_trigger_s()
+                guard action.withCString({ velokit_config_trigger(config, $0, &trigger) }) else { continue }
+                if trigger.tag == GHOSTTY_TRIGGER_UNICODE, let scalar = UnicodeScalar(trigger.key.unicode) {
+                    item.keyEquivalent = String(scalar)
+                } else if trigger.tag == GHOSTTY_TRIGGER_PHYSICAL {
+                    let code = velokit_keycode_for_key(trigger.key.physical)
+                    // Menu equivalents use the active keyboard layout, not US-only key labels.
+                    item.keyEquivalent = GlobalShortcuts.character(for: code) ?? ""
+                }
+                var flags: NSEvent.ModifierFlags = []
+                let raw = trigger.mods.rawValue
+                if raw & GHOSTTY_MODS_SHIFT.rawValue != 0 { flags.insert(.shift) }
+                if raw & GHOSTTY_MODS_CTRL.rawValue != 0 { flags.insert(.control) }
+                if raw & GHOSTTY_MODS_ALT.rawValue != 0 { flags.insert(.option) }
+                if raw & GHOSTTY_MODS_SUPER.rawValue != 0 { flags.insert(.command) }
+                item.keyEquivalentModifierMask = flags
+            }
+        }
+        if let menu = NSApp.mainMenu { update(menu) }
+    }
 }

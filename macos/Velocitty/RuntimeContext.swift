@@ -46,6 +46,43 @@ final class RuntimeContext: NSObject {
                 view?.window?.title = title
             }
 
+        case GHOSTTY_ACTION_TOGGLE_COMMAND_PALETTE:
+            DispatchQueue.main.async { (NSApp.delegate as? AppDelegate)?.showCommands() }
+
+        case GHOSTTY_ACTION_NEW_WINDOW, GHOSTTY_ACTION_PRESENT_TERMINAL:
+            DispatchQueue.main.async { (NSApp.delegate as? AppDelegate)?.openWindow() }
+
+        case GHOSTTY_ACTION_TOGGLE_MAXIMIZE:
+            DispatchQueue.main.async { view?.window?.zoom(nil) }
+
+        case GHOSTTY_ACTION_TOGGLE_FULLSCREEN:
+            DispatchQueue.main.async { view?.window?.toggleFullScreen(nil) }
+
+        case GHOSTTY_ACTION_TOGGLE_WINDOW_DECORATIONS:
+            DispatchQueue.main.async {
+                guard let window = view?.window else { return }
+                if window.styleMask.contains(.titled) { window.styleMask.remove(.titled) }
+                else { window.styleMask.insert(.titled) }
+            }
+
+        case GHOSTTY_ACTION_TOGGLE_VISIBILITY:
+            DispatchQueue.main.async {
+                if NSApp.isHidden || !NSApp.isActive { NSApp.unhide(nil); (NSApp.delegate as? AppDelegate)?.openWindow(); NSApp.activate(ignoringOtherApps: true) }
+                else { NSApp.hide(nil) }
+            }
+
+        case GHOSTTY_ACTION_RELOAD_CONFIG:
+            DispatchQueue.main.async { (NSApp.delegate as? AppDelegate)?.reloadConfiguration(nil) }
+
+        case GHOSTTY_ACTION_OPEN_CONFIG:
+            DispatchQueue.main.async {
+                if let source = (NSApp.delegate as? AppDelegate)?.runtime?.settings.source { NSWorkspace.shared.open(source) }
+            }
+
+        case GHOSTTY_ACTION_FLOAT_WINDOW:
+            let level = action.action.float_window
+            DispatchQueue.main.async { view?.window?.level = level == GHOSTTY_FLOAT_WINDOW_ON ? .floating : .normal }
+
         case GHOSTTY_ACTION_SECURE_INPUT:
             let mode = action.action.secure_input
             DispatchQueue.main.async { (NSApp.delegate as? AppDelegate)?.secureInput(mode) }

@@ -4,6 +4,7 @@
 // Unsupported options are explicit errors, never silently accepted no-ops.
 public enum TerminalSettings {
     public static let supported: Set<String> = [
+        "command-palette-entry",
         "macos-secure-input-indication",
         "macos-auto-secure-input",
         "bell-audio-path",
@@ -156,6 +157,7 @@ public enum TerminalSettings {
     ]
 
     public static let repeatable: Set<String> = [
+        "command-palette-entry",
         "config-file",
         "clipboard-codepoint-map",
         "custom-shader",
@@ -183,7 +185,6 @@ public enum TerminalSettings {
         "auto-update": "Needs an application updater.",
         "auto-update-channel": "Needs an application updater.",
         "class": "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
-        "command-palette-entry": "Needs a command palette UI.",
         "config-default-files": "Uses the upstream configuration-file format and search policy; Velocitty loads its own TOML file.",
         "drag-handle": "Needs configurable AppKit window creation, appearance, or state handling.",
         "focus-follows-mouse": "Needs pane layout, focus, and split rendering in the app.",

@@ -83,3 +83,38 @@ export fn velokit_config_get(self: *Config, ptr: *anyopaque, key_str: [*]const u
     const key = std.meta.stringToEnum(Key, key_str[0..len]) orelse return false;
     return @import("c_get.zig").get(self, key, ptr);
 }
+
+// Enumerate final global triggers, after remaps, clears, and overrides.
+export fn velokit_config_global_trigger(self: *Config, index: usize, output: *@import("../input/Binding.zig").Trigger.C) bool {
+    var count: usize = 0;
+    var iterator = self.keybind.set.bindings.iterator();
+    while (iterator.next()) |entry| {
+        const flags = switch (entry.value_ptr.*) {
+            .leaf => |leaf| leaf.flags,
+            .leaf_chained => |leaf| leaf.flags,
+            .leader => continue,
+        };
+        if (!flags.global) continue;
+        if (count == index) {
+            output.* = entry.key_ptr.cval();
+            return true;
+        }
+        count += 1;
+    }
+    return false;
+}
+
+export fn velokit_keycode_for_key(key: @import("../input/key.zig").Key) u32 {
+    for (@import("../input/keycodes.zig").entries) |entry| {
+        if (entry.key == key) return entry.native;
+    }
+    return std.math.maxInt(u32);
+}
+
+export fn velokit_config_trigger(self: *Config, action_z: [*:0]const u8, output: *@import("../input/Binding.zig").Trigger.C) bool {
+    const Action = @import("../input/Binding.zig").Action;
+    const action = Action.parse(std.mem.span(action_z)) catch return false;
+    const trigger = self.keybind.set.reverse.get(action) orelse return false;
+    output.* = trigger.cval();
+    return true;
+}
