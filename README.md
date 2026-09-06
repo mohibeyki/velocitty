@@ -174,6 +174,12 @@ and `working_directory`) apply on the next launch and never restart the current
 shell. Font codepoint mappings and horizontal/vertical padding also require a new
 terminal. Reload does not promise that every setting takes effect immediately.
 
+Use `config_file = ["appearance.toml", "keys.toml"]` under `[terminal]` to include
+other TOML files. Includes load in array order, then the containing file overrides
+them by setting name (including whole arrays). Paths are relative to the containing
+file; `~/` is supported. Prefix an include with `?` to make a missing file optional.
+Cycles are errors. Asset paths stay relative to the file that declares them.
+
 ### Available terminal settings
 
 The following list covers the configuration declarations in the vendored engine,
@@ -209,6 +215,7 @@ to the native parsers. Existing renderer/input behavior is retained.
 | `clipboard_write` | Scalar |
 | `clipboard_write_limit_bytes` | Scalar |
 | `command` | Scalar |
+| `config_file` | Array or scalar |
 | `cursor_color` | Scalar |
 | `cursor_opacity` | Scalar |
 | `cursor_style` | Scalar |
@@ -314,7 +321,7 @@ are still listed individually for review.
 | `clipboard_read` | Needs clipboard authorization prompts; the current confirmation callback denies requests requiring confirmation. |
 | `command_palette_entry` | Needs a command palette UI. |
 | `config_default_files` | Uses the upstream configuration-file format and search policy; Velocitty loads its own TOML file. |
-| `config_file` | Uses the upstream configuration-file format and search policy; Velocitty loads its own TOML file. |
+
 | `confirm_close_surface` | Needs process-aware close confirmation; closing currently terminates the terminal directly. |
 | `copy_on_select` | Needs mouse event forwarding and cursor/selection integration in TerminalView. |
 | `cursor_click_to_move` | Needs mouse event forwarding and cursor/selection integration in TerminalView. |

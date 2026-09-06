@@ -20,6 +20,24 @@ final class AppConfigurationTests: XCTestCase {
         XCTAssertEqual(try AppConfiguration.parse(Data(), home: home, source: source), defaults)
     }
 
+    func testIncludesPrecedenceAndCycles() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let parent = root.appendingPathComponent("config.toml")
+        let child = root.appendingPathComponent("colors.toml")
+        try Data("[terminal]\nfont_size = 18\nforeground = '#ffffff'".utf8).write(to: child)
+        try Data("[terminal]\nconfig_file = ['colors.toml', '?absent.toml']\nfont_size = 14".utf8).write(to: parent)
+        let config = try AppConfiguration.load(from: parent)
+        XCTAssertEqual(config.options.first { $0.key == "font-size" }?.value, "14")
+        XCTAssertEqual(config.options.first { $0.key == "foreground" }?.source, child)
+        XCTAssertFalse(config.options.contains { $0.key == "config-file" })
+        try Data("[terminal]\nconfig_file = 'config.toml'".utf8).write(to: child)
+        XCTAssertThrowsError(try AppConfiguration.load(from: parent)) { XCTAssertTrue($0.localizedDescription.contains("cycle")) }
+        try Data("[terminal]\nconfig_file = 'absent.toml'".utf8).write(to: parent)
+        XCTAssertThrowsError(try AppConfiguration.load(from: parent))
+    }
+
     func testConfigLocation() {
         let home = URL(fileURLWithPath: "/example")
         XCTAssertEqual(AppConfiguration.fileURL(environment: [:], home: home).path, "/example/.config/velocitty/config.toml")

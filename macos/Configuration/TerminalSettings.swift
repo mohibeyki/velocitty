@@ -4,6 +4,7 @@
 // Unsupported options are explicit errors, never silently accepted no-ops.
 public enum TerminalSettings {
     public static let supported: Set<String> = [
+        "config-file",
         "abnormal-command-exit-runtime",
         "adjust-box-thickness",
         "adjust-cell-height",
@@ -94,6 +95,7 @@ public enum TerminalSettings {
     ]
 
     public static let repeatable: Set<String> = [
+        "config-file",
         "clipboard-codepoint-map",
         "custom-shader",
         "env",
@@ -131,7 +133,6 @@ public enum TerminalSettings {
         "clipboard-read": "Needs clipboard authorization prompts; the current confirmation callback denies requests requiring confirmation.",
         "command-palette-entry": "Needs a command palette UI.",
         "config-default-files": "Uses the upstream configuration-file format and search policy; Velocitty loads its own TOML file.",
-        "config-file": "Uses the upstream configuration-file format and search policy; Velocitty loads its own TOML file.",
         "confirm-close-surface": "Needs process-aware close confirmation; closing currently terminates the terminal directly.",
         "copy-on-select": "Needs mouse event forwarding and cursor/selection integration in TerminalView.",
         "cursor-click-to-move": "Needs mouse event forwarding and cursor/selection integration in TerminalView.",

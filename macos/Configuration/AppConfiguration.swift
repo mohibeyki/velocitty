@@ -6,6 +6,7 @@ import TOMLDecoder
 public struct TerminalOption: Equatable, Sendable {
     public let key: String
     public let value: String
+    public var source: URL? = nil
 }
 
 public struct AppConfiguration: Equatable, Sendable {
@@ -39,15 +40,43 @@ public struct AppConfiguration: Equatable, Sendable {
         from url: URL = fileURL(),
         home: URL = FileManager.default.homeDirectoryForCurrentUser
     ) throws -> Self {
-        let data: Data
-        do {
-            data = try Data(contentsOf: url)
-        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
-            return defaults(home: home, source: url)
-        } catch {
-            throw ConfigurationError("\(url.path): \(error.localizedDescription)")
+        try loadFile(url, home: home, stack: [], optional: true)
+    }
+
+    private static func loadFile(_ url: URL, home: URL, stack: [URL], optional: Bool) throws -> Self {
+        let canonical = url.standardizedFileURL.resolvingSymlinksInPath()
+        guard !stack.contains(canonical), stack.count < 64 else {
+            throw ConfigurationError("Configuration include cycle or excessive depth: \((stack + [canonical]).map(\.path).joined(separator: " → "))")
         }
-        return try parse(data, home: home, source: url)
+        let data: Data
+        do { data = try Data(contentsOf: url) }
+        catch let error as CocoaError where error.code == .fileReadNoSuchFile && optional {
+            return defaults(home: home, source: url)
+        } catch { throw ConfigurationError("\(url.path): \(error.localizedDescription)") }
+        let own = try parse(data, home: home, source: url)
+        var merged: [TerminalOption] = []
+        for option in own.options where option.key == "config-file" && !option.value.isEmpty {
+            let isOptional = option.value.hasPrefix("?")
+            let path = isOptional ? String(option.value.dropFirst()) : option.value
+            let child = assetURL(path, relativeTo: url, home: home)
+            let included = try loadFile(child, home: home, stack: stack + [canonical], optional: isOptional)
+            let keys = Set(included.options.map(\.key))
+            merged.removeAll { keys.contains($0.key) }
+            merged += included.options
+        }
+        let ownValues = own.options.filter { $0.key != "config-file" }
+        let keys = Set(ownValues.map(\.key))
+        merged.removeAll { keys.contains($0.key) }
+        merged += ownValues
+        let directory = merged.last { $0.key == "working-directory" }.map { URL(fileURLWithPath: $0.value, isDirectory: true) }
+            ?? defaults(home: home).workingDirectory
+        return Self(workingDirectory: directory, options: merged, source: url)
+    }
+
+    static func assetURL(_ path: String, relativeTo source: URL, home: URL) -> URL {
+        if path.hasPrefix("~/") { return home.appendingPathComponent(String(path.dropFirst(2))) }
+        if path.hasPrefix("/") { return URL(fileURLWithPath: path) }
+        return source.deletingLastPathComponent().appendingPathComponent(path).standardizedFileURL
     }
 
     public static func parse(
@@ -90,9 +119,17 @@ public struct AppConfiguration: Equatable, Sendable {
                     }
                     if key == "working-directory" {
                         directory = try resolveDirectory(text, home: home)
-                        options.append(TerminalOption(key: key, value: directory.path))
+                        options.append(TerminalOption(key: key, value: directory.path, source: source))
                     } else {
-                        options.append(TerminalOption(key: key, value: text))
+                        var resolved = text
+                        if ["background-image", "custom-shader", "bell-audio-path"].contains(key), !text.isEmpty {
+                            let optional = text.hasPrefix("?")
+                            resolved = (optional ? "?" : "") + Self.assetURL(optional ? String(text.dropFirst()) : text, relativeTo: source, home: home).path
+                        }
+                        if key == "input", text.hasPrefix("path:") {
+                            resolved = "path:" + Self.assetURL(String(text.dropFirst(5)), relativeTo: source, home: home).path
+                        }
+                        options.append(TerminalOption(key: key, value: resolved, source: source))
                     }
                 }
             }
