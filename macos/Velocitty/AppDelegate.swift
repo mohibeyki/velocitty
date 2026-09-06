@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0
 import AppKit
 import Carbon
+import UserNotifications
 import Foundation
 import VeloKit
 import VelocittyConfiguration
@@ -11,6 +12,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var appearanceObservation: NSKeyValueObservation?
     var quitTimer: Timer?
     var closing = false
+    var bellSound: NSSound?
+    var bellTitle: String?
+    var progressTimer: Timer?
     var chrome: TerminalChrome?
     var native: NativeSettings { NativeSettings(config: runtime?.config) }
     var keyboardObservation: NSObjectProtocol?
@@ -98,7 +102,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(terminalView)
         if native.value("maximize", false) { window.zoom(nil) }
-        if native.value("fullscreen", false) || (shouldSaveState && UserDefaults.standard.bool(forKey: "TerminalFullscreen")) {
+        if native.string("fullscreen", "false") != "false" || (shouldSaveState && UserDefaults.standard.bool(forKey: "TerminalFullscreen")) {
             window.toggleFullScreen(nil)
         }
         NSApp.activate(ignoringOtherApps: true)
@@ -160,6 +164,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             window?.saveFrame(usingName: "TerminalWindow")
             UserDefaults.standard.set(window?.styleMask.contains(.fullScreen) == true, forKey: "TerminalFullscreen")
         }
+        clearProgress()
         runtime?.closeView()
         window = nil
         chrome = nil
@@ -292,6 +297,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
+        if let bellTitle { window?.title = bellTitle; self.bellTitle = nil }
         if let app = runtime?.app {
             velokit_app_set_focus(app, true)
         }
@@ -306,3 +312,89 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 }
 
+
+
+extension AppDelegate {
+    func ringBell() {
+        let features = native.value("bell-features", UInt32(12))
+        if features & 1 != 0 { NSSound.beep() }
+        if features & 2 != 0 {
+            let pathValue = native.value("bell-audio-path", ghostty_config_path_s(path: nil, optional: false))
+            let path = pathValue.path.map { String(cString: $0) } ?? ""
+            bellSound = path.isEmpty ? NSSound(named: "Glass") : NSSound(contentsOfFile: path, byReference: true)
+            bellSound?.volume = Float(native.value("bell-audio-volume", 0.5))
+            bellSound?.play()
+        }
+        if !NSApp.isActive {
+            if features & 4 != 0 { NSApp.requestUserAttention(.informationalRequest) }
+            if features & 8 != 0, bellTitle == nil { bellTitle = window?.title; window?.title = "● " + (window?.title ?? "Velocitty") }
+        }
+        if features & 16 != 0, let chrome {
+            chrome.wantsLayer = true
+            chrome.layer?.borderColor = NSColor.controlAccentColor.cgColor
+            chrome.layer?.borderWidth = 2
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak chrome] in chrome?.layer?.borderWidth = 0 }
+        }
+    }
+
+    func notify(title: String, body: String) {
+        guard native.value("desktop-notifications", true) else { return }
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { settings in
+            let deliver = {
+                let content = UNMutableNotificationContent()
+                content.title = title
+                content.body = body
+                center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)) { error in
+                    if let error { NSLog("Notification failed: %@", error.localizedDescription) }
+                }
+            }
+            switch settings.authorizationStatus {
+            case .authorized, .provisional: deliver()
+            case .notDetermined:
+                center.requestAuthorization(options: [.alert, .sound]) { allowed, _ in if allowed { deliver() } }
+            default: break
+            }
+        }
+    }
+
+    func commandFinished(_ value: ghostty_action_command_finished_s) {
+        let policy = native.string("notify-on-command-finish", "never")
+        guard policy != "never", policy == "always" || !NSApp.isActive,
+              Double(value.duration) / 1_000_000_000 >= native.seconds("notify-on-command-finish-after", 5) else { return }
+        let actions = native.value("notify-on-command-finish-action", UInt32(1))
+        if actions & 1 != 0 { ringBell() }
+        if actions & 2 != 0 {
+            notify(title: "Command finished", body: value.exit_code < 0 ? "The command has finished." : "The command exited with status \(value.exit_code).")
+        }
+    }
+
+    func clearProgress() {
+        progressTimer?.invalidate()
+        progressTimer = nil
+        NSApp.dockTile.contentView = nil
+        NSApp.dockTile.badgeLabel = nil
+        NSApp.dockTile.display()
+    }
+
+    func showProgress(_ report: ghostty_action_progress_report_s) {
+        guard native.value("progress-style", true), report.state != GHOSTTY_PROGRESS_STATE_REMOVE else { clearProgress(); return }
+        let tile = NSApp.dockTile
+        let container = NSView(frame: NSRect(origin: .zero, size: tile.size))
+        let icon = NSImageView(frame: container.bounds)
+        icon.image = NSApp.applicationIconImage
+        container.addSubview(icon)
+        let progress = NSProgressIndicator(frame: NSRect(x: 10, y: 7, width: max(20, tile.size.width - 20), height: 12))
+        progress.style = .bar
+        progress.isIndeterminate = report.state == GHOSTTY_PROGRESS_STATE_INDETERMINATE
+        progress.minValue = 0; progress.maxValue = 100
+        progress.doubleValue = Double(max(0, report.progress))
+        container.addSubview(progress)
+        if progress.isIndeterminate { progress.startAnimation(nil) }
+        tile.contentView = container
+        tile.badgeLabel = report.state == GHOSTTY_PROGRESS_STATE_ERROR ? "!" : report.state == GHOSTTY_PROGRESS_STATE_PAUSE ? "Ⅱ" : nil
+        tile.display()
+        progressTimer?.invalidate()
+        progressTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: false) { [weak self] _ in self?.clearProgress() }
+    }
+}

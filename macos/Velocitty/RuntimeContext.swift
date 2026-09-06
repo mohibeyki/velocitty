@@ -46,6 +46,23 @@ final class RuntimeContext: NSObject {
                 view?.window?.title = title
             }
 
+        case GHOSTTY_ACTION_RING_BELL:
+            DispatchQueue.main.async { (NSApp.delegate as? AppDelegate)?.ringBell() }
+
+        case GHOSTTY_ACTION_DESKTOP_NOTIFICATION:
+            let notification = action.action.desktop_notification
+            let title = notification.title.map { String(cString: $0) } ?? "Velocitty"
+            let body = notification.body.map { String(cString: $0) } ?? ""
+            DispatchQueue.main.async { (NSApp.delegate as? AppDelegate)?.notify(title: title, body: body) }
+
+        case GHOSTTY_ACTION_COMMAND_FINISHED:
+            let value = action.action.command_finished
+            DispatchQueue.main.async { (NSApp.delegate as? AppDelegate)?.commandFinished(value) }
+
+        case GHOSTTY_ACTION_PROGRESS_REPORT:
+            let value = action.action.progress_report
+            DispatchQueue.main.async { (NSApp.delegate as? AppDelegate)?.showProgress(value) }
+
         case GHOSTTY_ACTION_START_SEARCH:
             let needle = action.action.start_search.needle.map { String(cString: $0) }
             DispatchQueue.main.async { (NSApp.delegate as? AppDelegate)?.chrome?.startSearch(needle) }

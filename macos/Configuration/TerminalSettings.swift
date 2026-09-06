@@ -4,6 +4,15 @@
 // Unsupported options are explicit errors, never silently accepted no-ops.
 public enum TerminalSettings {
     public static let supported: Set<String> = [
+        "bell-audio-path",
+        "bell-audio-volume",
+        "bell-features",
+        "desktop-notifications",
+        "notify-on-command-finish",
+        "notify-on-command-finish-action",
+        "notify-on-command-finish-after",
+        "progress-style",
+
         "scrollbar",
         "search-background",
         "search-foreground",
@@ -167,17 +176,13 @@ public enum TerminalSettings {
 
     public static let unavailable: [String: String] = [
         "link": "Custom link patterns are not implemented by the vendored engine; URL and OSC 8 links are supported.",
-        "app-notifications": "Needs AppKit/UserNotifications notification callbacks.",
+        "app-notifications": "This engine option applies only to GTK.",
         "async-backend": "Selects the process-wide I/O backend before TOML is loaded; needs startup restructuring.",
         "auto-update": "Needs an application updater.",
         "auto-update-channel": "Needs an application updater.",
-        "bell-audio-path": "Needs bell callbacks, audio playback, and app attention handling.",
-        "bell-audio-volume": "Needs bell callbacks, audio playback, and app attention handling.",
-        "bell-features": "Needs bell callbacks, audio playback, and app attention handling.",
         "class": "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
         "command-palette-entry": "Needs a command palette UI.",
         "config-default-files": "Uses the upstream configuration-file format and search policy; Velocitty loads its own TOML file.",
-        "desktop-notifications": "Needs AppKit/UserNotifications notification callbacks.",
         "drag-handle": "Needs configurable AppKit window creation, appearance, or state handling.",
         "focus-follows-mouse": "Needs pane layout, focus, and split rendering in the app.",
         "freetype-load-flags": "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
@@ -211,10 +216,6 @@ public enum TerminalSettings {
         "macos-shortcuts": "Needs Shortcuts integration and authorization handling.",
         "macos-titlebar-proxy-icon": "Needs the corresponding AppKit window, Dock, or launch behavior.",
         "middle-click-action": "Needs middle-click event handling and primary-selection clipboard support.",
-        "notify-on-command-finish": "Needs command-completion callbacks and notification/attention handling.",
-        "notify-on-command-finish-action": "Needs command-completion callbacks and notification/attention handling.",
-        "notify-on-command-finish-after": "Needs command-completion callbacks and notification/attention handling.",
-        "progress-style": "Needs progress-report callbacks and a progress indicator.",
         "quick-terminal-animation-duration": "Needs a quick-terminal window and activation/focus handling.",
         "quick-terminal-autohide": "Needs a quick-terminal window and activation/focus handling.",
         "quick-terminal-keyboard-interactivity": "Needs a quick-terminal window and activation/focus handling.",

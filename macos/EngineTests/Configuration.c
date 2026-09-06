@@ -69,6 +69,18 @@ int main(int argc, char **argv) {
     assert(velokit_config_error(config));
     velokit_config_free(config);
     accepts("font-size", "13");
+    config = velokit_config_new();
+    assert(velokit_config_finalize(config, "/tmp"));
+    const char *mode = NULL;
+    bool initial = false;
+    double opacity = 0;
+    uint32_t width = 1;
+    assert(velokit_config_get(config, &mode, "fullscreen", strlen("fullscreen")));
+    assert(strcmp(mode, "false") == 0);
+    assert(velokit_config_get(config, &initial, "initial-window", strlen("initial-window")) && initial);
+    assert(velokit_config_get(config, &opacity, "background-opacity", strlen("background-opacity")) && opacity == 1);
+    assert(velokit_config_get(config, &width, "window-width", strlen("window-width")) && width == 0);
+    velokit_config_free(config);
     puts("Engine configuration tests passed.");
     return 0;
 }
