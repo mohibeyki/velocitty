@@ -2,8 +2,14 @@
 // Exercises the real Swift/Zig ABI against the built static engine.
 #include "velokit.h"
 #include <assert.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+
+_Static_assert(sizeof(ghostty_input_trigger_s) == 12, "trigger ABI size");
+_Static_assert(offsetof(ghostty_input_trigger_s, key) == 4, "trigger key offset");
+_Static_assert(offsetof(ghostty_input_trigger_s, mods) == 8, "trigger modifiers offset");
+_Static_assert(sizeof(((ghostty_input_trigger_s *)0)->mods) == 4, "C modifier width");
 
 static void accepts(const char *key, const char *value) {
     ghostty_config_t config = velokit_config_new();
@@ -92,16 +98,20 @@ int main(int argc, char **argv) {
     velokit_config_free(config);
     config = velokit_config_new();
     assert(velokit_config_finalize(config, "/tmp"));
-    ghostty_input_trigger_s trigger = {0};
+    ghostty_input_trigger_s trigger;
+    memset(&trigger, 0xA5, sizeof(trigger));
     assert(velokit_config_trigger(config, "copy_to_clipboard", &trigger));
     assert(trigger.tag == GHOSTTY_TRIGGER_UNICODE && trigger.key.unicode == 'c');
+    assert(trigger.mods == GHOSTTY_MODS_SUPER);
     assert(velokit_config_trigger(config, "start_search", &trigger));
     assert(trigger.tag == GHOSTTY_TRIGGER_UNICODE && trigger.key.unicode == 'f');
     assert(velokit_config_set(config, "keybind", "super+f=unbind"));
     assert(!velokit_config_trigger(config, "start_search", &trigger));
     assert(velokit_config_set(config, "keybind", "global:super+shift+k=toggle_visibility"));
+    memset(&trigger, 0xA5, sizeof(trigger));
     assert(velokit_config_global_trigger(config, 0, &trigger));
     assert(trigger.tag == GHOSTTY_TRIGGER_UNICODE && trigger.key.unicode == 'k');
+    assert(trigger.mods == (GHOSTTY_MODS_SUPER | GHOSTTY_MODS_SHIFT));
     assert(!velokit_config_global_trigger(config, 1, &trigger));
     velokit_config_free(config);
     puts("Engine configuration tests passed.");

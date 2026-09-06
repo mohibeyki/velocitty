@@ -84,8 +84,27 @@ export fn velokit_config_get(self: *Config, ptr: *anyopaque, key_str: [*]const u
     return @import("c_get.zig").get(self, key, ptr);
 }
 
+// Our header uses a 32-bit C modifier enum; the engine's packed Mods is 16-bit.
+const CTrigger = extern struct {
+    tag: @import("../input/Binding.zig").Trigger.C.Tag,
+    key: @import("../input/Binding.zig").Trigger.C.Key,
+    mods: u32,
+
+    fn init(trigger: @import("../input/Binding.zig").Trigger) CTrigger {
+        return .{
+            .tag = trigger.key,
+            .key = switch (trigger.key) {
+                .physical => |key| .{ .physical = key },
+                .unicode => |codepoint| .{ .unicode = @intCast(codepoint) },
+                .catch_all => .{ .unicode = 0 },
+            },
+            .mods = @as(u16, @bitCast(trigger.mods)),
+        };
+    }
+};
+
 // Enumerate final global triggers, after remaps, clears, and overrides.
-export fn velokit_config_global_trigger(self: *Config, index: usize, output: *@import("../input/Binding.zig").Trigger.C) bool {
+export fn velokit_config_global_trigger(self: *Config, index: usize, output: *CTrigger) bool {
     var count: usize = 0;
     var iterator = self.keybind.set.bindings.iterator();
     while (iterator.next()) |entry| {
@@ -96,7 +115,7 @@ export fn velokit_config_global_trigger(self: *Config, index: usize, output: *@i
         };
         if (!flags.global) continue;
         if (count == index) {
-            output.* = entry.key_ptr.cval();
+            output.* = .init(entry.key_ptr.*);
             return true;
         }
         count += 1;
@@ -111,7 +130,7 @@ export fn velokit_keycode_for_key(key: @import("../input/key.zig").Key) u32 {
     return std.math.maxInt(u32);
 }
 
-export fn velokit_config_trigger(self: *Config, action_z: [*:0]const u8, output: *@import("../input/Binding.zig").Trigger.C) bool {
+export fn velokit_config_trigger(self: *Config, action_z: [*:0]const u8, output: *CTrigger) bool {
     const Binding = @import("../input/Binding.zig");
     const action = Binding.Action.parse(std.mem.span(action_z)) catch return false;
     // The engine reverse map deliberately omits performable bindings. AppKit
@@ -133,7 +152,7 @@ export fn velokit_config_trigger(self: *Config, action_z: [*:0]const u8, output:
             .unicode => {},
             .catch_all => continue,
         }
-        output.* = trigger.cval();
+        output.* = .init(trigger);
         return true;
     }
     return false;
