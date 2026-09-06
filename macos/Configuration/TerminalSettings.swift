@@ -4,6 +4,8 @@
 // Unsupported options are explicit errors, never silently accepted no-ops.
 public enum TerminalSettings {
     public static let supported: Set<String> = [
+        "shell-integration-features",
+        "shell-integration",
         "clipboard-read",
         "clipboard-paste-protection",
         "clipboard-paste-bracketed-safe",
@@ -212,8 +214,6 @@ public enum TerminalSettings {
         "search-foreground": "Needs a search UI and search callbacks.",
         "search-selected-background": "Needs a search UI and search callbacks.",
         "search-selected-foreground": "Needs a search UI and search callbacks.",
-        "shell-integration": "Needs shell-integration resources bundled and located by the app.",
-        "shell-integration-features": "Needs shell-integration resources bundled and located by the app.",
         "split-divider-color": "Needs pane layout, focus, and split rendering in the app.",
         "split-inherit-working-directory": "Needs window/tab/pane creation and inheritance policies.",
         "split-preserve-zoom": "Needs pane layout, focus, and split rendering in the app.",

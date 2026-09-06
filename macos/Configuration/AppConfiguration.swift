@@ -114,6 +114,14 @@ public struct AppConfiguration: Equatable, Sendable {
                     guard !text.contains("\0") else {
                         throw ConfigurationError("terminal.\(spelling) cannot contain a NUL character.")
                     }
+                    if key == "shell-integration-features" {
+                        let flags = text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                        for feature in ["ssh-env", "ssh-terminfo"] {
+                            if flags.last(where: { $0 == feature || $0 == "no-" + feature }) == feature {
+                                throw ConfigurationError("terminal.shell_integration_features: \(feature) requires an upstream command-line helper that Velocitty does not bundle.")
+                            }
+                        }
+                    }
                     if key == "working-directory" {
                         directory = try resolveDirectory(text, home: home)
                         options.append(TerminalOption(key: key, value: directory.path, source: source))

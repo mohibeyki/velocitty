@@ -39,6 +39,14 @@ pub const ResourcesDir = struct {
 /// This is highly Ghostty-specific and can likely be generalized at
 /// some point but we can cross that bridge if we ever need to.
 pub fn resourcesDir(alloc: Allocator) !ResourcesDir {
+    velo: {
+        const dir = global.environ().getAlloc(alloc, "VELOKIT_RESOURCES_DIR") catch |err| switch (err) {
+            error.EnvironmentVariableMissing => break :velo,
+            else => return err,
+        };
+        if (dir.len > 0) return .{ .app_path = dir };
+        alloc.free(dir);
+    }
     // Use the GHOSTTY_RESOURCES_DIR environment variable in release builds.
     //
     // In debug builds we try using terminfo detection first instead, since

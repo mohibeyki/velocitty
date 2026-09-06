@@ -648,11 +648,10 @@ const Subprocess = struct {
             try env.put("TERM", cfg.term);
             try env.put("COLORTERM", "truecolor");
 
-            // Assume that the resources directory is adjacent to the terminfo
-            // database
+            // The standalone app bundles terminfo inside its resources directory.
             var buf: [std.fs.max_path_bytes]u8 = undefined;
             const dir = try std.fmt.bufPrint(&buf, "{s}/terminfo", .{
-                std.fs.path.dirname(base) orelse unreachable,
+                base,
             });
             try env.put("TERMINFO", dir);
         } else {
