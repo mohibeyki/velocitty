@@ -166,7 +166,7 @@ private final class TerminalRuntime {
             return ConfigurationError("\(settings.source.path): \(detail)")
         }
         do {
-            for option in settings.options {
+            for option in try TerminalTheme.options(for: settings, dark: NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua) {
                 let accepted = option.key.withCString { key in
                     option.value.withCString { velokit_config_set(config, key, $0) }
                 }
@@ -453,6 +453,7 @@ private final class TerminalView: NSView, NSTextInputClient {
 private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow?
     private var runtime: TerminalRuntime?
+    private var appearanceObservation: NSKeyValueObservation?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Load the bundled artwork directly so the running Dock tile doesn't
@@ -463,6 +464,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         installMainMenu()
+        appearanceObservation = NSApp.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
+            DispatchQueue.main.async { self?.reloadConfiguration(nil) }
+        }
 
         let runtime: TerminalRuntime
         do {

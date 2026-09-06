@@ -4,6 +4,7 @@
 // Unsupported options are explicit errors, never silently accepted no-ops.
 public enum TerminalSettings {
     public static let supported: Set<String> = [
+        "theme",
         "config-file",
         "abnormal-command-exit-runtime",
         "adjust-box-thickness",
@@ -215,7 +216,6 @@ public enum TerminalSettings {
         "split-inherit-working-directory": "Needs window/tab/pane creation and inheritance policies.",
         "split-preserve-zoom": "Needs pane layout, focus, and split rendering in the app.",
         "tab-inherit-working-directory": "Needs window/tab/pane creation and inheritance policies.",
-        "theme": "Needs theme resource lookup and light/dark appearance integration. Direct colors and palettes are available.",
         "undo-timeout": "Needs an undo/restore model for closed terminals.",
         "unfocused-split-fill": "Needs pane layout, focus, and split rendering in the app.",
         "unfocused-split-opacity": "Needs pane layout, focus, and split rendering in the app.",

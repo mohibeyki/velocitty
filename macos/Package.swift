@@ -8,7 +8,7 @@ let package = Package(
     products: [.library(name: "VelocittyConfiguration", targets: ["VelocittyConfiguration"])],
     dependencies: [.package(url: "https://github.com/dduan/TOMLDecoder.git", exact: "0.4.5")],
     targets: [
-        .target(name: "VelocittyConfiguration", dependencies: ["TOMLDecoder"], path: "Configuration"),
+        .target(name: "VelocittyConfiguration", dependencies: ["TOMLDecoder"], path: "Configuration", resources: [.process("Themes")]),
         .testTarget(name: "VelocittyConfigurationTests", dependencies: ["VelocittyConfiguration"], path: "Tests"),
     ]
 )

@@ -38,6 +38,19 @@ final class AppConfigurationTests: XCTestCase {
         XCTAssertThrowsError(try AppConfiguration.load(from: parent))
     }
 
+    func testBundledThemesAndAppearance() throws {
+        for name in TerminalTheme.names {
+            let config = try parse("[terminal]\ntheme = '\(name)'")
+            let colors = try TerminalTheme.options(for: config, dark: true)
+            XCTAssertEqual(colors.filter { $0.key == "palette" }.count, 16, name)
+        }
+        let defaults = AppConfiguration.defaults()
+        XCTAssertNotEqual(try TerminalTheme.options(for: defaults, dark: true), try TerminalTheme.options(for: defaults, dark: false))
+        let config = try parse("[terminal]\nbackground = '#123456'")
+        XCTAssertEqual(try TerminalTheme.options(for: config, dark: true).filter { $0.key == "background" }.map(\.value), ["#123456"])
+        XCTAssertThrowsError(try TerminalTheme.options(for: parse("[terminal]\ntheme = 'missing-theme'"), dark: true))
+    }
+
     func testConfigLocation() {
         let home = URL(fileURLWithPath: "/example")
         XCTAssertEqual(AppConfiguration.fileURL(environment: [:], home: home).path, "/example/.config/velocitty/config.toml")

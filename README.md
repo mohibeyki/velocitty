@@ -180,6 +180,17 @@ them by setting name (including whole arrays). Paths are relative to the contain
 file; `~/` is supported. Prefix an include with `?` to make a missing file optional.
 Cycles are errors. Asset paths stay relative to the file that declares them.
 
+Themes are iTerm2 `.itermcolors` files. The default pair is **Rosé Pine Dawn**
+(light) and **Rosé Pine** (dark), following macOS appearance automatically.
+Select a fixed theme with `theme = "Catppuccin Mocha"`, or a pair with
+`theme = "light:Rose Pine Dawn,dark:Rose Pine"`. Explicit colors override the theme.
+Put custom files in `~/.config/velocitty/themes/`, or use an absolute theme path.
+Set `theme = ""` for the engine's unthemed colors.
+
+Bundled: TokyoNight Night, Storm, Moon, Day; Rose Pine, Moon, Dawn;
+Catppuccin Latte, Frappe, Macchiato, Mocha. These are the palettes from the
+pinned collection used by Ghostty, converted to iTerm2 plist format.
+
 ### Available terminal settings
 
 The following list covers the configuration declarations in the vendored engine,
@@ -404,7 +415,6 @@ are still listed individually for review.
 | `split_inherit_working_directory` | Needs window/tab/pane creation and inheritance policies. |
 | `split_preserve_zoom` | Needs pane layout, focus, and split rendering in the app. |
 | `tab_inherit_working_directory` | Needs window/tab/pane creation and inheritance policies. |
-| `theme` | Needs theme resource lookup and light/dark appearance integration. Direct colors and palettes are available. |
 | `undo_timeout` | Needs an undo/restore model for closed terminals. |
 | `unfocused_split_fill` | Needs pane layout, focus, and split rendering in the app. |
 | `unfocused_split_opacity` | Needs pane layout, focus, and split rendering in the app. |
