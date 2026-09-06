@@ -5,8 +5,11 @@ import VeloKit
 import VelocittyConfiguration
 
 precondition(velokit_init(UInt(CommandLine.argc), CommandLine.unsafeArgv) == GHOSTTY_SUCCESS)
+let previouslyActiveApplication = NSWorkspace.shared.frontmostApplication
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
+app.finishLaunching()
+pumpEvents(until: Date(timeIntervalSinceNow: 0.2))
 let delegate = AppDelegate()
 app.delegate = delegate
 let testAutomaticQuit = CommandLine.arguments.contains("--quit-on-close")
@@ -121,7 +124,17 @@ func menuItem(_ title: String, in menu: NSMenu = NSApp.mainMenu!) -> NSMenuItem 
   }
   fatalError("Missing menu: \(title)")
 }
-func drain() { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.15)) }
+func pumpEvents(until deadline: Date) {
+  repeat {
+    if let event = app.nextEvent(matching: .any, until: Date(timeIntervalSinceNow: 0.01),
+      inMode: .default, dequeue: true) {
+      app.sendEvent(event)
+    }
+    app.updateWindows()
+    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.005))
+  } while Date() < deadline
+}
+func drain() { pumpEvents(until: Date(timeIntervalSinceNow: 0.15)) }
 let new = menuItem("New Window")
 precondition(new.keyEquivalent == "n")
 let closeMenuItem = menuItem("Close Window")
@@ -192,6 +205,121 @@ precondition(second.runtime?.context.owner === second)
 precondition(second.window!.frame.minX > first.window!.frame.minX)
 precondition(second.window!.frame.maxY < first.window!.frame.maxY)
 
+// Observe focus reports and committed text at the PTY, not a mirrored Swift flag.
+do {
+  let directory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("velocitty-focus-\(UUID().uuidString)", isDirectory: true)
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let script = directory.appendingPathComponent("record.sh")
+  let input = directory.appendingPathComponent("input")
+  let ready = directory.appendingPathComponent("ready")
+  try Data("""
+  stty raw -echo
+  printf '\\033[?1004h'
+  : > "$2"
+  exec cat > "$1"
+  """.utf8).write(to: script)
+  let command = "/bin/sh " + ShellInput.paths([script.path, input.path, ready.path])
+  let escapedCommand = command.replacingOccurrences(of: "\\", with: "\\\\")
+    .replacingOccurrences(of: "\"", with: "\\\"")
+  let recordingSettings = try AppConfiguration.parse(Data("""
+  [terminal]
+  command = "\(escapedCommand)"
+  shell_integration = "none"
+  theme = ""
+  confirm_close_surface = false
+  window_save_state = "never"
+  """.utf8))
+  let runtime = try TerminalRuntime(settings: recordingSettings)
+  let controller = TerminalWindowController(runtime: runtime, owner: delegate)
+  delegate.windows.append(controller)
+  controller.openWindow(cascadingFrom: second.window)
+  let window = controller.window!
+  let terminal = runtime.view!
+  func waitUntil(_ message: @autoclosure () -> String, _ condition: () -> Bool) {
+    let deadline = Date(timeIntervalSinceNow: 3)
+    while !condition() && Date() < deadline {
+      pumpEvents(until: Date(timeIntervalSinceNow: 0.02))
+    }
+    precondition(condition(), message())
+  }
+  app.activate(ignoringOtherApps: true)
+  window.makeKeyAndOrderFront(nil)
+  window.makeFirstResponder(terminal)
+  waitUntil("Test application did not activate") { app.isActive && window.isKeyWindow }
+  waitUntil("Focus recorder did not start") { FileManager.default.fileExists(atPath: ready.path) }
+  drain()
+  func received() -> Data { (try? Data(contentsOf: input)) ?? Data() }
+  var expected = received()
+  func expect(_ delta: String, _ message: String) {
+    expected.append(Data(delta.utf8))
+    waitUntil("\(message); expected \(Array(expected)), received \(Array(received())); "
+      + "active=\(app.isActive) key=\(window.isKeyWindow) "
+      + "responder=\(window.firstResponder === terminal) sheet=\(window.attachedSheet != nil)") {
+      received() == expected
+    }
+  }
+  first.window!.makeKeyAndOrderFront(nil)
+  expect("\u{1b}[O", "Background terminal did not report focus loss")
+  precondition(window.firstResponder === terminal)
+  window.makeFirstResponder(terminal) // A background first responder is still unfocused.
+  runtime.updateFocus()
+  drain()
+  precondition(received() == expected)
+  window.makeKeyAndOrderFront(nil)
+  expect("\u{1b}[I", "Returning to a terminal did not report focus gain")
+  controller.chrome!.startSearch(nil)
+  expect("\u{1b}[O", "Search retained terminal focus")
+  controller.chrome!.hideSearch()
+  expect("\u{1b}[I", "Leaving search did not restore focus")
+  controller.showCommands()
+  expect("\u{1b}[O", "Command palette retained terminal focus")
+  controller.palette!.close()
+  window.makeKeyAndOrderFront(nil)
+  expect("\u{1b}[I", "Closing the palette did not restore focus")
+  guard let previous = previouslyActiveApplication,
+    previous.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
+    fatalError("Focus tests require another foreground application")
+  }
+  precondition(previous.activate(options: []))
+  waitUntil("Test application did not deactivate") { !app.isActive }
+  expect("\u{1b}[O", "App deactivation retained terminal focus")
+  app.activate(ignoringOtherApps: true)
+  window.makeKeyAndOrderFront(nil)
+  waitUntil("Test application did not reactivate") { app.isActive && window.isKeyWindow }
+  expect("\u{1b}[I", "App reactivation did not restore terminal focus")
+  runtime.context.links = TerminalLinks { _ in fatalError("Unexpected link opening") }
+  runtime.context.links.open("custom:focus-test", kind: GHOSTTY_ACTION_OPEN_URL_KIND_OSC8, from: terminal)
+  expect("\u{1b}[O", "Confirmation sheet retained terminal focus")
+  runtime.context.links.cancel()
+  // AppKit may choose a different key window after programmatic cancellation.
+  window.makeKeyAndOrderFront(nil)
+  expect("\u{1b}[I", "Refocusing after the sheet did not restore terminal focus")
+  // Simulate NSTextInputClient composition, leaving native commit/discard callbacks intact.
+  terminal.setMarkedText("にほん" as NSString, selectedRange: NSRange(location: 3, length: 0),
+    replacementRange: NSRange(location: NSNotFound, length: 0))
+  first.window!.makeKeyAndOrderFront(nil)
+  expect("\u{1b}[O", "Composition focus loss was not forwarded")
+  runtime.updateFocus()
+  precondition(terminal.markedText.string == "にほん")
+  window.makeKeyAndOrderFront(nil)
+  expect("\u{1b}[I", "Composition focus gain was not forwarded")
+  precondition(terminal.markedText.string == "にほん")
+  terminal.insertText("日本" as NSString, replacementRange: NSRange(location: NSNotFound, length: 0))
+  expect("日本", "Committed composition did not reach the PTY exactly once")
+  precondition(!terminal.hasMarkedText())
+  terminal.removeFromSuperview()
+  expect("\u{1b}[O", "Detached view retained focus")
+  controller.chrome!.addSubview(terminal)
+  window.makeFirstResponder(terminal)
+  expect("\u{1b}[I", "Reattached view did not restore focus")
+  controller.closing = true
+  window.close()
+  drain()
+  precondition(delegate.windows.count == 2)
+}
+
 // Exercise the actual native action routing with a fake OS opener.
 do {
   delegate.newWindow()
@@ -242,12 +370,15 @@ do {
   sendLink("file:///tmp/another") // A second request must not replace the pending destination.
   precondition(links.confirmation === alert && opened.count == 2)
   let cancelKey = NSEvent.keyEvent(
-    with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+    with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
     windowNumber: alert.window.windowNumber, context: nil,
     characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!
-  precondition(alert.window.performKeyEquivalent(with: cancelKey))
+  precondition(alert.buttons[0].performKeyEquivalent(with: cancelKey))
   drain()
-  precondition(links.confirmation == nil && opened.count == 2)
+  precondition(links.confirmation == nil && opened.count == 2,
+    "Return cancellation: active=\(app.isActive), key=\(alert.window.isKeyWindow), "
+      + "modifiers=\(alert.buttons[0].keyEquivalentModifierMask.rawValue), "
+      + "default=\(String(describing: alert.window.defaultButtonCell?.title)), opened=\(opened.count)")
   sendLink(destination)
   links.confirmation!.buttons[1].performClick(nil)
   drain()

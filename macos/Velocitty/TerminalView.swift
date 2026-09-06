@@ -140,6 +140,7 @@ final class TerminalView: NSView, NSTextInputClient {
       NSLog("VeloKit failed to create terminal surface")
       return nil
     }
+    updateFocus()
   }
 
   required init?(coder: NSCoder) {
@@ -154,18 +155,28 @@ final class TerminalView: NSView, NSTextInputClient {
 
   override func becomeFirstResponder() -> Bool {
     let result = super.becomeFirstResponder()
-    if result, let surface {
-      velokit_surface_set_focus(surface, true)
-    }
+    if result { updateFocus(firstResponder: true) }
     return result
   }
 
   override func resignFirstResponder() -> Bool {
     let result = super.resignFirstResponder()
-    if result, let surface {
-      velokit_surface_set_focus(surface, false)
-    }
+    if result { updateFocus(firstResponder: false) }
     return result
+  }
+
+  // AppKit updates firstResponder after its responder callbacks return. Use the
+  // accepted transition there, and the window's actual responder everywhere else.
+  func updateFocus(firstResponder: Bool? = nil, forceOff: Bool = false) {
+    guard let surface else { return }
+    let focused = !forceOff && NSApp.isActive && window?.isKeyWindow == true
+      && window?.attachedSheet == nil && (firstResponder ?? (window?.firstResponder === self))
+    velokit_surface_set_focus(surface, focused)
+  }
+
+  override func viewDidMoveToWindow() {
+    super.viewDidMoveToWindow()
+    updateFocus()
   }
 
   override func layout() {

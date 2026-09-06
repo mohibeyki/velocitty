@@ -229,15 +229,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   func applicationDidBecomeActive(_ notification: Notification) {
     for controller in windows {
       controller.updateSecureInput()
-      if let app = controller.runtime?.app { velokit_app_set_focus(app, true) }
+      controller.runtime?.updateFocus()
     }
+    idleRuntime?.updateFocus()
   }
 
   func applicationDidResignActive(_ notification: Notification) {
     for controller in windows {
       controller.updateSecureInput(forceOff: true)
-      if let app = controller.runtime?.app { velokit_app_set_focus(app, false) }
+      controller.runtime?.updateFocus()
     }
+    idleRuntime?.updateFocus()
   }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -887,8 +889,20 @@ extension TerminalWindowController {
   func windowDidBecomeKey(_ notification: Notification) {
     owner?.windowFocused(self)
     updateSecureInput()
+    runtime?.updateFocus()
   }
-  func windowDidResignKey(_ notification: Notification) { updateSecureInput(forceOff: true) }
+  func windowDidResignKey(_ notification: Notification) {
+    updateSecureInput(forceOff: true)
+    runtime?.updateFocus()
+  }
+  func windowWillBeginSheet(_ notification: Notification) {
+    // The sheet may not yet be attached when AppKit sends this notification.
+    runtime?.view?.updateFocus(forceOff: true)
+  }
+  func windowDidEndSheet(_ notification: Notification) {
+    // AppKit can send this before clearing attachedSheet and restoring the key window.
+    DispatchQueue.main.async { [weak self] in self?.runtime?.updateFocus() }
+  }
 }
 
 final class TerminalWindow: NSWindow {

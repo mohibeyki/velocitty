@@ -74,9 +74,14 @@ final class TerminalRuntime {
 
     self.app = app
     context.app = app
-    velokit_app_set_focus(app, true)
+    velokit_app_set_focus(app, NSApp.isActive)
     velokit_app_set_color_scheme(
       app, NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? 1 : 0)
+  }
+
+  func updateFocus() {
+    if let app { velokit_app_set_focus(app, NSApp.isActive) }
+    view?.updateFocus()
   }
 
   func updateConfiguration(_ settings: AppConfiguration) throws {
