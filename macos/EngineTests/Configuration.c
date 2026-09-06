@@ -30,6 +30,8 @@ int main(int argc, char **argv) {
     assert(defaults);
     const char *formatted = velokit_config_format(defaults, "font-size");
     assert(formatted && strcmp(formatted, "font-size = 13\n") == 0);
+    assert(strcmp(velokit_config_format(defaults, "quit-after-last-window-closed"),
+                  "quit-after-last-window-closed = false\n") == 0);
     assert(!velokit_config_format(defaults, "not-a-setting"));
     velokit_config_free(defaults);
     const char *valid[][2] = {

@@ -6,36 +6,24 @@ import UserNotifications
 import VeloKit
 import VelocittyConfiguration
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
-  var window: NSWindow?
-  var runtime: TerminalRuntime?
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
+  var windows: [TerminalWindowController] = []
+  weak var focusedWindow: TerminalWindowController?
+  var idleRuntime: TerminalRuntime?
   var appearanceObservation: NSKeyValueObservation?
-  var quitTimer: Timer?
-  var closing = false
-  var pendingFiles: [String] = []
-  var resizeTimer: Timer?
-  var hasResized = false
-  var normalFrame: NSRect?
-  var normalStyle: NSWindow.StyleMask?
-  var titleAccessory: NSTitlebarAccessoryViewController?
-  var titleLabel: NSTextField?
-  var currentDirectory: String?
-  var opacityOverride: Double?
-  var palette: CommandPalette?
-  var shortcuts: GlobalShortcuts?
-  var passwordInput = false
-  var manualSecureInput = false
-  var secureInputEnabled = false
-  var bellSound: NSSound?
-  var terminalTitle = "Velocitty"
-  var windowTitleOverride: String?
-  var hasBell = false
-  var readonly = false
-  var progressTimer: Timer?
-  var progressAnimationTimer: Timer?
-  var chrome: TerminalChrome?
-  var native: NativeSettings { NativeSettings(config: runtime?.config) }
   var keyboardObservation: NSObjectProtocol?
+  var shortcuts: GlobalShortcuts?
+  var quitTimer: Timer?
+  var pendingFiles: [String] = []
+  var terminating = false
+
+  var activeWindow: TerminalWindowController? {
+    windows.first { $0.window === NSApp.keyWindow }
+      ?? windows.first { $0.window === NSApp.mainWindow }
+      ?? focusedWindow ?? windows.last
+  }
+  var runtime: TerminalRuntime? { activeWindow?.runtime ?? idleRuntime }
+  var native: NativeSettings { NativeSettings(config: runtime?.config) }
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     // Load the bundled artwork directly so the running Dock tile doesn't
@@ -51,7 +39,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
       forName: NSNotification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String),
       object: nil, queue: .main
     ) { [weak self] _ in
-      if let app = self?.runtime?.app { velokit_app_keyboard_changed(app) }
+      for controller in self?.windows ?? [] {
+        if let app = controller.runtime?.app { velokit_app_keyboard_changed(app) }
+      }
       self?.shortcuts?.reload()
       self?.updateMenuShortcuts()
     }
@@ -81,11 +71,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
       }
     }
 
-    self.runtime = runtime
+    self.idleRuntime = runtime
     shortcuts = GlobalShortcuts(owner: self)
     shortcuts?.reload()
     updateMenuShortcuts()
-    if native.value("initial-window", true) { openWindow() }
+    if native.value("initial-window", true) { newWindow() }
     if !pendingFiles.isEmpty {
       insertFiles(pendingFiles)
       pendingFiles.removeAll()
@@ -94,9 +84,332 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     if native.string("macos-hidden") == "always" { NSApp.hide(nil) }
   }
 
-  func openWindow() {
+  @objc func newWindow() {
     quitTimer?.invalidate()
     quitTimer = nil
+    do {
+      let runtime: TerminalRuntime
+      if let idleRuntime {
+        runtime = idleRuntime
+        self.idleRuntime = nil
+      } else {
+        runtime = try TerminalRuntime(settings: self.runtime?.settings ?? AppConfiguration.load())
+      }
+      let previousWindow = activeWindow?.window
+      let controller = TerminalWindowController(runtime: runtime, owner: self)
+      windows.append(controller)
+      controller.openWindow(cascadingFrom: previousWindow)
+      if controller.window == nil {
+        windows.removeAll { $0 === controller }
+        idleRuntime = runtime
+        configurationAlert(ConfigurationError("Could not create a terminal window.")).runModal()
+      }
+    } catch { configurationAlert(error).runModal() }
+  }
+
+  // Reopening from the Dock presents an existing terminal when possible.
+  func openWindow() {
+    if let activeWindow { activeWindow.openWindow() } else { newWindow() }
+  }
+
+  func windowFocused(_ controller: TerminalWindowController) {
+    for other in windows where other !== controller { other.updateSecureInput(forceOff: true) }
+    focusedWindow = controller
+    if controller.hasBell {
+      controller.hasBell = false
+      controller.setTitle(controller.terminalTitle)
+    }
+    updateMenuShortcuts()
+  }
+
+  func windowClosed(_ controller: TerminalWindowController) {
+    windows.removeAll { $0 === controller }
+    if focusedWindow === controller { focusedWindow = nil }
+    if windows.isEmpty {
+      idleRuntime = controller.runtime
+      idleRuntime?.context.owner = nil
+    }
+    if !terminating { scheduleQuitIfNeeded() }
+  }
+
+  func scheduleQuitIfNeeded() {
+    guard windows.isEmpty, !terminating, native.value("quit-after-last-window-closed", false) else { return }
+    quitTimer?.invalidate()
+    quitTimer = Timer.scheduledTimer(
+      withTimeInterval: max(0.01, native.seconds("quit-after-last-window-closed-delay", 0)),
+      repeats: false
+    ) { [weak self] _ in
+      if self?.windows.isEmpty == true { NSApp.terminate(nil) }
+    }
+  }
+
+  func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+    openWindow()
+    return true
+  }
+
+  func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    // Confirm every terminal before closing any, so cancelling Quit preserves all windows.
+    let closingWindows = windows
+    for controller in closingWindows where !controller.confirmClose() { return .terminateCancel }
+    terminating = true
+    quitTimer?.invalidate()
+    for controller in closingWindows {
+      controller.closing = true
+      controller.window?.close()
+    }
+    return .terminateNow
+  }
+
+  @objc func closeWindow() { activeWindow?.window?.performClose(nil) }
+
+  func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+    menuItem.action != #selector(closeWindow) || activeWindow != nil
+  }
+
+  func closeAllWindows() {
+    for controller in windows { controller.window?.performClose(nil) }
+  }
+
+  func application(_ sender: NSApplication, openFiles filenames: [String]) {
+    if runtime == nil { pendingFiles.append(contentsOf: filenames) } else { insertFiles(filenames) }
+    sender.reply(toOpenOrPrint: .success)
+  }
+
+  func insertFiles(_ filenames: [String]) {
+    openWindow()
+    let text = ShellInput.paths(filenames)
+    if let surface = activeWindow?.runtime?.view?.surface {
+      text.withCString { velokit_surface_text(surface, $0, UInt(text.utf8.count)) }
+    }
+  }
+
+  func refreshAppearance() {
+    for controller in windows { controller.refreshAppearance() }
+    if let idleRuntime { try? idleRuntime.updateConfiguration(idleRuntime.settings) }
+  }
+
+  @objc func reloadConfiguration(_ sender: Any?) {
+    do {
+      let settings = try AppConfiguration.load()
+      // Validate before changing any window.
+      let candidate = try TerminalRuntime.makeConfig(settings)
+      velokit_config_free(candidate)
+      for controller in windows {
+        try controller.runtime?.updateConfiguration(settings)
+        controller.applyWindowSettings()
+        controller.updateSecureInput()
+      }
+      try idleRuntime?.updateConfiguration(settings)
+      shortcuts?.reload()
+      updateMenuShortcuts()
+    } catch { configurationAlert(error).runModal() }
+  }
+
+  @objc func showCommands() { activeWindow?.showCommands() }
+  @objc func findTerminal() { activeWindow?.findTerminal() }
+  @objc func findNext() { activeWindow?.findNext() }
+  @objc func findPrevious() { activeWindow?.findPrevious() }
+
+  func applicationDidBecomeActive(_ notification: Notification) {
+    for controller in windows {
+      controller.updateSecureInput()
+      if let app = controller.runtime?.app { velokit_app_set_focus(app, true) }
+    }
+  }
+
+  func applicationDidResignActive(_ notification: Notification) {
+    for controller in windows {
+      controller.updateSecureInput(forceOff: true)
+      if let app = controller.runtime?.app { velokit_app_set_focus(app, false) }
+    }
+  }
+
+  func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+  func installMainMenu() {
+    let mainMenu = NSMenu()
+
+    let appMenu = NSMenu(title: "Velocitty")
+    let appMenuItem = NSMenuItem()
+    appMenuItem.submenu = appMenu
+    mainMenu.addItem(appMenuItem)
+
+    let aboutItem = appMenu.addItem(
+      withTitle: "About Velocitty",
+      action: #selector(showAboutPanel(_:)),
+      keyEquivalent: "")
+    aboutItem.target = self
+    appMenu.addItem(.separator())
+    let reloadItem = appMenu.addItem(
+      withTitle: "Reload Configuration",
+      action: #selector(reloadConfiguration(_:)),
+      keyEquivalent: "r")
+    reloadItem.keyEquivalentModifierMask = [.command, .shift]
+    reloadItem.target = self
+    appMenu.addItem(.separator())
+    appMenu.addItem(
+      withTitle: "Hide Velocitty", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+    appMenu.addItem(
+      withTitle: "Hide Others",
+      action: #selector(NSApplication.hideOtherApplications(_:)),
+      keyEquivalent: "h")
+    appMenu.items.last?.keyEquivalentModifierMask = [.command, .option]
+    appMenu.addItem(
+      withTitle: "Show All",
+      action: #selector(NSApplication.unhideAllApplications(_:)),
+      keyEquivalent: "")
+    appMenu.addItem(.separator())
+    appMenu.addItem(
+      withTitle: "Quit Velocitty", action: #selector(NSApplication.terminate(_:)),
+      keyEquivalent: "q"
+    ).target = NSApp
+
+    let terminalMenu = NSMenu(title: "Terminal")
+    let terminalMenuItem = NSMenuItem()
+    terminalMenuItem.submenu = terminalMenu
+    mainMenu.addItem(terminalMenuItem)
+    terminalMenu.addItem(
+      withTitle: "New Window", action: #selector(newWindow), keyEquivalent: "n"
+    ).target = self
+    terminalMenu.addItem(.separator())
+    terminalMenu.addItem(
+      withTitle: "Close Window", action: #selector(closeWindow), keyEquivalent: "w"
+    ).target = self
+
+    let editMenu = NSMenu(title: "Edit")
+    let editMenuItem = NSMenuItem()
+    editMenuItem.submenu = editMenu
+    mainMenu.addItem(editMenuItem)
+    editMenu.addItem(
+      withTitle: "Copy", action: #selector(TerminalView.copyMenuItem(_:)), keyEquivalent: "c")
+    editMenu.addItem(
+      withTitle: "Paste", action: #selector(TerminalView.pasteMenuItem(_:)), keyEquivalent: "v")
+    editMenu.addItem(
+      withTitle: "Select All",
+      action: #selector(TerminalView.selectAllMenuItem(_:)),
+      keyEquivalent: "a")
+
+    editMenu.addItem(.separator())
+    let find = editMenu.addItem(
+      withTitle: "Find…", action: #selector(findTerminal), keyEquivalent: "f")
+    find.target = self
+    let next = editMenu.addItem(
+      withTitle: "Find Next", action: #selector(findNext), keyEquivalent: "g")
+    next.target = self
+    let previous = editMenu.addItem(
+      withTitle: "Find Previous", action: #selector(findPrevious), keyEquivalent: "g")
+    previous.keyEquivalentModifierMask = [.command, .shift]
+    previous.target = self
+
+    let commands = editMenu.addItem(
+      withTitle: "Command Palette…", action: #selector(showCommands), keyEquivalent: "p")
+    commands.keyEquivalentModifierMask = [.command, .shift]
+    commands.target = self
+    let windowMenu = NSMenu(title: "Window")
+    let windowMenuItem = NSMenuItem()
+    windowMenuItem.submenu = windowMenu
+    mainMenu.addItem(windowMenuItem)
+    windowMenu.addItem(
+      withTitle: "Minimize",
+      action: #selector(NSWindow.performMiniaturize(_:)),
+      keyEquivalent: "m")
+    windowMenu.addItem(
+      withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+
+    NSApp.mainMenu = mainMenu
+  }
+
+  func updateMenuShortcuts() {
+    guard let config = runtime?.config else { return }
+    let actions = [
+      "New Window": "new_window", "Copy": "copy_to_clipboard", "Paste": "paste_from_clipboard",
+      "Select All": "select_all",
+      "Find…": "start_search", "Find Next": "navigate_search:next",
+      "Find Previous": "navigate_search:previous",
+      "Command Palette…": "toggle_command_palette", "Reload Configuration": "reload_config",
+      "Close Window": "close_surface", "Quit Velocitty": "quit",
+    ]
+    func update(_ menu: NSMenu) {
+      for item in menu.items {
+        if let submenu = item.submenu { update(submenu) }
+        guard let action = actions[item.title] else { continue }
+        item.keyEquivalent = ""
+        var trigger = ghostty_input_trigger_s()
+        guard action.withCString({ velokit_config_trigger(config, $0, &trigger) }) else { continue }
+        if trigger.tag == GHOSTTY_TRIGGER_UNICODE, let scalar = UnicodeScalar(trigger.key.unicode) {
+          item.keyEquivalent = String(scalar)
+        } else if trigger.tag == GHOSTTY_TRIGGER_PHYSICAL {
+          let code = velokit_keycode_for_key(trigger.key.physical)
+          // Menu equivalents use the active keyboard layout, not US-only key labels.
+          item.keyEquivalent = GlobalShortcuts.character(for: code) ?? ""
+        }
+        var flags: NSEvent.ModifierFlags = []
+        let raw = trigger.mods.rawValue
+        if raw & GHOSTTY_MODS_SHIFT.rawValue != 0 { flags.insert(.shift) }
+        if raw & GHOSTTY_MODS_CTRL.rawValue != 0 { flags.insert(.control) }
+        if raw & GHOSTTY_MODS_ALT.rawValue != 0 { flags.insert(.option) }
+        if raw & GHOSTTY_MODS_SUPER.rawValue != 0 { flags.insert(.command) }
+        item.keyEquivalentModifierMask = flags
+      }
+    }
+    if let menu = NSApp.mainMenu { update(menu) }
+  }
+
+  func configurationAlert(_ error: Error) -> NSAlert {
+    NSLog("Configuration error: %@", error.localizedDescription)
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "Could not load configuration"
+    alert.informativeText = error.localizedDescription
+    return alert
+  }
+
+  @objc private func showAboutPanel(_ sender: Any?) {
+    NSApp.orderFrontStandardAboutPanel(options: [
+      .applicationName: "Velocitty",
+      .applicationVersion: "0.1.0",
+      .credits: NSAttributedString(string: "A macOS terminal powered by libghostty."),
+    ])
+  }
+}
+
+final class TerminalWindowController: NSObject, NSWindowDelegate {
+  weak var owner: AppDelegate?
+
+  init(runtime: TerminalRuntime, owner: AppDelegate) {
+    self.runtime = runtime
+    self.owner = owner
+    super.init()
+    runtime.context.owner = self
+  }
+
+  var window: NSWindow?
+  var runtime: TerminalRuntime?
+  var closing = false
+  var resizeTimer: Timer?
+  var hasResized = false
+  var normalFrame: NSRect?
+  var normalStyle: NSWindow.StyleMask?
+  var titleAccessory: NSTitlebarAccessoryViewController?
+  var titleLabel: NSTextField?
+  var currentDirectory: String?
+  var opacityOverride: Double?
+  var palette: CommandPalette?
+  var passwordInput = false
+  var manualSecureInput = false
+  var secureInputEnabled = false
+  var bellSound: NSSound?
+  var terminalTitle = "Velocitty"
+  var windowTitleOverride: String?
+  var hasBell = false
+  var readonly = false
+  var progressTimer: Timer?
+  var progressAnimationTimer: Timer?
+  var chrome: TerminalChrome?
+  var native: NativeSettings { NativeSettings(config: runtime?.config) }
+
+  func openWindow(cascadingFrom previousWindow: NSWindow? = nil) {
     if let window {
       window.makeKeyAndOrderFront(nil)
       return
@@ -139,6 +452,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSPoint(
           x: x == Int16.min ? window.frame.minX : frame.minX + CGFloat(x),
           y: y == Int16.min ? window.frame.minY : frame.maxY - window.frame.height - CGFloat(y)))
+    }
+    if let previousWindow {
+      // AppKit keeps the cascade on screen when it reaches a display edge.
+      _ = window.cascadeTopLeft(from: NSPoint(
+        x: previousWindow.frame.minX + 24, y: previousWindow.frame.maxY - 24))
     }
     window.makeKeyAndOrderFront(nil)
     window.makeFirstResponder(terminalView)
@@ -278,140 +596,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     palette = nil
     normalFrame = nil
     normalStyle = nil
-    NSApp.presentationOptions = []
+    if NSApp.keyWindow == nil { NSApp.presentationOptions = [] }
     resizeTimer?.invalidate()
-    scheduleQuitIfNeeded()
+    owner?.windowClosed(self)
   }
-
-  func scheduleQuitIfNeeded() {
-    guard window == nil, native.value("quit-after-last-window-closed", false) else { return }
-    quitTimer?.invalidate()
-    quitTimer = Timer.scheduledTimer(
-      withTimeInterval: max(0.01, native.seconds("quit-after-last-window-closed-delay", 0)),
-      repeats: false
-    ) { [weak self] _ in
-      if self?.window == nil { NSApp.terminate(nil) }
-    }
-  }
-
-  func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool
-  {
-    openWindow()
-    return true
-  }
-
-  func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-    guard confirmClose() else { return .terminateCancel }
-    closing = true
-    if let window { window.close() }
-    return .terminateNow
-  }
-
-  func application(_ sender: NSApplication, openFiles filenames: [String]) {
-    if runtime == nil { pendingFiles.append(contentsOf: filenames) } else { insertFiles(filenames) }
-    sender.reply(toOpenOrPrint: .success)
-  }
-
-  func insertFiles(_ filenames: [String]) {
-    openWindow()
-    let text = ShellInput.paths(filenames)
-    if let surface = runtime?.view?.surface {
-      text.withCString { velokit_surface_text(surface, $0, UInt(text.utf8.count)) }
-    }
-  }
-
-  func installMainMenu() {
-    let mainMenu = NSMenu()
-
-    let appMenu = NSMenu(title: "Velocitty")
-    let appMenuItem = NSMenuItem()
-    appMenuItem.submenu = appMenu
-    mainMenu.addItem(appMenuItem)
-
-    let aboutItem = appMenu.addItem(
-      withTitle: "About Velocitty",
-      action: #selector(showAboutPanel(_:)),
-      keyEquivalent: "")
-    aboutItem.target = self
-    appMenu.addItem(.separator())
-    let reloadItem = appMenu.addItem(
-      withTitle: "Reload Configuration",
-      action: #selector(reloadConfiguration(_:)),
-      keyEquivalent: "r")
-    reloadItem.keyEquivalentModifierMask = [.command, .shift]
-    reloadItem.target = self
-    appMenu.addItem(.separator())
-    appMenu.addItem(
-      withTitle: "Hide Velocitty", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
-    appMenu.addItem(
-      withTitle: "Hide Others",
-      action: #selector(NSApplication.hideOtherApplications(_:)),
-      keyEquivalent: "h")
-    appMenu.items.last?.keyEquivalentModifierMask = [.command, .option]
-    appMenu.addItem(
-      withTitle: "Show All",
-      action: #selector(NSApplication.unhideAllApplications(_:)),
-      keyEquivalent: "")
-    appMenu.addItem(.separator())
-    appMenu.addItem(
-      withTitle: "Quit Velocitty", action: #selector(NSApplication.terminate(_:)),
-      keyEquivalent: "q")
-
-    let terminalMenu = NSMenu(title: "Terminal")
-    let terminalMenuItem = NSMenuItem()
-    terminalMenuItem.submenu = terminalMenu
-    mainMenu.addItem(terminalMenuItem)
-    terminalMenu.addItem(
-      withTitle: "Open Terminal", action: #selector(reopenTerminal), keyEquivalent: "n"
-    ).target = self
-
-    let editMenu = NSMenu(title: "Edit")
-    let editMenuItem = NSMenuItem()
-    editMenuItem.submenu = editMenu
-    mainMenu.addItem(editMenuItem)
-    editMenu.addItem(
-      withTitle: "Copy", action: #selector(TerminalView.copyMenuItem(_:)), keyEquivalent: "c")
-    editMenu.addItem(
-      withTitle: "Paste", action: #selector(TerminalView.pasteMenuItem(_:)), keyEquivalent: "v")
-    editMenu.addItem(
-      withTitle: "Select All",
-      action: #selector(TerminalView.selectAllMenuItem(_:)),
-      keyEquivalent: "a")
-
-    editMenu.addItem(.separator())
-    let find = editMenu.addItem(
-      withTitle: "Find…", action: #selector(findTerminal), keyEquivalent: "f")
-    find.target = self
-    let next = editMenu.addItem(
-      withTitle: "Find Next", action: #selector(findNext), keyEquivalent: "g")
-    next.target = self
-    let previous = editMenu.addItem(
-      withTitle: "Find Previous", action: #selector(findPrevious), keyEquivalent: "g")
-    previous.keyEquivalentModifierMask = [.command, .shift]
-    previous.target = self
-
-    let commands = editMenu.addItem(
-      withTitle: "Command Palette…", action: #selector(showCommands), keyEquivalent: "p")
-    commands.keyEquivalentModifierMask = [.command, .shift]
-    commands.target = self
-    let windowMenu = NSMenu(title: "Window")
-    let windowMenuItem = NSMenuItem()
-    windowMenuItem.submenu = windowMenu
-    mainMenu.addItem(windowMenuItem)
-    windowMenu.addItem(
-      withTitle: "Minimize",
-      action: #selector(NSWindow.performMiniaturize(_:)),
-      keyEquivalent: "m")
-    windowMenu.addItem(
-      withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
-    windowMenu.addItem(.separator())
-    windowMenu.addItem(
-      withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
-
-    NSApp.mainMenu = mainMenu
-  }
-
-  @objc func reopenTerminal() { openWindow() }
 
   func setTitle(_ title: String) {
     terminalTitle = title
@@ -525,15 +713,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
   @objc func findNext() { runtime?.view?.performSurfaceAction("navigate_search:next") }
   @objc func findPrevious() { runtime?.view?.performSurfaceAction("navigate_search:previous") }
 
-  func configurationAlert(_ error: Error) -> NSAlert {
-    NSLog("Configuration error: %@", error.localizedDescription)
-    let alert = NSAlert()
-    alert.alertStyle = .warning
-    alert.messageText = "Could not load configuration"
-    alert.informativeText = error.localizedDescription
-    return alert
-  }
-
   func refreshAppearance() {
     guard let runtime else { return }
     do {
@@ -542,49 +721,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     } catch { NSLog("Appearance update failed: %@", error.localizedDescription) }
   }
 
-  @objc func reloadConfiguration(_ sender: Any?) {
-    guard let runtime else { return }
-    do {
-      try runtime.updateConfiguration(AppConfiguration.load())
-      applyWindowSettings()
-      updateSecureInput()
-      shortcuts?.reload()
-      updateMenuShortcuts()
-    } catch {
-      configurationAlert(error).runModal()
-    }
-  }
-
-  @objc private func showAboutPanel(_ sender: Any?) {
-    NSApp.orderFrontStandardAboutPanel(options: [
-      .applicationName: "Velocitty",
-      .applicationVersion: "0.1.0",
-      .credits: NSAttributedString(string: "A macOS terminal powered by libghostty."),
-    ])
-  }
-
-  func applicationDidBecomeActive(_ notification: Notification) {
-    updateSecureInput()
-    if hasBell {
-      hasBell = false
-      setTitle(terminalTitle)
-    }
-    if let app = runtime?.app {
-      velokit_app_set_focus(app, true)
-    }
-  }
-
-  func applicationDidResignActive(_ notification: Notification) {
-    updateSecureInput(forceOff: true)
-    if let app = runtime?.app {
-      velokit_app_set_focus(app, false)
-    }
-  }
-
-  func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 }
 
-extension AppDelegate {
+extension TerminalWindowController {
   func ringBell() {
     let features = native.value("bell-features", UInt32(12))
     if features & 1 != 0 { NSSound.beep() }
@@ -703,7 +842,7 @@ extension AppDelegate {
   }
 }
 
-extension AppDelegate {
+extension TerminalWindowController {
   func secureInput(_ mode: ghostty_action_secure_input_e) {
     if mode == GHOSTTY_SECURE_INPUT_TOGGLE {
       manualSecureInput.toggle()
@@ -730,46 +869,11 @@ extension AppDelegate {
     }
     chrome?.secure.stringValue = indicators.joined(separator: " · ")
   }
-  func windowDidBecomeKey(_ notification: Notification) { updateSecureInput() }
-  func windowDidResignKey(_ notification: Notification) { updateSecureInput(forceOff: true) }
-}
-
-extension AppDelegate {
-  func updateMenuShortcuts() {
-    guard let config = runtime?.config else { return }
-    let actions = [
-      "Open Terminal": "new_window", "Copy": "copy_to_clipboard", "Paste": "paste_from_clipboard",
-      "Select All": "select_all",
-      "Find…": "start_search", "Find Next": "navigate_search:next",
-      "Find Previous": "navigate_search:previous",
-      "Command Palette…": "toggle_command_palette", "Reload Configuration": "reload_config",
-      "Close Window": "close_surface", "Quit Velocitty": "quit",
-    ]
-    func update(_ menu: NSMenu) {
-      for item in menu.items {
-        if let submenu = item.submenu { update(submenu) }
-        guard let action = actions[item.title] else { continue }
-        item.keyEquivalent = ""
-        var trigger = ghostty_input_trigger_s()
-        guard action.withCString({ velokit_config_trigger(config, $0, &trigger) }) else { continue }
-        if trigger.tag == GHOSTTY_TRIGGER_UNICODE, let scalar = UnicodeScalar(trigger.key.unicode) {
-          item.keyEquivalent = String(scalar)
-        } else if trigger.tag == GHOSTTY_TRIGGER_PHYSICAL {
-          let code = velokit_keycode_for_key(trigger.key.physical)
-          // Menu equivalents use the active keyboard layout, not US-only key labels.
-          item.keyEquivalent = GlobalShortcuts.character(for: code) ?? ""
-        }
-        var flags: NSEvent.ModifierFlags = []
-        let raw = trigger.mods.rawValue
-        if raw & GHOSTTY_MODS_SHIFT.rawValue != 0 { flags.insert(.shift) }
-        if raw & GHOSTTY_MODS_CTRL.rawValue != 0 { flags.insert(.control) }
-        if raw & GHOSTTY_MODS_ALT.rawValue != 0 { flags.insert(.option) }
-        if raw & GHOSTTY_MODS_SUPER.rawValue != 0 { flags.insert(.command) }
-        item.keyEquivalentModifierMask = flags
-      }
-    }
-    if let menu = NSApp.mainMenu { update(menu) }
+  func windowDidBecomeKey(_ notification: Notification) {
+    owner?.windowFocused(self)
+    updateSecureInput()
   }
+  func windowDidResignKey(_ notification: Notification) { updateSecureInput(forceOff: true) }
 }
 
 final class TerminalWindow: NSWindow {

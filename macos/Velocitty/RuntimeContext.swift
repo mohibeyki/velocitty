@@ -5,6 +5,7 @@ import VeloKit
 import VelocittyConfiguration
 
 final class RuntimeContext: NSObject {
+  weak var owner: TerminalWindowController?
   var app: ghostty_app_t?
 
   static func fromApp(_ app: ghostty_app_t) -> RuntimeContext? {
@@ -41,6 +42,7 @@ final class RuntimeContext: NSObject {
         body()
       }
     }
+    let owner = self.owner
     switch action.tag {
     case GHOSTTY_ACTION_RENDER:
       if target.tag == GHOSTTY_TARGET_SURFACE, let surface = target.target.surface {
@@ -52,13 +54,13 @@ final class RuntimeContext: NSObject {
         return true
       }
       perform {
-        (NSApp.delegate as? AppDelegate)?.setTitle(title)
+        owner?.setTitle(title)
       }
 
     case GHOSTTY_ACTION_SET_WINDOW_TITLE:
       let title = action.action.set_title.title.map { String(cString: $0) } ?? ""
       perform {
-        guard let delegate = NSApp.delegate as? AppDelegate else { return }
+        guard let delegate = owner else { return }
         delegate.windowTitleOverride = title.isEmpty ? nil : title
         delegate.setTitle(delegate.terminalTitle)
       }
@@ -66,12 +68,12 @@ final class RuntimeContext: NSObject {
     case GHOSTTY_ACTION_PROMPT_TITLE:
       let mode = action.action.prompt_title
       guard mode != GHOSTTY_PROMPT_TITLE_TAB else { return false }
-      perform { (NSApp.delegate as? AppDelegate)?.promptTitle(mode) }
+      perform { owner?.promptTitle(mode) }
 
     case GHOSTTY_ACTION_READONLY:
       let readonly = action.action.readonly == GHOSTTY_READONLY_ON
       perform {
-        let delegate = NSApp.delegate as? AppDelegate
+        let delegate = owner
         delegate?.readonly = readonly
         delegate?.updateSecureInput()
       }
@@ -84,7 +86,7 @@ final class RuntimeContext: NSObject {
       }
 
     case GHOSTTY_ACTION_GOTO_WINDOW:
-      perform { (NSApp.delegate as? AppDelegate)?.openWindow() }
+      perform { owner?.openWindow() }
 
     case GHOSTTY_ACTION_COPY_TITLE_TO_CLIPBOARD:
       perform {
@@ -130,17 +132,17 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_PWD:
       let path = action.action.pwd.pwd.map { String(cString: $0) } ?? ""
-      perform { (NSApp.delegate as? AppDelegate)?.setDirectory(path) }
+      perform { owner?.setDirectory(path) }
 
     case GHOSTTY_ACTION_RESET_WINDOW_SIZE:
-      perform { (NSApp.delegate as? AppDelegate)?.resetWindowSize() }
+      perform { owner?.resetWindowSize() }
 
     case GHOSTTY_ACTION_CLOSE_ALL_WINDOWS:
-      perform { (NSApp.delegate as? AppDelegate)?.window?.performClose(nil) }
+      perform { (NSApp.delegate as? AppDelegate)?.closeAllWindows() }
 
     case GHOSTTY_ACTION_TOGGLE_BACKGROUND_OPACITY:
       perform {
-        guard let delegate = NSApp.delegate as? AppDelegate else { return }
+        guard let delegate = owner else { return }
         delegate.opacityOverride = delegate.opacityOverride == nil ? 1 : nil
         delegate.runtime?.opacityOverride = delegate.opacityOverride
         if let runtime = delegate.runtime { try? runtime.updateConfiguration(runtime.settings) }
@@ -148,16 +150,19 @@ final class RuntimeContext: NSObject {
       }
 
     case GHOSTTY_ACTION_TOGGLE_COMMAND_PALETTE:
-      perform { (NSApp.delegate as? AppDelegate)?.showCommands() }
+      perform { owner?.showCommands() }
 
-    case GHOSTTY_ACTION_NEW_WINDOW, GHOSTTY_ACTION_PRESENT_TERMINAL:
-      perform { (NSApp.delegate as? AppDelegate)?.openWindow() }
+    case GHOSTTY_ACTION_NEW_WINDOW:
+      perform { (NSApp.delegate as? AppDelegate)?.newWindow() }
+
+    case GHOSTTY_ACTION_PRESENT_TERMINAL:
+      perform { owner?.openWindow() ?? (NSApp.delegate as? AppDelegate)?.openWindow() }
 
     case GHOSTTY_ACTION_TOGGLE_MAXIMIZE:
       perform { view?.window?.zoom(nil) }
 
     case GHOSTTY_ACTION_TOGGLE_FULLSCREEN:
-      perform { (NSApp.delegate as? AppDelegate)?.toggleFullscreen() }
+      perform { owner?.toggleFullscreen() }
 
     case GHOSTTY_ACTION_TOGGLE_WINDOW_DECORATIONS:
       perform {
@@ -217,36 +222,36 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_SECURE_INPUT:
       let mode = action.action.secure_input
-      perform { (NSApp.delegate as? AppDelegate)?.secureInput(mode) }
+      perform { owner?.secureInput(mode) }
 
     case GHOSTTY_ACTION_RING_BELL:
-      perform { (NSApp.delegate as? AppDelegate)?.ringBell() }
+      perform { owner?.ringBell() }
 
     case GHOSTTY_ACTION_DESKTOP_NOTIFICATION:
       let notification = action.action.desktop_notification
       let title = notification.title.map { String(cString: $0) } ?? "Velocitty"
       let body = notification.body.map { String(cString: $0) } ?? ""
-      perform { (NSApp.delegate as? AppDelegate)?.notify(title: title, body: body) }
+      perform { owner?.notify(title: title, body: body) }
 
     case GHOSTTY_ACTION_COMMAND_FINISHED:
       let value = action.action.command_finished
-      perform { (NSApp.delegate as? AppDelegate)?.commandFinished(value) }
+      perform { owner?.commandFinished(value) }
 
     case GHOSTTY_ACTION_PROGRESS_REPORT:
       let value = action.action.progress_report
-      perform { (NSApp.delegate as? AppDelegate)?.showProgress(value) }
+      perform { owner?.showProgress(value) }
 
     case GHOSTTY_ACTION_START_SEARCH:
       let needle = action.action.start_search.needle.map { String(cString: $0) }
-      perform { (NSApp.delegate as? AppDelegate)?.chrome?.startSearch(needle) }
+      perform { owner?.chrome?.startSearch(needle) }
 
     case GHOSTTY_ACTION_END_SEARCH:
-      perform { (NSApp.delegate as? AppDelegate)?.chrome?.hideSearch() }
+      perform { owner?.chrome?.hideSearch() }
 
     case GHOSTTY_ACTION_SEARCH_TOTAL:
       let total = action.action.search_total.total
       perform {
-        let chrome = (NSApp.delegate as? AppDelegate)?.chrome
+        let chrome = owner?.chrome
         chrome?.total = total
         chrome?.updateCount()
       }
@@ -254,14 +259,14 @@ final class RuntimeContext: NSObject {
     case GHOSTTY_ACTION_SEARCH_SELECTED:
       let selected = action.action.search_selected.selected
       perform {
-        let chrome = (NSApp.delegate as? AppDelegate)?.chrome
+        let chrome = owner?.chrome
         chrome?.selected = selected
         chrome?.updateCount()
       }
 
     case GHOSTTY_ACTION_SCROLLBAR:
       let state = action.action.scrollbar
-      perform { (NSApp.delegate as? AppDelegate)?.chrome?.updateScrollbar(state) }
+      perform { owner?.chrome?.updateScrollbar(state) }
 
     case GHOSTTY_ACTION_OPEN_URL:
       let link = action.action.open_url
