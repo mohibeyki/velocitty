@@ -68,7 +68,10 @@ final class RuntimeContext: NSObject {
             let hidden = action.action.mouse_visibility == GHOSTTY_MOUSE_HIDDEN
             DispatchQueue.main.async { NSCursor.setHiddenUntilMouseMoves(hidden) }
 
-        case GHOSTTY_ACTION_QUIT, GHOSTTY_ACTION_CLOSE_WINDOW, GHOSTTY_ACTION_CLOSE_TAB:
+        case GHOSTTY_ACTION_CLOSE_WINDOW, GHOSTTY_ACTION_CLOSE_TAB:
+            DispatchQueue.main.async { view?.window?.performClose(nil) }
+
+        case GHOSTTY_ACTION_QUIT:
             DispatchQueue.main.async {
                 NSApp.terminate(nil)
             }

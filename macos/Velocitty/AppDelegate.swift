@@ -5,10 +5,13 @@ import Foundation
 import VeloKit
 import VelocittyConfiguration
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var window: NSWindow?
     var runtime: TerminalRuntime?
     var appearanceObservation: NSKeyValueObservation?
+    var quitTimer: Timer?
+    var closing = false
+    var native: NativeSettings { NativeSettings(config: runtime?.config) }
     var keyboardObservation: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -48,27 +51,140 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        guard let terminalView = runtime.createView() else {
-            NSLog("VeloKit failed to create the terminal")
-            NSApp.terminate(nil)
-            return
-        }
+        self.runtime = runtime
+        if native.value("initial-window", true) { openWindow() }
+        if native.string("macos-hidden") == "always" { NSApp.hide(nil) }
+    }
 
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 960, height: 640),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false)
+    func openWindow() {
+        quitTimer?.invalidate()
+        quitTimer = nil
+        if let window { window.makeKeyAndOrderFront(nil); return }
+        guard let runtime, let terminalView = runtime.createView() else { return }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 640),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "Velocitty"
         window.isReleasedWhenClosed = false
+        window.tabbingMode = .disallowed
+        window.delegate = self
         window.contentView = terminalView
+        self.window = window
+        applyWindowSettings()
+        if let surface = terminalView.surface {
+            let size = velokit_surface_size(surface)
+            let scale = window.backingScaleFactor
+            let columns = native.value("window-width", UInt32(0))
+            let rows = native.value("window-height", UInt32(0))
+            if columns > 0 || rows > 0 {
+                window.setContentSize(NSSize(width: columns > 0 ? CGFloat(columns) * CGFloat(size.cell_width_px) / scale + 16 : 960,
+                                             height: rows > 0 ? CGFloat(rows) * CGFloat(size.cell_height_px) / scale + 16 : 640))
+            }
+            if native.value("window-step-resize", false) {
+                window.contentResizeIncrements = NSSize(width: max(1, CGFloat(size.cell_width_px) / scale), height: max(1, CGFloat(size.cell_height_px) / scale))
+            }
+        }
         window.center()
+        if shouldSaveState { _ = window.setFrameUsingName("TerminalWindow") }
+        let x = native.value("window-position-x", Int16.min)
+        let y = native.value("window-position-y", Int16.min)
+        if x != Int16.min || y != Int16.min, let screen = window.screen {
+            let frame = screen.visibleFrame
+            window.setFrameOrigin(NSPoint(x: x == Int16.min ? window.frame.minX : frame.minX + CGFloat(x),
+                                          y: y == Int16.min ? window.frame.minY : frame.maxY - window.frame.height - CGFloat(y)))
+        }
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(terminalView)
-
-        self.runtime = runtime
-        self.window = window
+        if native.value("maximize", false) { window.zoom(nil) }
+        if native.value("fullscreen", false) || (shouldSaveState && UserDefaults.standard.bool(forKey: "TerminalFullscreen")) {
+            window.toggleFullScreen(nil)
+        }
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    var shouldSaveState: Bool {
+        let policy = native.string("window-save-state", "default")
+        return policy == "always" || (policy == "default" && (UserDefaults.standard.object(forKey: "NSQuitAlwaysKeepsWindows") as? Bool ?? true))
+    }
+
+    func applyWindowSettings() {
+        guard let window else { return }
+        let titlebar = native.string("macos-titlebar-style", "transparent")
+        if native.string("window-decoration") == "none" || titlebar == "hidden" {
+            window.styleMask.remove(.titled)
+        } else { window.styleMask.insert(.titled) }
+        window.titlebarAppearsTransparent = titlebar != "native"
+        window.hasShadow = native.value("macos-window-shadow", true)
+        window.titleVisibility = titlebar == "hidden" ? .hidden : .visible
+        for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            window.standardWindowButton(button)?.isHidden = native.string("macos-window-buttons") == "hidden"
+        }
+        window.colorSpace = native.string("window-colorspace") == "display-p3" ? .displayP3 : .sRGB
+        let theme = native.string("window-theme")
+        window.appearance = theme == "dark" ? NSAppearance(named: .darkAqua) : theme == "light" ? NSAppearance(named: .aqua) : nil
+        let opacity = native.value("background-opacity", 1.0)
+        window.isOpaque = opacity >= 1
+        window.backgroundColor = native.color("background").withAlphaComponent(opacity)
+        let blur = native.value("background-blur", Int16(0))
+        if blur != 0 && opacity < 1, let terminal = runtime?.view, window.contentView === terminal {
+            let visual = NSVisualEffectView(frame: terminal.frame)
+            visual.material = .underWindowBackground
+            visual.blendingMode = .behindWindow
+            visual.state = .active
+            window.contentView = visual
+            terminal.frame = visual.bounds
+            terminal.autoresizingMask = [.width, .height]
+            visual.addSubview(terminal)
+        } else if (blur == 0 || opacity >= 1), let terminal = runtime?.view, window.contentView is NSVisualEffectView {
+            terminal.removeFromSuperview()
+            window.contentView = terminal
+        }
+    }
+
+    func confirmClose() -> Bool {
+        guard let surface = runtime?.view?.surface, velokit_surface_needs_confirm_quit(surface) else { return true }
+        let alert = NSAlert()
+        alert.messageText = "Close this terminal?"
+        alert.informativeText = "A process is still running. Closing the terminal will end it."
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Close Terminal")
+        return alert.runModal() == .alertSecondButtonReturn
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool { closing || confirmClose() }
+
+    func windowWillClose(_ notification: Notification) {
+        if shouldSaveState {
+            window?.saveFrame(usingName: "TerminalWindow")
+            UserDefaults.standard.set(window?.styleMask.contains(.fullScreen) == true, forKey: "TerminalFullscreen")
+        }
+        runtime?.closeView()
+        window = nil
+        if native.value("quit-after-last-window-closed", false) {
+            quitTimer = Timer.scheduledTimer(withTimeInterval: max(0.01, native.seconds("quit-after-last-window-closed-delay", 0)), repeats: false) { [weak self] _ in
+                if self?.window == nil { NSApp.terminate(nil) }
+            }
+        }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        openWindow()
+        return true
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard confirmClose() else { return .terminateCancel }
+        closing = true
+        if let window { window.close() }
+        return .terminateNow
+    }
+
+    func application(_ sender: NSApplication, openFiles filenames: [String]) {
+        openWindow()
+        let text = filenames.map { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }.joined(separator: " ") + " "
+        if let surface = runtime?.view?.surface {
+            text.withCString { velokit_surface_text(surface, $0, UInt(text.utf8.count)) }
+        }
+        sender.reply(toOpenOrPrint: .success)
     }
 
     func installMainMenu() {
@@ -144,6 +260,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let runtime else { return }
         do {
             try runtime.updateConfiguration(AppConfiguration.load())
+            applyWindowSettings()
         } catch {
             configurationAlert(error).runModal()
         }
@@ -169,6 +286,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 }
 

@@ -89,6 +89,14 @@ final class TerminalRuntime {
         return terminalView
     }
 
+    func closeView() {
+        if let surface = view?.surface {
+            view?.surface = nil
+            velokit_surface_free(surface)
+        }
+        view = nil
+    }
+
     deinit {
         if let view, let surface = view.surface {
             view.surface = nil
@@ -103,3 +111,27 @@ final class TerminalRuntime {
     }
 }
 
+
+// Read finalized engine values, including defaults, rather than re-parsing TOML.
+struct NativeSettings {
+    let config: ghostty_config_t?
+    func value<T>(_ key: String, _ fallback: T) -> T {
+        guard let config else { return fallback }
+        var result = fallback
+        let found = key.withCString { keyPointer in
+            withUnsafeMutablePointer(to: &result) { velokit_config_get(config, $0, keyPointer, UInt(key.utf8.count)) }
+        }
+        return found ? result : fallback
+    }
+    func string(_ key: String, _ fallback: String = "") -> String {
+        let pointer: UnsafePointer<CChar>? = value(key, Optional<UnsafePointer<CChar>>.none)
+        return pointer.map { String(cString: $0) } ?? fallback
+    }
+    func seconds(_ key: String, _ fallback: Double) -> Double {
+        Double(value(key, UInt(fallback * 1000))) / 1000
+    }
+    func color(_ key: String, _ fallback: NSColor = .windowBackgroundColor) -> NSColor {
+        let value = value(key, ghostty_config_color_s(r: 0, g: 0, b: 0))
+        return NSColor(srgbRed: Double(value.r) / 255, green: Double(value.g) / 255, blue: Double(value.b) / 255, alpha: 1)
+    }
+}
