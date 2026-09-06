@@ -392,6 +392,166 @@ do {
   precondition(delegate.windows.count == 2)
 }
 
+// Clipboard ownership: queue order, other sheets, and exactly-once teardown replies.
+do {
+  let runtime = try TerminalRuntime(settings: settings)
+  let controller = TerminalWindowController(runtime: runtime, owner: delegate)
+  delegate.windows.append(controller)
+  controller.openWindow(cascadingFrom: second.window)
+  let view = runtime.view!
+  let queue = view.clipboard
+  var replies: [(Int, Bool, Bool)] = []
+  func enqueue(_ id: Int) {
+    queue.enqueue(title: "Clipboard test \(id)", message: "Test", canRemember: true) { allow, remember in
+      precondition(view.surface != nil, "Reply must precede native surface destruction")
+      replies.append((id, allow, remember))
+    }
+  }
+  enqueue(1)
+  enqueue(2)
+  drain()
+  let firstAlert = queue.confirmation!
+  precondition(firstAlert.messageText == "Clipboard test 1" && replies.isEmpty)
+  firstAlert.suppressionButton!.state = .on
+  firstAlert.buttons[0].performClick(nil)
+  drain()
+  precondition(replies.count == 1 && replies[0].0 == 1 && replies[0].1 && replies[0].2)
+  precondition(queue.confirmation!.messageText == "Clipboard test 2")
+  queue.confirmation!.suppressionButton!.state = .on
+  queue.confirmation!.buttons[1].performClick(nil)
+  drain()
+  precondition(replies.count == 2 && replies[1].0 == 2 && !replies[1].1 && !replies[1].2)
+  precondition(queue.confirmation == nil)
+
+  controller.window!.makeKeyAndOrderFront(nil)
+  runtime.context.links.open("custom:clipboard-test", kind: GHOSTTY_ACTION_OPEN_URL_KIND_OSC8, from: view)
+  precondition(runtime.context.links.confirmation != nil)
+  enqueue(3)
+  drain()
+  precondition(queue.confirmation == nil && replies.count == 2)
+  runtime.context.links.cancel()
+  drain()
+  precondition(queue.confirmation?.messageText == "Clipboard test 3")
+  enqueue(4)
+  let closingAlert = queue.confirmation!
+  controller.closing = true
+  controller.window!.close()
+  precondition(view.surface == nil && replies.count == 4)
+  precondition(replies[2].0 == 3 && !replies[2].1 && replies[3].0 == 4 && !replies[3].1)
+  closingAlert.buttons[0].performClick(nil) // A late UI response cannot complete again.
+  queue.cancel()
+  drain()
+  precondition(replies.count == 4 && queue.confirmation == nil)
+}
+
+// Cancellation before presentation, including the no-request-state write callback.
+do {
+  let runtime = try TerminalRuntime(settings: settings)
+  let controller = TerminalWindowController(runtime: runtime, owner: delegate)
+  delegate.windows.append(controller)
+  controller.openWindow(cascadingFrom: second.window)
+  let view = runtime.view!
+  var denied = 0
+  view.clipboard.enqueue(title: "Pending", message: "Test") { allow, _ in
+    precondition(!allow && view.surface != nil)
+    denied += 1
+  }
+  let board = RuntimeContext.pasteboard(GHOSTTY_CLIPBOARD_SELECTION)
+  board.clearContents()
+  board.setString("unchanged", forType: .string)
+  "text/plain".withCString { mime in
+    "replacement".withCString { bytes in
+      var item = ghostty_clipboard_content_s(mime: mime, data: bytes, len: 11)
+      RuntimeContext.writeClipboard(Unmanaged.passUnretained(view).toOpaque(),
+        GHOSTTY_CLIPBOARD_SELECTION, &item, 1, true)
+    }
+  }
+  controller.closing = true
+  controller.window!.close()
+  precondition(denied == 1)
+  drain()
+  precondition(view.clipboard.confirmation == nil && denied == 1)
+  precondition(board.string(forType: .string) == "unchanged")
+}
+
+do {
+  let runtime = try TerminalRuntime(settings: settings)
+  let view = runtime.createView()! // Never attached to a window.
+  var denied = 0
+  view.clipboard.enqueue(title: "Unattached", message: "Test") { allow, _ in
+    precondition(!allow && view.surface != nil)
+    denied += 1
+  }
+  drain()
+  precondition(denied == 1 && view.clipboard.confirmation == nil)
+  runtime.closeView()
+  precondition(denied == 1)
+}
+
+// Exercise native request allocation, copied clipboard bytes, completion and denial at a PTY.
+do {
+  let directory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("velocitty-clipboard-\(UUID().uuidString)", isDirectory: true)
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let script = directory.appendingPathComponent("record.sh")
+  let input = directory.appendingPathComponent("input")
+  let ready = directory.appendingPathComponent("ready")
+  try Data("stty raw -echo\n: > \"$2\"\nexec cat > \"$1\"\n".utf8).write(to: script)
+  let command = "/bin/sh " + ShellInput.paths([script.path, input.path, ready.path])
+  let escapedCommand = command.replacingOccurrences(of: "\\", with: "\\\\")
+    .replacingOccurrences(of: "\"", with: "\\\"")
+  let recordingSettings = try AppConfiguration.parse(Data("""
+  [terminal]
+  command = "\(escapedCommand)"
+  shell_integration = "none"
+  theme = ""
+  confirm_close_surface = false
+  window_save_state = "never"
+  clipboard_paste_protection = true
+  clipboard_paste_bracketed_safe = false
+  """.utf8))
+  let runtime = try TerminalRuntime(settings: recordingSettings)
+  let controller = TerminalWindowController(runtime: runtime, owner: delegate)
+  delegate.windows.append(controller)
+  controller.openWindow(cascadingFrom: second.window)
+  let view = runtime.view!
+  func waitFor(_ condition: () -> Bool) {
+    let deadline = Date(timeIntervalSinceNow: 3)
+    while !condition() && Date() < deadline { drain() }
+    precondition(condition(), "Clipboard PTY check timed out")
+  }
+  waitFor { FileManager.default.fileExists(atPath: ready.path) }
+  let board = RuntimeContext.pasteboard(GHOSTTY_CLIPBOARD_SELECTION)
+  func paste(_ value: String) {
+    board.clearContents()
+    board.setString(value, forType: .string)
+    view.performSurfaceAction("paste_from_selection")
+  }
+  paste("first\nsecond")
+  paste("denied\ntext")
+  board.clearContents()
+  board.setString("changed after request", forType: .string)
+  waitFor { view.clipboard.confirmation != nil }
+  precondition(view.clipboard.confirmation!.informativeText.contains("first\nsecond"))
+  view.clipboard.confirmation!.buttons[0].performClick(nil)
+  waitFor { view.clipboard.confirmation?.informativeText.contains("denied\ntext") == true }
+  view.clipboard.confirmation!.buttons[1].performClick(nil)
+  let expected = Data("first\rsecond".utf8)
+  waitFor { (try? Data(contentsOf: input)) == expected }
+  drain()
+  precondition((try? Data(contentsOf: input)) == expected)
+  paste("pending\none")
+  paste("pending\ntwo")
+  waitFor { view.clipboard.confirmation != nil }
+  controller.closing = true
+  controller.window!.close()
+  drain()
+  precondition(view.surface == nil && view.clipboard.confirmation == nil)
+  precondition((try? Data(contentsOf: input)) == expected)
+  precondition(delegate.windows.count == 2)
+}
+
 if testAutomaticQuit {
   precondition(delegate.native.quitAfterLastWindowClosed)
   first.window?.performClose(nil)

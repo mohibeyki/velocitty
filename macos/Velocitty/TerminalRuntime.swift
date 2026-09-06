@@ -110,6 +110,7 @@ final class TerminalRuntime {
   }
 
   func closeView() {
+    view?.clipboard.cancel()
     context.links.cancel()
     view?.config = nil
     if let surface = view?.surface {

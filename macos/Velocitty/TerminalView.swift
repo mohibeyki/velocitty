@@ -5,6 +5,7 @@ import VeloKit
 import VelocittyConfiguration
 
 final class TerminalView: NSView, NSTextInputClient {
+  lazy var clipboard = TerminalClipboard(view: self)
   var surface: ghostty_surface_t?
   var initialSize: NSSize?
   var markedText = NSAttributedString()
@@ -148,6 +149,7 @@ final class TerminalView: NSView, NSTextInputClient {
   }
 
   deinit {
+    clipboard.cancel()
     if let surface {
       velokit_surface_free(surface)
     }

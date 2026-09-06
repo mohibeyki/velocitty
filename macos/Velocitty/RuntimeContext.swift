@@ -369,10 +369,13 @@ final class RuntimeContext: NSObject {
 
   static let confirmReadClipboard: ghostty_runtime_confirm_read_clipboard_cb = {
     userdata, request, state, _ in
-    guard let view = RuntimeContext.fromSurfaceUserdata(userdata), let surface = view.surface,
-      let request
+    guard let view = RuntimeContext.fromSurfaceUserdata(userdata), let surface = view.surface
     else { return }
-    // Copy callback-owned bytes before scheduling the sheet.
+    guard let request else {
+      velokit_surface_deny_clipboard_request(surface, state)
+      return
+    }
+    // Copy callback-owned bytes and register ownership before scheduling the sheet.
     let items = (0..<request.pointee.contents_len).compactMap { index -> (String, Data)? in
       guard let item = request.pointee.contents?[index], let mime = item.mime, let data = item.data
       else { return nil }
@@ -383,27 +386,19 @@ final class RuntimeContext: NSObject {
     }
     let canRemember = request.pointee.can_remember
     let name = request.pointee.name.map { String(cString: $0) } ?? "The terminal"
-    DispatchQueue.main.async { [weak view] in
-      guard let view, view.surface == surface, let window = view.window else { return }
-      let alert = NSAlert()
-      alert.messageText = "Allow clipboard access?"
-      alert.informativeText =
-        "\(name) requested clipboard content or a paste requiring confirmation.\n\n"
-        + String(String(data: items.first?.1 ?? Data(), encoding: .utf8)?.prefix(500) ?? "")
-      alert.addButton(withTitle: "Allow Once")
-      alert.addButton(withTitle: "Cancel")
-      alert.showsSuppressionButton = canRemember
-      alert.suppressionButton?.title = "Remember for this terminal"
-      alert.beginSheetModal(for: window) { [weak view] response in
-        guard view?.surface == surface else { return }
-        guard response == .alertFirstButtonReturn else {
-          velokit_surface_deny_clipboard_request(surface, state)
-          return
-        }
-        RuntimeContext.completeClipboard(
-          items, surface: surface, state: state, confirmed: true, available: available,
-          remember: canRemember && alert.suppressionButton?.state == .on)
+    view.clipboard.enqueue(
+      title: "Allow clipboard access?",
+      message: "\(name) requested clipboard content or a paste requiring confirmation.\n\n"
+        + String(String(data: items.first?.1 ?? Data(), encoding: .utf8)?.prefix(500) ?? ""),
+      canRemember: canRemember
+    ) { allowed, remember in
+      guard allowed else {
+        velokit_surface_deny_clipboard_request(surface, state)
+        return
       }
+      RuntimeContext.completeClipboard(
+        items, surface: surface, state: state, confirmed: true, available: available,
+        remember: remember)
     }
   }
 
@@ -455,25 +450,24 @@ final class RuntimeContext: NSObject {
       return (type, Data(bytes: data, count: item.len))
     }
     guard !items.isEmpty else { return }
-    let view = RuntimeContext.fromSurfaceUserdata(userdata)
-    DispatchQueue.main.async { [weak view] in
-      let write = {
-        let board = RuntimeContext.pasteboard(location)
-        board.clearContents()
-        for (type, data) in items { board.setData(data, forType: type) }
+    guard let view = RuntimeContext.fromSurfaceUserdata(userdata), let surface = view.surface else { return }
+    let write = {
+      let board = RuntimeContext.pasteboard(location)
+      board.clearContents()
+      for (type, data) in items { board.setData(data, forType: type) }
+    }
+    if needsConfirmation {
+      // This callback has no engine request state to complete or deny.
+      view.clipboard.enqueue(
+        title: "Replace clipboard contents?",
+        message: "A program in this terminal wants to write to your clipboard."
+      ) { allowed, _ in
+        if allowed { write() }
       }
-      guard needsConfirmation else {
+    } else {
+      DispatchQueue.main.async { [weak view] in
+        guard view?.surface == surface else { return }
         write()
-        return
-      }
-      guard let window = view?.window else { return }
-      let alert = NSAlert()
-      alert.messageText = "Replace clipboard contents?"
-      alert.informativeText = "A program in this terminal wants to write to your clipboard."
-      alert.addButton(withTitle: "Allow Once")
-      alert.addButton(withTitle: "Cancel")
-      alert.beginSheetModal(for: window) { response in
-        if response == .alertFirstButtonReturn { write() }
       }
     }
   }

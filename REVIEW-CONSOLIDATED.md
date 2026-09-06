@@ -5,24 +5,12 @@ IDs are retained; resolved findings and rejected claims are removed from the que
 
 Discuss one issue at a time: choose an approach, implement it, validate it, update
 this file, and commit the change as a self-contained chunk. A recommendation below
-is not an approved decision. **Current issue: C07 — awaiting a choice.**
+is not an approved decision. **Current issue: C08 — awaiting a choice.**
 
 Scope: our macOS host, private VeloKit bridge, configuration, and build/test integration.
 Untouched libghostty internals and new mux functionality are outside this cleanup.
 
 ## Remaining issues
-
-### C07. Pending clipboard confirmations
-
-**High; abandoned requests confirmed, leak/stall scenarios need targeted tests.**
-Confirmation callbacks can return without completing a request when its window or
-surface disappears. Denying through an already freed surface would be unsafe.
-
-**Choose:** ownership and exactly-once cancellation while the surface is still alive.
-Test closing a terminal with a pending confirmation. Read and write callbacks have
-different contracts; do not apply read-request cancellation to writes.
-
-Code: [RuntimeContext.swift](macos/Velocitty/RuntimeContext.swift).
 
 ### C08. Engine and surface ownership
 
@@ -189,6 +177,7 @@ Code: [THIRD_PARTY_NOTICES.md](VeloKit/THIRD_PARTY_NOTICES.md),
 | C04 | Open HTTP(S)/mailto directly; confirm file/app links with the full destination and Cancel as default. Reject malformed, javascript, and data URLs. Cancel pending links on terminal close. |
 | C05 | Derive terminal focus from app activity, key window, responder, and sheet state. Update on lifecycle transitions while retaining native composition callbacks. |
 | C06 | Safely remove accessories and avoid adding them to hidden titlebars; reproduced crash fixed. |
+| C07 | Own clipboard confirmations per terminal, queue sheets, and resolve pending requests exactly once before native surface teardown. |
 | C11, controls | Refresh scrollbar visibility/layout on reload; remove unreachable scrollbar policy branch. |
 | C15, delivery | Report file-delivery outcomes, including startup failure/cancellation. |
 | C18, diagnostics | Attribute native setting errors to their included source file. |
@@ -198,8 +187,9 @@ Code: [THIRD_PARTY_NOTICES.md](VeloKit/THIRD_PARTY_NOTICES.md),
 Validation: rebuilt VeloKit; native configuration/ABI tests, 13 Swift configuration
 tests, both AppKit lifecycle/automatic-quit suites, and Debug app build passed.
 Tests include queued wakeups, Unicode conversion, titlebar reloads, scrollbar refresh,
-menu availability, and included-file diagnostics. Real input-method UI, clipboard cancellation, and injected file-open creation failures
-still need coverage. The C05 tests exercise composition callbacks and real PTY input.
+menu availability, and included-file diagnostics. Real input-method UI and injected
+file-open creation failures still need coverage. The C05 tests exercise composition
+callbacks and real PTY input; C07 adds clipboard queue and cancellation coverage.
 
 ## Decisions implemented
 
@@ -229,6 +219,18 @@ still need coverage. The C05 tests exercise composition callbacks and real PTY i
   and its explicit commit reaches the PTY exactly once. These GUI checks require
   an interactive desktop; actual input-method candidate UI was not exercised.
   Both AppKit suites and the Debug build pass.
+
+- **C07 — per-terminal clipboard confirmation queue.** Approved option 1.
+  Register copied request data synchronously before scheduling UI. Show one clipboard
+  sheet at a time and wait behind other sheets. Cancel active and queued requests
+  before freeing the native surface; late sheet callbacks cannot reply again.
+  Clipboard writes without request state share the queue but do not call native denial.
+  Validation: both AppKit suites cover ordered Allow/Cancel, remembered approval,
+  waiting behind link sheets, missing windows, cancellation before presentation and
+  with an active sheet, late responses, and exactly-once replies while the surface is
+  alive. Real native paste requests preserve their original clipboard bytes, deliver
+  approved input to a PTY, and discard denied input. Closing with native requests
+  pending and cancelling a write leave no late UI or clipboard write. Debug build passes.
 
 ## Review conclusions retained
 
