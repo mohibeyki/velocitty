@@ -1101,7 +1101,17 @@ typedef enum {
 bool velokit_config_trigger(ghostty_config_t, const char*, ghostty_input_trigger_s*);
 bool velokit_config_global_trigger(ghostty_config_t, uintptr_t, ghostty_input_trigger_s*);
 uint32_t velokit_keycode_for_key(ghostty_input_key_e);
-bool velokit_config_get(ghostty_config_t, void*, const char*, uintptr_t);
+// Return false without changing output for unknown, unset, or mismatched values.
+// String/path/command pointers are borrowed until config update or destruction.
+bool velokit_config_get_bool(ghostty_config_t, const char*, bool*);
+bool velokit_config_get_int16(ghostty_config_t, const char*, int16_t*);
+bool velokit_config_get_uint32(ghostty_config_t, const char*, uint32_t*);
+bool velokit_config_get_double(ghostty_config_t, const char*, double*);
+bool velokit_config_get_milliseconds(ghostty_config_t, const char*, uintptr_t*);
+bool velokit_config_get_string(ghostty_config_t, const char*, const char**);
+bool velokit_config_get_color(ghostty_config_t, const char*, ghostty_config_color_s*);
+bool velokit_config_get_path(ghostty_config_t, const char*, ghostty_config_path_s*);
+bool velokit_config_get_commands(ghostty_config_t, const char*, ghostty_config_command_list_s*);
 void velokit_app_set_color_scheme(ghostty_app_t, int);
 void velokit_app_keyboard_changed(ghostty_app_t);
 bool velokit_app_key(ghostty_app_t, ghostty_input_key_s);

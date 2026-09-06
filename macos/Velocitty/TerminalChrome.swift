@@ -59,7 +59,7 @@ final class TerminalChrome: NSView, NSSearchFieldDelegate {
 
   override func layout() {
     super.layout()
-    let policy = NativeSettings(config: terminal.config).string("drag-handle", "auto")
+    let policy = NativeSettings(config: terminal.config).dragHandle
     let dragging =
       policy == "always" || (policy == "auto" && window?.styleMask.contains(.titled) == false)
     dragHandle.isHidden = !dragging
@@ -67,8 +67,7 @@ final class TerminalChrome: NSView, NSSearchFieldDelegate {
     let height: CGFloat = (searching ? 38 : 0) + (dragging ? 12 : 0)
     let width: CGFloat = showScroll && scroller.scrollerStyle == .legacy ? 14 : 0
     let searchTop = bounds.height - (dragging ? 12 : 0)
-    let position = NativeSettings(config: terminal.config).string(
-      "resize-overlay-position", "center")
+    let position = NativeSettings(config: terminal.config).resizeOverlayPosition
     let overlayX: CGFloat =
       position.hasSuffix("left")
       ? 12 : position.hasSuffix("right") ? bounds.width - 152 : (bounds.width - 140) / 2
@@ -90,7 +89,7 @@ final class TerminalChrome: NSView, NSSearchFieldDelegate {
   }
   func refreshVisibility() {
     for view in [search, count, previous, next, close] { view.isHidden = !searching }
-    let policy = NativeSettings(config: terminal.config).string("scrollbar", "system")
+    let policy = NativeSettings(config: terminal.config).scrollbar
     scroller.scrollerStyle = NSScroller.preferredScrollerStyle
     showScroll = policy != "never" && scrollState.total > scrollState.len
     scroller.isHidden = !showScroll

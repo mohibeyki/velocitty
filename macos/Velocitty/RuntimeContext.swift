@@ -111,7 +111,7 @@ final class RuntimeContext: NSObject {
       let cell = action.action.cell_size
       perform {
         guard let window = view?.window,
-          NativeSettings(config: view?.config).value("window-step-resize", false)
+          NativeSettings(config: view?.config).windowStepResize
         else { return }
         window.contentResizeIncrements = NSSize(
           width: max(1, CGFloat(cell.width) / window.backingScaleFactor),

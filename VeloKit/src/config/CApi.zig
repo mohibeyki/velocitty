@@ -78,10 +78,88 @@ export fn velokit_config_finalize(self: *Config, base: [*:0]const u8) bool {
     return self._diagnostics.empty();
 }
 
-export fn velokit_config_get(self: *Config, ptr: *anyopaque, key_str: [*]const u8, len: usize) bool {
-    const Key = @import("key.zig").Key;
-    const key = std.meta.stringToEnum(Key, key_str[0..len]) orelse return false;
-    return @import("c_get.zig").get(self, key, ptr);
+// Check the native value's C representation before writing to a typed destination.
+// Failed reads leave output untouched. Borrowed pointers live with the config.
+fn readChecked(comptime Out: type, self: *const Config, key_z: [*:0]const u8, output: *Out) bool {
+    @setEvalBranchQuota(100_000);
+    const key = std.meta.stringToEnum(Config.Key, std.mem.span(key_z)) orelse return false;
+    switch (key) {
+        inline else => |tag| return writeChecked(Out, @field(self, @tagName(tag)), output),
+    }
+}
+
+fn writeChecked(comptime Out: type, value: anytype, output: *Out) bool {
+    const T = @TypeOf(value);
+    if (T == Out) {
+        output.* = value;
+        return true;
+    }
+    switch (@typeInfo(T)) {
+        .optional => return writeChecked(Out, value orelse return false, output),
+        .@"enum" => if (Out == ?[*:0]const u8) {
+            output.* = @tagName(value);
+            return true;
+        },
+        .pointer => if (T == [:0]const u8 and Out == ?[*:0]const u8) {
+            output.* = value.ptr;
+            return true;
+        },
+        .int => if (T == u8 and Out == u32) {
+            output.* = value;
+            return true;
+        },
+        .@"struct", .@"union" => {
+            if (@hasDecl(T, "cval")) return writeChecked(Out, value.cval(), output);
+            if (@typeInfo(T) == .@"struct") {
+                const info = @typeInfo(T).@"struct";
+                if (info.layout == .@"packed" and Out == u32) {
+                    const Backing = info.backing_integer.?;
+                    if (@bitSizeOf(Backing) <= 32) {
+                        output.* = @intCast(@as(Backing, @bitCast(value)));
+                        return true;
+                    }
+                }
+            }
+        },
+        else => {},
+    }
+    return false;
+}
+
+export fn velokit_config_get_bool(self: *const Config, key: [*:0]const u8, output: *bool) bool {
+    return readChecked(bool, self, key, output);
+}
+
+export fn velokit_config_get_int16(self: *const Config, key: [*:0]const u8, output: *i16) bool {
+    return readChecked(i16, self, key, output);
+}
+
+export fn velokit_config_get_uint32(self: *const Config, key: [*:0]const u8, output: *u32) bool {
+    return readChecked(u32, self, key, output);
+}
+
+export fn velokit_config_get_double(self: *const Config, key: [*:0]const u8, output: *f64) bool {
+    return readChecked(f64, self, key, output);
+}
+
+export fn velokit_config_get_milliseconds(self: *const Config, key: [*:0]const u8, output: *usize) bool {
+    return readChecked(usize, self, key, output);
+}
+
+export fn velokit_config_get_string(self: *const Config, key: [*:0]const u8, output: *?[*:0]const u8) bool {
+    return readChecked(?[*:0]const u8, self, key, output);
+}
+
+export fn velokit_config_get_color(self: *const Config, key: [*:0]const u8, output: *Config.Color.C) bool {
+    return readChecked(Config.Color.C, self, key, output);
+}
+
+export fn velokit_config_get_path(self: *const Config, key: [*:0]const u8, output: *Config.Path.C) bool {
+    return readChecked(Config.Path.C, self, key, output);
+}
+
+export fn velokit_config_get_commands(self: *const Config, key: [*:0]const u8, output: *Config.RepeatableCommand.C) bool {
+    return readChecked(Config.RepeatableCommand.C, self, key, output);
 }
 
 // Our header uses a 32-bit C modifier enum; the engine's packed Mods is 16-bit.
@@ -148,7 +226,9 @@ export fn velokit_config_trigger(self: *Config, action_z: [*:0]const u8, output:
         if (!leaf.action.equal(action) or !leaf.flags.consumed) continue;
         const trigger = keys[index];
         switch (trigger.key) {
-            .physical => |key| if (velokit_keycode_for_key(key) >= 128) { continue; },
+            .physical => |key| if (velokit_keycode_for_key(key) >= 128) {
+                continue;
+            },
             .unicode => {},
             .catch_all => continue,
         }

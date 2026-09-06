@@ -77,13 +77,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     shortcuts = GlobalShortcuts(owner: self)
     shortcuts?.reload()
     updateMenuShortcuts()
-    if native.value("initial-window", true) { newWindow() }
+    if native.initialWindow { newWindow() }
     if !pendingFiles.isEmpty {
       NSApp.reply(toOpenOrPrint: insertFiles(pendingFiles) ? .success : .failure)
       pendingFiles.removeAll()
     }
     scheduleQuitIfNeeded()
-    if native.string("macos-hidden") == "always" { NSApp.hide(nil) }
+    if native.hiddenPolicy == "always" { NSApp.hide(nil) }
   }
 
   @objc func newWindow() {
@@ -135,10 +135,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   }
 
   func scheduleQuitIfNeeded() {
-    guard windows.isEmpty, !terminating, native.value("quit-after-last-window-closed", false) else { return }
+    guard windows.isEmpty, !terminating, native.quitAfterLastWindowClosed else { return }
     quitTimer?.invalidate()
     quitTimer = Timer.scheduledTimer(
-      withTimeInterval: max(0.01, native.seconds("quit-after-last-window-closed-delay", 0)),
+      withTimeInterval: max(0.01, native.quitDelay),
       repeats: false
     ) { [weak self] _ in
       if self?.windows.isEmpty == true { NSApp.terminate(nil) }
@@ -450,7 +450,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
       let size = velokit_surface_size(surface)
       let scale = window.backingScaleFactor
       if terminalView.initialSize != nil { resetWindowSize() }
-      if native.value("window-step-resize", false) {
+      if native.windowStepResize {
         window.contentResizeIncrements = NSSize(
           width: max(1, CGFloat(size.cell_width_px) / scale),
           height: max(1, CGFloat(size.cell_height_px) / scale))
@@ -458,8 +458,8 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     }
     window.center()
     if shouldSaveState { _ = window.setFrameUsingName("TerminalWindow") }
-    let x = native.value("window-position-x", Int16.min)
-    let y = native.value("window-position-y", Int16.min)
+    let x = native.windowPositionX
+    let y = native.windowPositionY
     if x != Int16.min || y != Int16.min, let screen = window.screen {
       let frame = screen.visibleFrame
       window.setFrameOrigin(
@@ -474,8 +474,8 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     }
     window.makeKeyAndOrderFront(nil)
     window.makeFirstResponder(terminalView)
-    if native.value("maximize", false) { window.zoom(nil) }
-    if native.string("fullscreen", "false") != "false"
+    if native.maximize { window.zoom(nil) }
+    if native.fullscreen != "false"
       || (shouldSaveState && UserDefaults.standard.bool(forKey: "TerminalFullscreen"))
     {
       toggleFullscreen()
@@ -484,7 +484,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
   }
 
   var shouldSaveState: Bool {
-    let policy = native.string("window-save-state", "default")
+    let policy = native.windowSaveState
     return policy == "always"
       || (policy == "default"
         && (UserDefaults.standard.object(forKey: "NSQuitAlwaysKeepsWindows") as? Bool ?? true))
@@ -501,21 +501,21 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
       self.titleAccessory = nil
       titleLabel = nil
     }
-    let titlebar = native.string("macos-titlebar-style", "transparent")
-    if native.string("window-decoration") == "none" || titlebar == "hidden" {
+    let titlebar = native.titlebarStyle
+    if native.windowDecoration == "none" || titlebar == "hidden" {
       window.styleMask.remove(.titled)
     } else {
       window.styleMask.insert(.titled)
     }
     window.titlebarAppearsTransparent = titlebar != "native"
-    window.hasShadow = native.value("macos-window-shadow", true)
+    window.hasShadow = native.windowShadow
     window.titleVisibility = titlebar == "hidden" ? .hidden : .visible
     for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
       window.standardWindowButton(button)?.isHidden =
-        native.string("macos-window-buttons") == "hidden"
+        native.windowButtons == "hidden"
     }
-    window.colorSpace = native.string("window-colorspace") == "display-p3" ? .displayP3 : .sRGB
-    let family = native.string("window-title-font-family")
+    window.colorSpace = native.windowColorspace == "display-p3" ? .displayP3 : .sRGB
+    let family = native.titleFontFamily
     let foreground =
       runtime?.settings.options.contains {
         $0.key == "window-titlebar-foreground" && !$0.value.isEmpty
@@ -530,10 +530,10 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
       label.frame = NSRect(x: 0, y: 0, width: 400, height: 24)
       label.alignment = .center
       label.font = NSFont(name: family, size: 13) ?? .systemFont(ofSize: 13)
-      if foreground { label.textColor = native.color("window-titlebar-foreground", .labelColor) }
+      if foreground { label.textColor = native.titlebarForeground }
       if background {
         label.drawsBackground = true
-        label.backgroundColor = native.color("window-titlebar-background")
+        label.backgroundColor = native.titlebarBackground
       }
       accessory.view = label
       accessory.layoutAttribute = .bottom
@@ -543,12 +543,12 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
       window.titleVisibility = .hidden
     }
     let directory = currentDirectory ?? runtime?.settings.workingDirectory.path ?? ""
-    window.subtitle = native.string("window-subtitle") == "working-directory" ? directory : ""
+    window.subtitle = native.windowSubtitle == "working-directory" ? directory : ""
     window.representedURL =
-      native.string("macos-titlebar-proxy-icon") == "visible"
+      native.titlebarProxyIcon == "visible"
       ? URL(fileURLWithPath: directory) : nil
-    let theme = native.string("window-theme")
-    let color = native.color("background").usingColorSpace(.sRGB) ?? .black
+    let theme = native.windowTheme
+    let color = native.background.usingColorSpace(.sRGB) ?? .black
     let dark =
       0.2126 * color.redComponent + 0.7152 * color.greenComponent + 0.0722 * color.blueComponent
       < 0.5
@@ -557,10 +557,10 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
       theme == "dark" || (inferred && dark)
       ? NSAppearance(named: .darkAqua)
       : theme == "light" || (inferred && !dark) ? NSAppearance(named: .aqua) : nil
-    let opacity = opacityOverride ?? native.value("background-opacity", 1.0)
+    let opacity = opacityOverride ?? native.backgroundOpacity
     window.isOpaque = opacity >= 1
-    window.backgroundColor = native.color("background").withAlphaComponent(opacity)
-    let blur = native.value("background-blur", Int16(0))
+    window.backgroundColor = native.background.withAlphaComponent(opacity)
+    let blur = native.backgroundBlur
     if blur != 0 && opacity < 1, let terminal = chrome, window.contentView === terminal {
       let visual = NSVisualEffectView(frame: terminal.frame)
       visual.material = .underWindowBackground
@@ -644,14 +644,14 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
   }
   func setDirectory(_ path: String) {
     currentDirectory = path
-    if native.string("window-subtitle") == "working-directory" { window?.subtitle = path }
+    if native.windowSubtitle == "working-directory" { window?.subtitle = path }
     window?.representedURL =
-      native.string("macos-titlebar-proxy-icon") == "visible" ? URL(fileURLWithPath: path) : nil
+      native.titlebarProxyIcon == "visible" ? URL(fileURLWithPath: path) : nil
   }
   func resetWindowSize() {
     guard let window else { return }
     var size = runtime?.view?.initialSize ?? NSSize(width: 960, height: 640)
-    let drag = native.string("drag-handle", "auto")
+    let drag = native.dragHandle
     if drag == "always" || (drag == "auto" && !window.styleMask.contains(.titled)) {
       size.height += 12
     }
@@ -661,7 +661,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
 
   func toggleFullscreen() {
     guard let window else { return }
-    let mode = native.string("macos-non-native-fullscreen", "false")
+    let mode = native.nonNativeFullscreen
     if let frame = normalFrame {
       window.styleMask = normalStyle ?? [.titled, .closable, .miniaturizable, .resizable]
       window.setFrame(frame, display: true)
@@ -670,7 +670,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
       NSApp.presentationOptions = []
       return
     }
-    guard mode != "false" || native.string("fullscreen") == "non-native" else {
+    guard mode != "false" || native.fullscreen == "non-native" else {
       window.toggleFullScreen(nil)
       return
     }
@@ -688,7 +688,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
   }
   func windowDidResize(_ notification: Notification) {
     defer { hasResized = true }
-    let policy = native.string("resize-overlay", "after-first")
+    let policy = native.resizeOverlay
     guard policy != "never", policy == "always" || hasResized, window?.inLiveResize == true,
       let chrome, let surface = runtime?.view?.surface
     else { return }
@@ -698,7 +698,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     chrome.needsLayout = true
     resizeTimer?.invalidate()
     resizeTimer = Timer.scheduledTimer(
-      withTimeInterval: max(0.01, native.seconds("resize-overlay-duration", 0.75)), repeats: false
+      withTimeInterval: max(0.01, native.resizeOverlayDuration), repeats: false
     ) { [weak chrome] _ in chrome?.resizeLabel.isHidden = true }
   }
   func windowWillEnterFullScreen(_ notification: Notification) {
@@ -742,15 +742,13 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
 
 extension TerminalWindowController {
   func ringBell() {
-    let features = native.value("bell-features", UInt32(12))
+    let features = native.bellFeatures
     if features & 1 != 0 { NSSound.beep() }
     if features & 2 != 0 {
-      let pathValue = native.value(
-        "bell-audio-path", ghostty_config_path_s(path: nil, optional: false))
-      let path = pathValue.path.map { String(cString: $0) } ?? ""
+      let path = native.bellAudioPath
       bellSound =
         path.isEmpty ? NSSound(named: "Glass") : NSSound(contentsOfFile: path, byReference: true)
-      bellSound?.volume = Float(native.value("bell-audio-volume", 0.5))
+      bellSound?.volume = Float(native.bellAudioVolume)
       bellSound?.play()
     }
     if !NSApp.isActive || window?.isKeyWindow != true {
@@ -797,13 +795,13 @@ extension TerminalWindowController {
   }
 
   func commandFinished(_ value: ghostty_action_command_finished_s) {
-    let policy = native.string("notify-on-command-finish", "never")
+    let policy = native.notifyOnCommandFinish
     let focused =
       NSApp.isActive && window?.isKeyWindow == true && window?.firstResponder === runtime?.view
     guard policy != "never", policy == "always" || !focused,
-      Double(value.duration) / 1_000_000_000 >= native.seconds("notify-on-command-finish-after", 5)
+      Double(value.duration) / 1_000_000_000 >= native.commandFinishDelay
     else { return }
-    let actions = native.value("notify-on-command-finish-action", UInt32(1))
+    let actions = native.commandFinishActions
     if actions & 1 != 0 { ringBell() }
     if actions & 2 != 0 {
       notify(
@@ -824,7 +822,7 @@ extension TerminalWindowController {
   }
 
   func showProgress(_ report: ghostty_action_progress_report_s) {
-    guard native.value("progress-style", true), report.state != GHOSTTY_PROGRESS_STATE_REMOVE else {
+    guard native.progressStyle, report.state != GHOSTTY_PROGRESS_STATE_REMOVE else {
       clearProgress()
       return
     }
@@ -871,7 +869,7 @@ extension TerminalWindowController {
   func updateSecureInput(forceOff: Bool = false) {
     let wanted =
       !forceOff && NSApp.isActive && window?.isKeyWindow == true
-      && (manualSecureInput || (passwordInput && native.value("macos-auto-secure-input", true)))
+      && (manualSecureInput || (passwordInput && native.autoSecureInput))
     if wanted != secureInputEnabled {
       if wanted {
         secureInputEnabled = EnableSecureEventInput() == noErr
@@ -881,7 +879,7 @@ extension TerminalWindowController {
     }
     var indicators: [String] = []
     if readonly { indicators.append("Read Only") }
-    if secureInputEnabled && native.value("macos-secure-input-indication", true) {
+    if secureInputEnabled && native.secureInputIndication {
       indicators.append("🔒 Secure Input")
     }
     chrome?.secure.stringValue = indicators.joined(separator: " · ")

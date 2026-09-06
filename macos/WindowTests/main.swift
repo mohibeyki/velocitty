@@ -10,6 +10,43 @@ app.setActivationPolicy(.accessory)
 let delegate = AppDelegate()
 app.delegate = delegate
 let testAutomaticQuit = CommandLine.arguments.contains("--quit-on-close")
+// Verify the Swift accessors against finalized native values, including C conversions.
+do {
+  let typedSettings = try AppConfiguration.parse(Data("""
+  [terminal]
+  theme = ""
+  initial_window = false
+  window_position_x = -24
+  background_blur = "macos-glass-regular"
+  background_opacity = 0.625
+  background = "#123456"
+  bell_features = "audio"
+  bell_audio_path = "/tmp"
+  window_title_font_family = "Menlo"
+  resize_overlay_duration = "1250ms"
+  command_palette_entry = ['title:Typed read,action:copy_to_clipboard']
+  """.utf8))
+  let config = try TerminalRuntime.makeConfig(typedSettings)
+  let native = NativeSettings(config: config)
+  precondition(!native.initialWindow)
+  precondition(native.windowPositionX == -24)
+  precondition(native.backgroundBlur == -1)
+  precondition(native.backgroundOpacity == 0.625)
+  precondition(native.bellFeatures == 14) // audio plus default attention/title
+  precondition(native.titleFontFamily == "Menlo")
+  precondition(native.resizeOverlayDuration == 1.25)
+  let color = native.background.usingColorSpace(.sRGB)!
+  precondition(abs(color.redComponent - 18.0 / 255) < 0.0001)
+  let commands = native.commands
+  let path = native.bellAudioPath
+  velokit_config_free(config)
+  precondition(path == "/tmp")
+  precondition(commands.contains { $0.title == "Typed read" && $0.actionKey == "copy_to_clipboard" })
+  let missing = NativeSettings(config: nil)
+  precondition(missing.initialWindow && missing.backgroundOpacity == 1)
+  precondition(missing.windowPositionX == Int16.min && missing.commands.isEmpty)
+}
+
 let settings = try AppConfiguration.parse(Data(("""
 [terminal]
 command = "/bin/sh"
@@ -132,7 +169,7 @@ precondition(second.window!.frame.minX > first.window!.frame.minX)
 precondition(second.window!.frame.maxY < first.window!.frame.maxY)
 
 if testAutomaticQuit {
-  precondition(delegate.native.value("quit-after-last-window-closed", false))
+  precondition(delegate.native.quitAfterLastWindowClosed)
   first.window?.performClose(nil)
   drain()
   precondition(delegate.windows.count == 1)

@@ -64,7 +64,7 @@ final class TerminalView: NSView, NSTextInputClient {
   override func rightMouseDown(with event: NSEvent) {
     mouseButton(event, down: true)
     if let surface, !velokit_surface_mouse_captured(surface),
-      settingString("right-click-action") == "context-menu"
+      NativeSettings(config: config).rightClickAction == "context-menu"
     {
       let menu = NSMenu()
       menu.addItem(withTitle: "Copy", action: #selector(copyMenuItem(_:)), keyEquivalent: "")
@@ -118,15 +118,6 @@ final class TerminalView: NSView, NSTextInputClient {
       event,
       action: event.modifierFlags.contains(mask) ? GHOSTTY_ACTION_PRESS : GHOSTTY_ACTION_RELEASE)
   }
-  func settingString(_ key: String) -> String? {
-    guard let config else { return nil }
-    var value: UnsafePointer<CChar>?
-    guard key.withCString({ velokit_config_get(config, &value, $0, UInt(key.utf8.count)) }) else {
-      return nil
-    }
-    return value.map { String(cString: $0) }
-  }
-
   override var acceptsFirstResponder: Bool { true }
 
   init?(app: ghostty_app_t, workingDirectory: URL) {

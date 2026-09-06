@@ -36,23 +36,10 @@ final class CommandPalette: NSPanel, NSSearchFieldDelegate, NSTableViewDataSourc
     title = "Commands"
     isReleasedWhenClosed = false
     let native = NativeSettings(config: terminal.config)
-    let commands = native.value(
-      "command-palette-entry", ghostty_config_command_list_s(commands: nil, len: 0))
-    if let pointer = commands.commands {
-      entries = (0..<commands.len).compactMap { index in
-        let command = pointer[index]
-        guard let key = command.action_key, !Self.unsupported.contains(String(cString: key)),
-          let action = command.action, let title = command.title
-        else { return nil }
-        // Exclude the upstream demonstration command from the app's palette.
-        if String(cString: title) == "Ghostty" {
-          return nil
-        }
-        return Entry(
-          title: String(cString: title),
-          detail: command.description.map { String(cString: $0) } ?? "",
-          action: String(cString: action))
-      }
+    entries = native.commands.compactMap { command in
+      guard !Self.unsupported.contains(command.actionKey), command.title != "Ghostty"
+      else { return nil }
+      return Entry(title: command.title, detail: command.detail, action: command.action)
     }
     query.frame = NSRect(x: 12, y: 376, width: 596, height: 28)
     query.placeholderString = "Search commands"

@@ -5,25 +5,12 @@ IDs are retained; resolved findings and rejected claims are removed from the que
 
 Discuss one issue at a time: choose an approach, implement it, validate it, update
 this file, and commit the change as a self-contained chunk. A recommendation below
-is not an approved decision. **Current issue: C02 — awaiting a choice.**
+is not an approved decision. **Current issue: C04 — awaiting a choice.**
 
 Scope: our macOS host, private VeloKit bridge, configuration, and build/test integration.
 Untouched libghostty internals and new mux functionality are outside this cleanup.
 
 ## Remaining issues
-
-### C02. Typed configuration access
-
-**Design risk.** `NativeSettings.value<T>` accepts an arbitrary string key and Swift
-type, then gives the resulting buffer to an untyped native getter. A mismatched type
-can produce an incorrect value or an invalid memory write. No current call-site
-mismatch has been demonstrated. The separate trigger ABI defect is already fixed.
-
-**Choose:** typed Swift keys/accessors, checked private bridge getters plus Swift
-accessors, or defer. Keep engine defaults and native parsing as the source of truth.
-
-Code: [NativeSettings.swift](macos/Velocitty/NativeSettings.swift),
-[CApi.zig](VeloKit/src/config/CApi.zig).
 
 ### C04. Terminal link policy
 
@@ -221,7 +208,7 @@ Code: [THIRD_PARTY_NOTICES.md](VeloKit/THIRD_PARTY_NOTICES.md),
 | Issue | Completed work |
 | --- | --- |
 | C01 | Invalidate runtime callback handles and borrowed view handles before teardown. |
-| C02, ABI portion | Serialize complete C trigger fields; test modifier width, offsets, and nonzero output buffers. |
+| C02 | Fix trigger ABI; replace untyped config reads with checked private getters and named Swift properties. Copy borrowed strings/lists into Swift-owned values. |
 | C03 | Preserve Unicode above AppKit's special-key range. |
 | C06 | Safely remove accessories and avoid adding them to hidden titlebars; reproduced crash fixed. |
 | C11, controls | Refresh scrollbar visibility/layout on reload; remove unreachable scrollbar policy branch. |
@@ -235,6 +222,15 @@ tests, both AppKit lifecycle/automatic-quit suites, and Debug app build passed.
 Tests include queued wakeups, Unicode conversion, titlebar reloads, scrollbar refresh,
 menu availability, and included-file diagnostics. Real IME transitions, clipboard
 cancellation, and injected file-open creation failures still need coverage.
+
+## Decisions implemented
+
+- **C02 — checked bridge plus typed Swift accessors.** Approved option 2. Native
+  getters verify the value's C representation before writing; unknown, unset, or
+  incompatible values return false without changing the destination. The untyped
+  private getter is removed. Parsing and defaults remain in the engine.
+  Validation: 135 getter/type combinations plus successful value checks, Swift
+  accessor and copied-value lifetime checks, both AppKit suites, and Debug build pass.
 
 ## Review conclusions retained
 

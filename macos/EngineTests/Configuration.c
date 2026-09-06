@@ -30,8 +30,85 @@ static void rejects(const char *key, const char *value) {
     velokit_config_free(config);
 }
 
+enum ValueKind { BOOL, INT16, UINT32, DOUBLE, MILLISECONDS, STRING, COLOR, PATH, COMMANDS, NONE };
+
+static void checked_getters(void) {
+    ghostty_config_t config = velokit_config_new();
+    assert(config);
+    assert(velokit_config_set(config, "window-position-x", "-24"));
+    assert(velokit_config_set(config, "background-opacity", "0.625"));
+    assert(velokit_config_set(config, "background-blur", "macos-glass-regular"));
+    assert(velokit_config_set(config, "bell-features", "audio"));
+    assert(velokit_config_set(config, "window-title-font-family", "Menlo"));
+    assert(velokit_config_set(config, "background", "#123456"));
+    assert(velokit_config_set(config, "bell-audio-path", "/tmp"));
+    assert(velokit_config_finalize(config, "/tmp"));
+    const struct { const char *key; enum ValueKind kind; } cases[] = {
+        {"initial-window", BOOL}, {"window-position-x", INT16},
+        {"background-blur", INT16}, {"bell-features", UINT32},
+        {"window-width", UINT32}, {"background-opacity", DOUBLE},
+        {"resize-overlay-duration", MILLISECONDS}, {"window-title-font-family", STRING},
+        {"fullscreen", STRING}, {"background", COLOR},
+        {"bell-audio-path", PATH}, {"command-palette-entry", COMMANDS},
+        {"not-a-setting", NONE}, {"title", NONE},
+        // f32 must not be written into a double, even though both are floating point.
+        {"font-size", NONE},
+    };
+    union Output {
+        bool boolean; int16_t short_integer; uint32_t bits; double number;
+        uintptr_t milliseconds; const char *string; ghostty_config_color_s color;
+        ghostty_config_path_s path; ghostty_config_command_list_s commands;
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        for (enum ValueKind kind = BOOL; kind < NONE; ++kind) {
+            struct { uint64_t before; union Output value; uint64_t after; } output, original;
+            memset(&output, 0xA5, sizeof(output));
+            memcpy(&original, &output, sizeof(output));
+            bool found = false;
+            switch (kind) {
+                case BOOL: found = velokit_config_get_bool(config, cases[i].key, &output.value.boolean); break;
+                case INT16: found = velokit_config_get_int16(config, cases[i].key, &output.value.short_integer); break;
+                case UINT32: found = velokit_config_get_uint32(config, cases[i].key, &output.value.bits); break;
+                case DOUBLE: found = velokit_config_get_double(config, cases[i].key, &output.value.number); break;
+                case MILLISECONDS: found = velokit_config_get_milliseconds(config, cases[i].key, &output.value.milliseconds); break;
+                case STRING: found = velokit_config_get_string(config, cases[i].key, &output.value.string); break;
+                case COLOR: found = velokit_config_get_color(config, cases[i].key, &output.value.color); break;
+                case PATH: found = velokit_config_get_path(config, cases[i].key, &output.value.path); break;
+                case COMMANDS: found = velokit_config_get_commands(config, cases[i].key, &output.value.commands); break;
+                case NONE: assert(0);
+            }
+            if (found != (kind == cases[i].kind)) fprintf(stderr, "getter %d: %s\n", kind, cases[i].key);
+            assert(found == (kind == cases[i].kind));
+            assert(output.before == original.before && output.after == original.after);
+            if (!found) assert(memcmp(&output, &original, sizeof(output)) == 0);
+        }
+    }
+    bool initial = false;
+    int16_t position = 0, blur = 0;
+    uint32_t bits = 0;
+    double opacity = 0;
+    uintptr_t milliseconds = 0;
+    const char *family = NULL, *mode = NULL;
+    ghostty_config_color_s color = {0};
+    ghostty_config_path_s path = {0};
+    ghostty_config_command_list_s commands = {0};
+    assert(velokit_config_get_bool(config, "initial-window", &initial) && initial);
+    assert(velokit_config_get_int16(config, "window-position-x", &position) && position == -24);
+    assert(velokit_config_get_int16(config, "background-blur", &blur) && blur == -1);
+    assert(velokit_config_get_uint32(config, "bell-features", &bits) && bits == 14); // audio plus default attention/title
+    assert(velokit_config_get_double(config, "background-opacity", &opacity) && opacity == 0.625);
+    assert(velokit_config_get_milliseconds(config, "resize-overlay-duration", &milliseconds) && milliseconds == 750);
+    assert(velokit_config_get_string(config, "window-title-font-family", &family) && strcmp(family, "Menlo") == 0);
+    assert(velokit_config_get_string(config, "fullscreen", &mode) && strcmp(mode, "false") == 0);
+    assert(velokit_config_get_color(config, "background", &color) && color.r == 0x12 && color.g == 0x34 && color.b == 0x56);
+    assert(velokit_config_get_path(config, "bell-audio-path", &path) && strcmp(path.path, "/tmp") == 0 && !path.optional);
+    assert(velokit_config_get_commands(config, "command-palette-entry", &commands) && commands.len > 0);
+    velokit_config_free(config);
+}
+
 int main(int argc, char **argv) {
     assert(velokit_init((uintptr_t)argc, argv) == GHOSTTY_SUCCESS);
+    checked_getters();
     ghostty_config_t defaults = velokit_config_new();
     assert(defaults);
     const char *formatted = velokit_config_format(defaults, "font-size");
@@ -90,11 +167,11 @@ int main(int argc, char **argv) {
     bool initial = false;
     double opacity = 0;
     uint32_t width = 1;
-    assert(velokit_config_get(config, &mode, "fullscreen", strlen("fullscreen")));
+    assert(velokit_config_get_string(config, "fullscreen", &mode));
     assert(strcmp(mode, "false") == 0);
-    assert(velokit_config_get(config, &initial, "initial-window", strlen("initial-window")) && initial);
-    assert(velokit_config_get(config, &opacity, "background-opacity", strlen("background-opacity")) && opacity == 1);
-    assert(velokit_config_get(config, &width, "window-width", strlen("window-width")) && width == 0);
+    assert(velokit_config_get_bool(config, "initial-window", &initial) && initial);
+    assert(velokit_config_get_double(config, "background-opacity", &opacity) && opacity == 1);
+    assert(velokit_config_get_uint32(config, "window-width", &width) && width == 0);
     velokit_config_free(config);
     config = velokit_config_new();
     assert(velokit_config_finalize(config, "/tmp"));
