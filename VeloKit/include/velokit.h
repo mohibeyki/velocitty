@@ -1098,6 +1098,26 @@ typedef enum {
 //-------------------------------------------------------------------
 // Private application calls
 
+bool velokit_config_get(ghostty_config_t, void*, const char*, uintptr_t);
+void velokit_app_set_color_scheme(ghostty_app_t, int);
+void velokit_app_keyboard_changed(ghostty_app_t);
+bool velokit_app_key(ghostty_app_t, ghostty_input_key_s);
+bool velokit_app_has_global_keybinds(ghostty_app_t);
+bool velokit_surface_needs_confirm_quit(ghostty_surface_t);
+bool velokit_surface_process_exited(ghostty_surface_t);
+ghostty_surface_size_s velokit_surface_size(ghostty_surface_t);
+void velokit_surface_set_color_scheme(ghostty_surface_t, int);
+int velokit_surface_key_translation_mods(ghostty_surface_t, int);
+bool velokit_surface_key_is_binding(ghostty_surface_t, ghostty_input_key_s, ghostty_binding_flags_e*);
+void velokit_surface_text(ghostty_surface_t, const char*, uintptr_t);
+bool velokit_surface_mouse_captured(ghostty_surface_t);
+bool velokit_surface_mouse_button(ghostty_surface_t, ghostty_input_mouse_state_e, ghostty_input_mouse_button_e, int);
+void velokit_surface_mouse_pos(ghostty_surface_t, double, double, int);
+void velokit_surface_mouse_scroll(ghostty_surface_t, double, double, int);
+void velokit_surface_mouse_pressure(ghostty_surface_t, uint32_t, double);
+void velokit_surface_set_occlusion(ghostty_surface_t, bool);
+void velokit_surface_ime_point(ghostty_surface_t, double*, double*, double*, double*);
+
 int velokit_init(uintptr_t, char**);
 
 ghostty_config_t velokit_config_new();

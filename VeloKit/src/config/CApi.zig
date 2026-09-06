@@ -77,3 +77,9 @@ export fn velokit_config_finalize(self: *Config, base: [*:0]const u8) bool {
     };
     return self._diagnostics.empty();
 }
+
+export fn velokit_config_get(self: *Config, ptr: *anyopaque, key_str: [*]const u8, len: usize) bool {
+    const Key = @import("key.zig").Key;
+    const key = std.meta.stringToEnum(Key, key_str[0..len]) orelse return false;
+    return @import("c_get.zig").get(self, key, ptr);
+}

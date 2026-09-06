@@ -1469,6 +1469,179 @@ pub const Inspector = struct {
 
 // C API
 pub const CAPI = struct {
+    const SurfaceSize = extern struct { columns: u16, rows: u16, width_px: u32, height_px: u32, cell_width_px: u32, cell_height_px: u32 };
+
+    export fn velokit_app_set_color_scheme(v: *App, scheme_raw: c_int) void {
+        const scheme = std.enums.fromInt(apprt.ColorScheme, scheme_raw) orelse return;
+
+        v.core_app.colorSchemeEvent(v, scheme) catch |err| {
+            log.err("error setting color scheme err={}", .{err});
+            return;
+        };
+    }
+
+    export fn velokit_app_keyboard_changed(v: *App) void {
+        v.reloadKeymap() catch |err| {
+            log.err("error reloading keyboard map err={}", .{err});
+            return;
+        };
+    }
+
+    export fn velokit_app_key(
+        app: *App,
+        event: KeyEvent,
+    ) bool {
+        return app.keyEvent(.app, event.keyEvent()) catch |err| {
+            log.warn("error processing key event err={}", .{err});
+            return false;
+        };
+    }
+
+    export fn velokit_app_has_global_keybinds(v: *App) bool {
+        return v.hasGlobalKeybinds();
+    }
+
+    export fn velokit_surface_needs_confirm_quit(surface: *Surface) bool {
+        return surface.core_surface.needsConfirmQuit();
+    }
+
+    export fn velokit_surface_process_exited(surface: *Surface) bool {
+        return surface.core_surface.child_exited;
+    }
+
+    export fn velokit_surface_size(surface: *Surface) SurfaceSize {
+        const grid_size = surface.core_surface.size.grid();
+        return .{
+            .columns = grid_size.columns,
+            .rows = grid_size.rows,
+            .width_px = surface.core_surface.size.screen.width,
+            .height_px = surface.core_surface.size.screen.height,
+            .cell_width_px = surface.core_surface.size.cell.width,
+            .cell_height_px = surface.core_surface.size.cell.height,
+        };
+    }
+
+    export fn velokit_surface_set_color_scheme(surface: *Surface, scheme_raw: c_int) void {
+        const scheme = std.enums.fromInt(apprt.ColorScheme, scheme_raw) orelse return;
+        surface.colorSchemeCallback(scheme);
+    }
+
+    export fn velokit_surface_key_translation_mods(
+        surface: *Surface,
+        mods_raw: c_int,
+    ) c_int {
+        const mods: input.Mods = @bitCast(@as(
+            input.Mods.Backing,
+            @truncate(@as(c_uint, @bitCast(mods_raw))),
+        ));
+        const result = mods.translation(
+            surface.core_surface.config.macos_option_as_alt orelse
+                surface.app.keyboardLayout().detectOptionAsAlt(),
+        );
+        return @intCast(@as(input.Mods.Backing, @bitCast(result)));
+    }
+
+    export fn velokit_surface_key_is_binding(
+        surface: *Surface,
+        event: KeyEvent,
+        c_flags: ?*input.Binding.Flags.C,
+    ) bool {
+        const core_event = event.keyEvent().core() orelse {
+            log.warn("error processing key event", .{});
+            return false;
+        };
+
+        const flags = surface.core_surface.keyEventIsBinding(
+            core_event,
+        ) orelse return false;
+        if (c_flags) |ptr| ptr.* = flags.cval();
+        return true;
+    }
+
+    export fn velokit_surface_text(
+        surface: *Surface,
+        ptr: [*]const u8,
+        len: usize,
+    ) void {
+        surface.textCallback(ptr[0..len]);
+    }
+
+    export fn velokit_surface_mouse_captured(surface: *Surface) bool {
+        return surface.core_surface.mouseCaptured();
+    }
+
+    export fn velokit_surface_mouse_button(
+        surface: *Surface,
+        action: input.MouseButtonState,
+        button: input.MouseButton,
+        mods: c_int,
+    ) bool {
+        return surface.mouseButtonCallback(
+            action,
+            button,
+            @bitCast(@as(
+                input.Mods.Backing,
+                @truncate(@as(c_uint, @bitCast(mods))),
+            )),
+        );
+    }
+
+    export fn velokit_surface_mouse_pos(
+        surface: *Surface,
+        x: f64,
+        y: f64,
+        mods: c_int,
+    ) void {
+        surface.cursorPosCallback(
+            x,
+            y,
+            @bitCast(@as(
+                input.Mods.Backing,
+                @truncate(@as(c_uint, @bitCast(mods))),
+            )),
+        );
+    }
+
+    export fn velokit_surface_mouse_scroll(
+        surface: *Surface,
+        x: f64,
+        y: f64,
+        scroll_mods: c_int,
+    ) void {
+        surface.scrollCallback(
+            x,
+            y,
+            @bitCast(@as(u8, @truncate(@as(c_uint, @bitCast(scroll_mods))))),
+        );
+    }
+
+    export fn velokit_surface_mouse_pressure(
+        surface: *Surface,
+        stage_raw: u32,
+        pressure: f64,
+    ) void {
+        const stage = std.enums.fromInt(input.MousePressureStage, stage_raw) orelse return;
+        surface.mousePressureCallback(stage, pressure);
+    }
+
+    export fn velokit_surface_set_occlusion(surface: *Surface, visible: bool) void {
+        surface.occlusionCallback(visible);
+    }
+
+    export fn velokit_surface_ime_point(
+        surface: *Surface,
+        x: *f64,
+        y: *f64,
+        width: *f64,
+        height: *f64,
+    ) void {
+        const pos = surface.core_surface.imePoint();
+        x.* = pos.x;
+        y.* = pos.y;
+        width.* = pos.width;
+        height.* = pos.height;
+    }
+
     /// This is the same as Surface.KeyEvent but this is the raw C API version.
     const KeyEvent = extern struct {
         action: input.Action,
