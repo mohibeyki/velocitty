@@ -10,6 +10,30 @@ app.setActivationPolicy(.accessory)
 let delegate = AppDelegate()
 app.delegate = delegate
 let testAutomaticQuit = CommandLine.arguments.contains("--quit-on-close")
+// URL classification must not rely on Foundation repairing malformed input.
+for kind in [GHOSTTY_ACTION_OPEN_URL_KIND_OSC8, GHOSTTY_ACTION_OPEN_URL_KIND_UNKNOWN] {
+  for value in ["https://example.com/a?x=1", "HTTP://example.com", "mailto:hello@example.com"] {
+    guard case .direct = TerminalLinks.destination(value, kind: kind) else {
+      fatalError("Expected a direct link: \(value)")
+    }
+  }
+  for value in ["file:///tmp/a%20b", "vscode://file/tmp/test", "ssh://user@example.com", "custom:payload"] {
+    guard case .confirm = TerminalLinks.destination(value, kind: kind) else {
+      fatalError("Expected confirmation: \(value)")
+    }
+  }
+  for value in ["javascript:alert(1)", "JaVaScRiPt:alert(1)", "DATA:text/html,test", "",
+    "relative/path", "//example.com", "https://", "https:example.com", "https://example.com:99999", "https://a/%GG",
+    "https://a/%", "https://a/%0", " https://example.com", "https://example.com/a b",
+    "https://example.com/\n", "https://example.com/\0", "https:\\example.com"] {
+    precondition(TerminalLinks.destination(value, kind: kind) == .reject, value)
+  }
+}
+for kind in [GHOSTTY_ACTION_OPEN_URL_KIND_TEXT, GHOSTTY_ACTION_OPEN_URL_KIND_HTML] {
+  let path = "/tmp/terminal export.html"
+  precondition(TerminalLinks.destination(path, kind: kind) == .direct(URL(fileURLWithPath: path)))
+}
+
 // Verify the Swift accessors against finalized native values, including C conversions.
 do {
   let typedSettings = try AppConfiguration.parse(Data("""
@@ -167,6 +191,75 @@ precondition(first.runtime?.context.owner === first)
 precondition(second.runtime?.context.owner === second)
 precondition(second.window!.frame.minX > first.window!.frame.minX)
 precondition(second.window!.frame.maxY < first.window!.frame.maxY)
+
+// Exercise the actual native action routing with a fake OS opener.
+do {
+  delegate.newWindow()
+  drain()
+  let controller = delegate.windows.last!
+  let context = controller.runtime!.context
+  var opened: [URL] = []
+  context.links = TerminalLinks { opened.append($0) }
+  let links = context.links
+  var target = ghostty_target_s()
+  target.tag = GHOSTTY_TARGET_SURFACE
+  target.target.surface = controller.runtime!.view!.surface
+  func sendLink(_ value: String, kind: ghostty_action_open_url_kind_e = GHOSTTY_ACTION_OPEN_URL_KIND_OSC8) {
+    var action = ghostty_action_s()
+    action.tag = GHOSTTY_ACTION_OPEN_URL
+    value.withCString {
+      action.action.open_url = ghostty_action_open_url_s(kind: kind, url: $0, len: UInt(value.utf8.count))
+      precondition(context.handleAction(target: target, action: action))
+    }
+    drain()
+  }
+  sendLink("https://example.com")
+  precondition(opened.count == 1 && links.confirmation == nil)
+  var invalidAction = ghostty_action_s()
+  invalidAction.tag = GHOSTTY_ACTION_OPEN_URL
+  let invalidUTF8: [CChar] = [-1]
+  invalidUTF8.withUnsafeBufferPointer {
+    invalidAction.action.open_url = ghostty_action_open_url_s(
+      kind: GHOSTTY_ACTION_OPEN_URL_KIND_OSC8, url: $0.baseAddress, len: 1)
+    precondition(context.handleAction(target: target, action: invalidAction))
+  }
+  drain()
+  precondition(opened.count == 1 && links.confirmation == nil)
+  sendLink("javascript:alert(1)")
+  precondition(opened.count == 1 && links.confirmation == nil)
+  sendLink("/tmp/terminal export.html", kind: GHOSTTY_ACTION_OPEN_URL_KIND_HTML)
+  precondition(opened.count == 2 && opened.last!.isFileURL && links.confirmation == nil)
+  let destination = "vscode://file/tmp/" + String(repeating: "long-path/", count: 100) + "test"
+  sendLink(destination)
+  let alert = links.confirmation!
+  precondition(alert.window.sheetParent === controller.window)
+  precondition(alert.buttons[0].title == "Cancel" && alert.buttons[0].keyEquivalent == "\r", String(describing: alert.buttons.map { ($0.title, $0.keyEquivalent) }))
+  precondition(alert.buttons[1].keyEquivalent.isEmpty)
+  let text = (alert.accessoryView as! NSScrollView).documentView as! NSTextView
+  precondition(text.string == URL(string: destination)!.absoluteString && text.isSelectable)
+  text.layoutManager?.ensureLayout(for: text.textContainer!)
+  precondition(text.frame.height > (alert.accessoryView as! NSScrollView).contentSize.height)
+  sendLink("file:///tmp/another") // A second request must not replace the pending destination.
+  precondition(links.confirmation === alert && opened.count == 2)
+  let cancelKey = NSEvent.keyEvent(
+    with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+    windowNumber: alert.window.windowNumber, context: nil,
+    characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!
+  precondition(alert.window.performKeyEquivalent(with: cancelKey))
+  drain()
+  precondition(links.confirmation == nil && opened.count == 2)
+  sendLink(destination)
+  links.confirmation!.buttons[1].performClick(nil)
+  drain()
+  precondition(opened.count == 3 && opened.last!.absoluteString == destination)
+  sendLink("file:///tmp/test")
+  precondition(links.confirmation != nil)
+  controller.closing = true
+  controller.window!.close()
+  drain()
+  precondition(links.confirmation == nil && opened.count == 3)
+  precondition(delegate.windows.count == 2)
+}
 
 if testAutomaticQuit {
   precondition(delegate.native.quitAfterLastWindowClosed)

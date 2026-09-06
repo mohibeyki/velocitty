@@ -7,6 +7,7 @@ import VelocittyConfiguration
 final class RuntimeContext: NSObject {
   weak var owner: TerminalWindowController?
   var app: ghostty_app_t?
+  var links = TerminalLinks()
 
   static func fromApp(_ app: ghostty_app_t) -> RuntimeContext? {
     guard let userdata = velokit_app_userdata(app) else { return nil }
@@ -270,17 +271,13 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_OPEN_URL:
       let link = action.action.open_url
-      guard let ptr = link.url else { return false }
-      let value = String(
-        decoding: UnsafeBufferPointer(
-          start: UnsafeRawPointer(ptr).assumingMemoryBound(to: UInt8.self), count: Int(link.len)),
-        as: UTF8.self)
-      let url =
-        link.kind == GHOSTTY_ACTION_OPEN_URL_KIND_TEXT
-          || link.kind == GHOSTTY_ACTION_OPEN_URL_KIND_HTML
-        ? URL(fileURLWithPath: value) : URL(string: value)
-      guard let url else { return false }
-      perform { NSWorkspace.shared.open(url) }
+      guard let ptr = link.url,
+        let value = String(
+          bytes: UnsafeBufferPointer(
+            start: UnsafeRawPointer(ptr).assumingMemoryBound(to: UInt8.self), count: Int(link.len)),
+          encoding: .utf8)
+      else { return true }
+      perform { self.links.open(value, kind: link.kind, from: view) }
 
     case GHOSTTY_ACTION_MOUSE_OVER_LINK:
       let link = action.action.mouse_over_link

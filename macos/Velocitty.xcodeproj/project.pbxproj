@@ -21,6 +21,7 @@
         D00000000000000000000004 = {isa = PBXBuildFile; fileRef = D00000000000000000000003; };
         D00000000000000000000006 = {isa = PBXBuildFile; fileRef = D00000000000000000000005; };
         D00000000000000000000008 = {isa = PBXBuildFile; fileRef = D00000000000000000000007; };
+        E00000000000000000000002 = {isa = PBXBuildFile; fileRef = E00000000000000000000001; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -39,6 +40,7 @@
         D00000000000000000000005 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalShortcuts.swift; sourceTree = "<group>"; };
         D00000000000000000000007 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeSettings.swift; sourceTree = "<group>"; };
         D00000000000000000000009 = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+        E00000000000000000000001 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalLinks.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -58,6 +60,7 @@
 				B00000000000000000000007,
                 D00000000000000000000009,
                 D00000000000000000000007,
+                E00000000000000000000001,
                 D00000000000000000000005,
                 D00000000000000000000003,
                 D00000000000000000000001,
@@ -165,6 +168,7 @@
 			buildActionMask = 2147483647;
 			files = (
                 D00000000000000000000008,
+                E00000000000000000000002,
                 D00000000000000000000006,
                 D00000000000000000000004,
                 D00000000000000000000002,

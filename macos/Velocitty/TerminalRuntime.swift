@@ -105,6 +105,7 @@ final class TerminalRuntime {
   }
 
   func closeView() {
+    context.links.cancel()
     view?.config = nil
     if let surface = view?.surface {
       view?.surface = nil

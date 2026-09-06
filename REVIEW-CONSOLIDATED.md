@@ -5,23 +5,12 @@ IDs are retained; resolved findings and rejected claims are removed from the que
 
 Discuss one issue at a time: choose an approach, implement it, validate it, update
 this file, and commit the change as a self-contained chunk. A recommendation below
-is not an approved decision. **Current issue: C04 — awaiting a choice.**
+is not an approved decision. **Current issue: C05 — awaiting a choice.**
 
 Scope: our macOS host, private VeloKit bridge, configuration, and build/test integration.
 Untouched libghostty internals and new mux functionality are outside this cleanup.
 
 ## Remaining issues
-
-### C04. Terminal link policy
-
-**High; missing host policy confirmed.** OSC 8 hyperlinks are terminal-supplied
-URLs. The host opens them through `NSWorkspace` without distinguishing schemes;
-a label can conceal an unusual application handler. No exploit was reproduced.
-
-**Choose:** schemes that open directly, require confirmation, or are rejected.
-Keep engine-generated text/HTML export paths separate from this policy.
-
-Code: [RuntimeContext.swift](macos/Velocitty/RuntimeContext.swift), `OPEN_URL`.
 
 ### C05. Effective focus and input composition
 
@@ -210,6 +199,7 @@ Code: [THIRD_PARTY_NOTICES.md](VeloKit/THIRD_PARTY_NOTICES.md),
 | C01 | Invalidate runtime callback handles and borrowed view handles before teardown. |
 | C02 | Fix trigger ABI; replace untyped config reads with checked private getters and named Swift properties. Copy borrowed strings/lists into Swift-owned values. |
 | C03 | Preserve Unicode above AppKit's special-key range. |
+| C04 | Open HTTP(S)/mailto directly; confirm file/app links with the full destination and Cancel as default. Reject malformed, javascript, and data URLs. Cancel pending links on terminal close. |
 | C06 | Safely remove accessories and avoid adding them to hidden titlebars; reproduced crash fixed. |
 | C11, controls | Refresh scrollbar visibility/layout on reload; remove unreachable scrollbar policy branch. |
 | C15, delivery | Report file-delivery outcomes, including startup failure/cancellation. |
@@ -231,6 +221,15 @@ cancellation, and injected file-open creation failures still need coverage.
   private getter is removed. Parsing and defaults remain in the engine.
   Validation: 135 getter/type combinations plus successful value checks, Swift
   accessor and copied-value lifetime checks, both AppKit suites, and Debug build pass.
+
+- **C04 — direct web/mail links, confirmation for file/app links.** Approved option 1.
+  The host applies the policy to terminal URLs, while engine-generated text/HTML
+  exports remain direct file opens. The confirmation shows the complete selectable,
+  scrollable destination and does not remember approval. A second request cannot
+  replace a pending destination; closing the terminal cancels it.
+  Validation: URL policy cases, invalid UTF-8, native callback routing through a fake
+  OS opener, long destination display, Return-to-cancel, explicit Open, duplicate
+  requests, and close-with-confirmation pass in both AppKit suites. Debug build passes.
 
 ## Review conclusions retained
 
