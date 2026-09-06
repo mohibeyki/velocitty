@@ -130,35 +130,80 @@ final class RuntimeContext: NSObject {
     }
 
     static let confirmReadClipboard: ghostty_runtime_confirm_read_clipboard_cb = {
-        userdata, _, state, _ in
-        guard let view = RuntimeContext.fromSurfaceUserdata(userdata),
-              let surface = view.surface
-        else { return }
-        velokit_surface_deny_clipboard_request(surface, state)
+        userdata, request, state, _ in
+        guard let view = RuntimeContext.fromSurfaceUserdata(userdata), let surface = view.surface,
+              let request else { return }
+        // Copy callback-owned bytes before scheduling the sheet.
+        let items = (0..<request.pointee.contents_len).compactMap { index -> (String, Data)? in
+            guard let item = request.pointee.contents?[index], let mime = item.mime, let data = item.data else { return nil }
+            return (String(cString: mime), Data(bytes: data, count: item.len))
+        }
+        let name = request.pointee.name.map { String(cString: $0) } ?? "The terminal"
+        DispatchQueue.main.async { [weak view] in
+            guard let view, view.surface == surface, let window = view.window else { return }
+            let alert = NSAlert()
+            alert.messageText = "Allow clipboard access?"
+            alert.informativeText = "\(name) requested clipboard content or a paste requiring confirmation.\n\n" + String(String(data: items.first?.1 ?? Data(), encoding: .utf8)?.prefix(500) ?? "")
+            alert.addButton(withTitle: "Allow Once")
+            alert.addButton(withTitle: "Cancel")
+            alert.beginSheetModal(for: window) { [weak view] response in
+                guard view?.surface == surface else { return }
+                guard response == .alertFirstButtonReturn else {
+                    velokit_surface_deny_clipboard_request(surface, state)
+                    return
+                }
+                RuntimeContext.completeClipboard(items, surface: surface, state: state, confirmed: true)
+            }
+        }
+    }
+
+    static func completeClipboard(_ items: [(String, Data)], surface: ghostty_surface_t, state: UnsafeMutableRawPointer?, confirmed: Bool) {
+        let mime = items.map { strdup($0.0) }
+        let bytes = items.map { item -> UnsafeMutablePointer<CChar> in
+            let pointer = UnsafeMutablePointer<CChar>.allocate(capacity: max(1, item.1.count))
+            item.1.copyBytes(to: UnsafeMutableRawBufferPointer(start: pointer, count: item.1.count))
+            return pointer
+        }
+        defer { mime.forEach { free($0) }; bytes.forEach { $0.deallocate() } }
+        let contents = items.indices.map { ghostty_clipboard_content_s(mime: UnsafePointer(mime[$0]), data: UnsafePointer(bytes[$0]), len: items[$0].1.count) }
+        contents.withUnsafeBufferPointer {
+            var complete = ghostty_clipboard_complete_s(contents: $0.baseAddress, contents_len: $0.count, available: nil, available_len: 0, confirmed: confirmed, remember: false)
+            velokit_surface_complete_clipboard_request(surface, &complete, state)
+        }
     }
 
     static let writeClipboard: ghostty_runtime_write_clipboard_cb = {
-        _, location, content, length, needsConfirmation in
-        guard !needsConfirmation, location == GHOSTTY_CLIPBOARD_STANDARD,
-              content != nil,
-              length > 0
-        else { return }
-
-        for index in 0..<length {
-            let item = content![index]
-            guard let mime = item.mime,
-                  String(cString: mime) == "text/plain",
-                  item.len > 0,
-                  let data = item.data
-            else { continue }
-
-            let bytes = Data(bytes: data, count: item.len)
-            guard let string = String(data: bytes, encoding: .utf8) else { continue }
-            DispatchQueue.main.async {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(string, forType: .string)
+        userdata, location, content, length, needsConfirmation in
+        guard location == GHOSTTY_CLIPBOARD_STANDARD, let content else { return }
+        let items = (0..<length).compactMap { index -> (NSPasteboard.PasteboardType, Data)? in
+            let item = content[index]
+            guard let mime = item.mime, let data = item.data else { return nil }
+            let type: NSPasteboard.PasteboardType
+            switch String(cString: mime) {
+            case "text/plain": type = .string
+            case "text/html": type = .html
+            case "image/png": type = .png
+            default: return nil
             }
-            break
+            return (type, Data(bytes: data, count: item.len))
+        }
+        guard !items.isEmpty else { return }
+        let view = RuntimeContext.fromSurfaceUserdata(userdata)
+        DispatchQueue.main.async { [weak view] in
+            let write = {
+                NSPasteboard.general.clearContents()
+                for (type, data) in items { NSPasteboard.general.setData(data, forType: type) }
+            }
+            guard needsConfirmation else { write(); return }
+            guard let window = view?.window else { return }
+            let alert = NSAlert()
+            alert.messageText = "Replace clipboard contents?"
+            alert.informativeText = "A program in this terminal wants to write to your clipboard."
+            alert.addButton(withTitle: "Allow Once")
+            alert.addButton(withTitle: "Cancel")
+            alert.beginSheetModal(for: window) { response in
+                if response == .alertFirstButtonReturn { write() }
+            }
         }
     }
 

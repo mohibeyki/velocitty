@@ -110,7 +110,7 @@ final class AppConfigurationTests: XCTestCase {
                 XCTAssertTrue($0.localizedDescription.contains(reason), key)
             }
         }
-        XCTAssertThrowsError(try parse("[terminal]\nclipboard_write = 'ask'"))
+        XCTAssertNoThrow(try parse("[terminal]\nclipboard_write = 'ask'"))
     }
 
     func testErrorsIdentifyKeyAndFile() throws {

@@ -114,9 +114,6 @@ public struct AppConfiguration: Equatable, Sendable {
                     guard !text.contains("\0") else {
                         throw ConfigurationError("terminal.\(spelling) cannot contain a NUL character.")
                     }
-                    if key == "clipboard-write", text == "ask" {
-                        throw ConfigurationError("terminal.\(spelling) = ask needs clipboard confirmation UI. Use allow or deny.")
-                    }
                     if key == "working-directory" {
                         directory = try resolveDirectory(text, home: home)
                         options.append(TerminalOption(key: key, value: directory.path, source: source))

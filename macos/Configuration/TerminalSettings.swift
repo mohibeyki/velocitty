@@ -4,6 +4,10 @@
 // Unsupported options are explicit errors, never silently accepted no-ops.
 public enum TerminalSettings {
     public static let supported: Set<String> = [
+        "clipboard-read",
+        "clipboard-paste-protection",
+        "clipboard-paste-bracketed-safe",
+
         "macos-option-as-alt",
         "cursor-click-to-move",
         "mouse-hide-while-typing",
@@ -143,9 +147,6 @@ public enum TerminalSettings {
         "bell-audio-volume": "Needs bell callbacks, audio playback, and app attention handling.",
         "bell-features": "Needs bell callbacks, audio playback, and app attention handling.",
         "class": "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
-        "clipboard-paste-bracketed-safe": "Needs paste-confirmation UI; the current confirmation callback denies requests requiring confirmation.",
-        "clipboard-paste-protection": "Needs paste-confirmation UI; the current confirmation callback denies requests requiring confirmation.",
-        "clipboard-read": "Needs clipboard authorization prompts; the current confirmation callback denies requests requiring confirmation.",
         "command-palette-entry": "Needs a command palette UI.",
         "config-default-files": "Uses the upstream configuration-file format and search policy; Velocitty loads its own TOML file.",
         "confirm-close-surface": "Needs process-aware close confirmation; closing currently terminates the terminal directly.",
