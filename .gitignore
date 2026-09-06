@@ -7,3 +7,5 @@ DerivedData/
 /VeloKit/zig-cache/
 /VeloKit/zig-out/
 /VeloKit/zig-pkg/
+/macos/.build/
+/macos/.swiftpm/

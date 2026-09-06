@@ -3,6 +3,7 @@
 import AppKit
 import Foundation
 import VeloKit
+import VelocittyConfiguration
 
 private final class RuntimeContext: NSObject {
     var app: ghostty_app_t?
@@ -97,7 +98,7 @@ private final class RuntimeContext: NSObject {
                         contents_len: 1,
                         available: nil,
                         available_len: 0,
-                        confirmed: true,
+                        confirmed: false,
                         remember: false)
                     velokit_surface_complete_clipboard_request(surface, &complete, state)
                 }
@@ -116,8 +117,8 @@ private final class RuntimeContext: NSObject {
     }
 
     static let writeClipboard: ghostty_runtime_write_clipboard_cb = {
-        _, location, content, length, _ in
-        guard location == GHOSTTY_CLIPBOARD_STANDARD,
+        _, location, content, length, needsConfirmation in
+        guard !needsConfirmation, location == GHOSTTY_CLIPBOARD_STANDARD,
               content != nil,
               length > 0
         else { return }
@@ -154,11 +155,38 @@ private final class TerminalRuntime {
     private(set) var app: ghostty_app_t?
     private(set) var view: TerminalView?
 
-    init?() {
-        guard let config = velokit_config_new() else { return nil }
+    private var settings: AppConfiguration
+
+    private static func makeConfig(_ settings: AppConfiguration) throws -> ghostty_config_t {
+        guard let config = velokit_config_new() else {
+            throw ConfigurationError("Could not allocate the terminal configuration.")
+        }
+        func failure(_ context: String) -> ConfigurationError {
+            let detail = velokit_config_error(config).map { String(cString: $0) } ?? context
+            return ConfigurationError("\(settings.source.path): \(detail)")
+        }
+        do {
+            for option in settings.options {
+                let accepted = option.key.withCString { key in
+                    option.value.withCString { velokit_config_set(config, key, $0) }
+                }
+                guard accepted else { throw failure("Invalid terminal setting: \(option.key)") }
+            }
+            let finalized = settings.source.deletingLastPathComponent().path.withCString {
+                velokit_config_finalize(config, $0)
+            }
+            guard finalized else { throw failure("Could not finalize the terminal configuration.") }
+            return config
+        } catch {
+            velokit_config_free(config)
+            throw error
+        }
+    }
+
+    init(settings: AppConfiguration) throws {
+        self.settings = settings
+        let config = try Self.makeConfig(settings)
         self.config = config
-        // Use engine defaults until Velocitty has its own configuration support.
-        velokit_config_finalize(config)
 
         var runtimeConfig = ghostty_runtime_config_s(
             userdata: Unmanaged.passUnretained(context).toOpaque(),
@@ -173,7 +201,7 @@ private final class TerminalRuntime {
         guard let app = velokit_app_new(&runtimeConfig, config) else {
             velokit_config_free(config)
             self.config = nil
-            return nil
+            throw ConfigurationError("VeloKit could not initialize the terminal application.")
         }
 
         self.app = app
@@ -181,9 +209,21 @@ private final class TerminalRuntime {
         velokit_app_set_focus(app, true)
     }
 
+    func updateConfiguration(_ settings: AppConfiguration) throws {
+        guard let app else { return }
+        let updated = try Self.makeConfig(settings)
+        guard velokit_app_update_config(app, updated) else {
+            velokit_config_free(updated)
+            throw ConfigurationError("VeloKit could not apply the configuration.")
+        }
+        if let config { velokit_config_free(config) }
+        config = updated
+        self.settings = settings
+    }
+
     func createView() -> TerminalView? {
         guard let app else { return nil }
-        let terminalView = TerminalView(app: app)
+        let terminalView = TerminalView(app: app, workingDirectory: settings.workingDirectory)
         view = terminalView
         return terminalView
     }
@@ -208,7 +248,7 @@ private final class TerminalView: NSView, NSTextInputClient {
 
     override var acceptsFirstResponder: Bool { true }
 
-    init?(app: ghostty_app_t) {
+    init?(app: ghostty_app_t, workingDirectory: URL) {
         super.init(frame: .zero)
 
         var surfaceConfig = velokit_surface_config_new()
@@ -220,9 +260,6 @@ private final class TerminalView: NSView, NSTextInputClient {
         surfaceConfig.scale_factor = Double(NSScreen.main?.backingScaleFactor ?? 2)
         surfaceConfig.context = GHOSTTY_SURFACE_CONTEXT_WINDOW
 
-        // Use the development workspace regardless of the launcher's directory.
-        let workingDirectory = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("workspace", isDirectory: true)
         surface = workingDirectory.path.withCString { path in
             surfaceConfig.working_directory = path
             return velokit_surface_new(app, &surfaceConfig)
@@ -427,10 +464,29 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
         installMainMenu()
 
-        guard let runtime = TerminalRuntime(),
-              let terminalView = runtime.createView()
-        else {
-            NSLog("VeloKit failed to initialize")
+        let runtime: TerminalRuntime
+        do {
+            runtime = try TerminalRuntime(settings: AppConfiguration.load())
+        } catch {
+            let alert = configurationAlert(error)
+            alert.informativeText += "\n\nUse the defaults for this launch, or quit to fix the file."
+            alert.addButton(withTitle: "Use Defaults")
+            alert.addButton(withTitle: "Quit")
+            guard alert.runModal() == .alertFirstButtonReturn else {
+                NSApp.terminate(nil)
+                return
+            }
+            do {
+                runtime = try TerminalRuntime(settings: .defaults())
+            } catch {
+                configurationAlert(error).runModal()
+                NSApp.terminate(nil)
+                return
+            }
+        }
+
+        guard let terminalView = runtime.createView() else {
+            NSLog("VeloKit failed to create the terminal")
             NSApp.terminate(nil)
             return
         }
@@ -465,6 +521,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             action: #selector(showAboutPanel(_:)),
             keyEquivalent: "")
         aboutItem.target = self
+        appMenu.addItem(.separator())
+        let reloadItem = appMenu.addItem(
+            withTitle: "Reload Configuration",
+            action: #selector(reloadConfiguration(_:)),
+            keyEquivalent: "r")
+        reloadItem.keyEquivalentModifierMask = [.command, .shift]
+        reloadItem.target = self
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide Velocitty", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(
@@ -503,6 +566,24 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         windowMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
 
         NSApp.mainMenu = mainMenu
+    }
+
+    private func configurationAlert(_ error: Error) -> NSAlert {
+        NSLog("Configuration error: %@", error.localizedDescription)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Could not load configuration"
+        alert.informativeText = error.localizedDescription
+        return alert
+    }
+
+    @objc private func reloadConfiguration(_ sender: Any?) {
+        guard let runtime else { return }
+        do {
+            try runtime.updateConfiguration(AppConfiguration.load())
+        } catch {
+            configurationAlert(error).runModal()
+        }
     }
 
     @objc private func showAboutPanel(_ sender: Any?) {

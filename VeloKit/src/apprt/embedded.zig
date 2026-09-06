@@ -1591,6 +1591,15 @@ pub const CAPI = struct {
         core_app.destroy();
     }
 
+    /// Apply configuration to the app and its existing surfaces.
+    export fn velokit_app_update_config(v: *App, config: *const Config) bool {
+        v.core_app.updateConfig(v, config) catch |err| {
+            log.err("error updating config err={}", .{err});
+            return false;
+        };
+        return true;
+    }
+
     /// Update the focused state of the app.
     export fn velokit_app_set_focus(
         app: *App,

@@ -4520,7 +4520,7 @@ pub fn changeConditionalState(
 
 /// Expand the relative paths in config-files to be absolute paths
 /// relative to the base directory.
-fn expandPaths(self: *Config, base: []const u8) !void {
+pub fn expandPaths(self: *Config, base: []const u8) !void {
     const arena_alloc = self._arena.?.allocator();
 
     // Keep track of this step for replays

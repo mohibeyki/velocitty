@@ -1103,13 +1103,16 @@ int velokit_init(uintptr_t, char**);
 ghostty_config_t velokit_config_new();
 void velokit_config_free(ghostty_config_t);
 
-void velokit_config_finalize(ghostty_config_t);
+bool velokit_config_set(ghostty_config_t, const char*, const char*);
+const char* velokit_config_error(ghostty_config_t);
+bool velokit_config_finalize(ghostty_config_t, const char*);
 
 ghostty_app_t velokit_app_new(const ghostty_runtime_config_s*,
                                ghostty_config_t);
 void velokit_app_free(ghostty_app_t);
 void velokit_app_tick(ghostty_app_t);
 void* velokit_app_userdata(ghostty_app_t);
+bool velokit_app_update_config(ghostty_app_t, ghostty_config_t);
 void velokit_app_set_focus(ghostty_app_t, bool);
 
 ghostty_surface_config_s velokit_surface_config_new();

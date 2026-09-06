@@ -10,6 +10,7 @@
 		A00000000000000000000014 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000015 /* Assets.xcassets */; };
 		A00000000000000000000001 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000002 /* main.swift */; };
 		A00000000000000000000010 /* VeloKit.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A00000000000000000000011 /* VeloKit.xcframework */; };
+		A00000000000000000000019 /* VelocittyConfiguration in Frameworks */ = {isa = PBXBuildFile; productRef = A00000000000000000000018 /* VelocittyConfiguration */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -62,6 +63,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A00000000000000000000010 /* VeloKit.xcframework in Frameworks */,
+				A00000000000000000000019 /* VelocittyConfiguration in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -81,6 +83,7 @@
 			dependencies = (
 			);
 			name = Velocitty;
+			packageProductDependencies = (A00000000000000000000018 /* VelocittyConfiguration */);
 			productName = Velocitty;
 			productReference = A00000000000000000000003 /* Velocitty.app */;
 			productType = "com.apple.product-type.application";
@@ -104,6 +107,7 @@
 			);
 			mainGroup = A00000000000000000000004;
 			productRefGroup = A00000000000000000000006 /* Products */;
+			packageReferences = (A00000000000000000000017 /* Local configuration package */);
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -279,6 +283,14 @@
 			name = Release;
 		};
 /* End XCBuildConfiguration section */
+
+/* Begin XCLocalSwiftPackageReference section */
+        A00000000000000000000017 = {isa = XCLocalSwiftPackageReference; relativePath = "."; };
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+        A00000000000000000000018 /* VelocittyConfiguration */ = {isa = XCSwiftPackageProductDependency; productName = VelocittyConfiguration; };
+/* End XCSwiftPackageProductDependency section */
 
 /* Begin XCConfigurationList section */
 		A0000000000000000000000A /* Build configuration list for PBXProject "Velocitty" */ = {
