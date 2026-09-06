@@ -324,6 +324,7 @@ final class TerminalView: NSView, NSTextInputClient {
 final class TerminalChrome: NSView, NSSearchFieldDelegate {
     let terminal: TerminalView
     let search = NSSearchField()
+    let resizeLabel = NSTextField(labelWithString: "")
     let secure = NSTextField(labelWithString: "")
     let count = NSTextField(labelWithString: "")
     let previous = NSButton(title: "↑", target: nil, action: nil)
@@ -340,7 +341,12 @@ final class TerminalChrome: NSView, NSSearchFieldDelegate {
         self.terminal = terminal
         super.init(frame: terminal.frame)
         addSubview(terminal)
-        for view in [search, count, previous, next, close, scroller, secure] { addSubview(view) }
+        for view in [search, count, previous, next, close, scroller, secure, resizeLabel] { addSubview(view) }
+        resizeLabel.isHidden = true
+        resizeLabel.font = .monospacedDigitSystemFont(ofSize: 16, weight: .medium)
+        resizeLabel.alignment = .center
+        resizeLabel.drawsBackground = true
+        resizeLabel.backgroundColor = .windowBackgroundColor
         secure.font = .systemFont(ofSize: 11)
         secure.textColor = .secondaryLabelColor
         search.placeholderString = "Find in terminal"
@@ -363,6 +369,10 @@ final class TerminalChrome: NSView, NSSearchFieldDelegate {
         super.layout()
         let height: CGFloat = searching ? 38 : 0
         let width: CGFloat = showScroll ? 14 : 0
+        let position = NativeSettings(config: terminal.config).string("resize-overlay-position", "center")
+        let overlayX: CGFloat = position.hasSuffix("left") ? 12 : position.hasSuffix("right") ? bounds.width - 152 : (bounds.width - 140) / 2
+        let overlayY: CGFloat = position.hasPrefix("top") ? bounds.height - height - 44 : position.hasPrefix("bottom") ? 12 : (bounds.height - height - 32) / 2
+        resizeLabel.frame = NSRect(x: overlayX, y: overlayY, width: 140, height: 32)
         secure.frame = NSRect(x: max(8, bounds.width - 125), y: 5, width: 120, height: 18)
         terminal.frame = NSRect(x: 0, y: 0, width: bounds.width - width, height: bounds.height - height)
         scroller.frame = NSRect(x: bounds.width - width, y: 0, width: width, height: bounds.height - height)
@@ -502,4 +512,10 @@ final class CommandPalette: NSPanel, NSSearchFieldDelegate, NSTableViewDataSourc
         terminal?.window?.makeFirstResponder(terminal)
         terminal?.performSurfaceAction(action)
     }
+}
+
+
+final class TerminalWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
 }

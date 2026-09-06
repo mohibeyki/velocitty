@@ -4,6 +4,16 @@
 // Unsupported options are explicit errors, never silently accepted no-ops.
 public enum TerminalSettings {
     public static let supported: Set<String> = [
+        "resize-overlay",
+        "resize-overlay-position",
+        "resize-overlay-duration",
+        "window-subtitle",
+        "window-title-font-family",
+        "window-titlebar-background",
+        "window-titlebar-foreground",
+        "macos-titlebar-proxy-icon",
+        "macos-non-native-fullscreen",
+
         "command-palette-entry",
         "macos-secure-input-indication",
         "macos-auto-secure-input",
@@ -213,9 +223,7 @@ public enum TerminalSettings {
         "macos-icon-frame": "Needs configurable application icon generation/loading; the app has fixed artwork.",
         "macos-icon-ghost-color": "Needs configurable application icon generation/loading; the app has fixed artwork.",
         "macos-icon-screen-color": "Needs configurable application icon generation/loading; the app has fixed artwork.",
-        "macos-non-native-fullscreen": "Needs the corresponding AppKit window, Dock, or launch behavior.",
         "macos-shortcuts": "Needs Shortcuts integration and authorization handling.",
-        "macos-titlebar-proxy-icon": "Needs the corresponding AppKit window, Dock, or launch behavior.",
         "middle-click-action": "Needs middle-click event handling and primary-selection clipboard support.",
         "quick-terminal-animation-duration": "Needs a quick-terminal window and activation/focus handling.",
         "quick-terminal-autohide": "Needs a quick-terminal window and activation/focus handling.",
@@ -224,9 +232,6 @@ public enum TerminalSettings {
         "quick-terminal-screen": "Needs a quick-terminal window and activation/focus handling.",
         "quick-terminal-size": "Needs a quick-terminal window and activation/focus handling.",
         "quick-terminal-space-behavior": "Needs a quick-terminal window and activation/focus handling.",
-        "resize-overlay": "Needs a resize overlay view.",
-        "resize-overlay-duration": "Needs a resize overlay view.",
-        "resize-overlay-position": "Needs a resize overlay view.",
         "split-divider-color": "Needs pane layout, focus, and split rendering in the app.",
         "split-inherit-working-directory": "Needs window/tab/pane creation and inheritance policies.",
         "split-preserve-zoom": "Needs pane layout, focus, and split rendering in the app.",
@@ -238,10 +243,6 @@ public enum TerminalSettings {
         "window-inherit-working-directory": "Needs window/tab/pane creation and inheritance policies.",
         "window-new-tab-position": "Needs window/tab/pane creation and inheritance policies.",
         "window-show-tab-bar": "Needs window/tab/pane creation and inheritance policies.",
-        "window-subtitle": "Needs configurable AppKit window creation, appearance, or state handling.",
-        "window-title-font-family": "Needs configurable AppKit window creation, appearance, or state handling.",
-        "window-titlebar-background": "Needs configurable AppKit window creation, appearance, or state handling.",
-        "window-titlebar-foreground": "Needs configurable AppKit window creation, appearance, or state handling.",
         "x11-instance-name": "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
     ]
 }

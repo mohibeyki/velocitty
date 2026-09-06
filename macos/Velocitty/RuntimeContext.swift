@@ -43,7 +43,26 @@ final class RuntimeContext: NSObject {
                 return true
             }
             DispatchQueue.main.async {
-                view?.window?.title = title
+                (NSApp.delegate as? AppDelegate)?.setTitle(title)
+            }
+
+        case GHOSTTY_ACTION_PWD:
+            let path = action.action.pwd.pwd.map { String(cString: $0) } ?? ""
+            DispatchQueue.main.async { (NSApp.delegate as? AppDelegate)?.setDirectory(path) }
+
+        case GHOSTTY_ACTION_RESET_WINDOW_SIZE:
+            DispatchQueue.main.async { view?.window?.setContentSize(NSSize(width: 960, height: 640)) }
+
+        case GHOSTTY_ACTION_CLOSE_ALL_WINDOWS:
+            DispatchQueue.main.async { (NSApp.delegate as? AppDelegate)?.window?.performClose(nil) }
+
+        case GHOSTTY_ACTION_TOGGLE_BACKGROUND_OPACITY:
+            DispatchQueue.main.async {
+                guard let delegate = NSApp.delegate as? AppDelegate else { return }
+                delegate.opacityOverride = delegate.opacityOverride == nil ? 1 : nil
+                delegate.runtime?.opacityOverride = delegate.opacityOverride
+                if let runtime = delegate.runtime { try? runtime.updateConfiguration(runtime.settings) }
+                delegate.applyWindowSettings()
             }
 
         case GHOSTTY_ACTION_TOGGLE_COMMAND_PALETTE:
@@ -56,7 +75,7 @@ final class RuntimeContext: NSObject {
             DispatchQueue.main.async { view?.window?.zoom(nil) }
 
         case GHOSTTY_ACTION_TOGGLE_FULLSCREEN:
-            DispatchQueue.main.async { view?.window?.toggleFullScreen(nil) }
+            DispatchQueue.main.async { (NSApp.delegate as? AppDelegate)?.toggleFullscreen() }
 
         case GHOSTTY_ACTION_TOGGLE_WINDOW_DECORATIONS:
             DispatchQueue.main.async {
@@ -81,7 +100,8 @@ final class RuntimeContext: NSObject {
 
         case GHOSTTY_ACTION_FLOAT_WINDOW:
             let level = action.action.float_window
-            DispatchQueue.main.async { view?.window?.level = level == GHOSTTY_FLOAT_WINDOW_ON ? .floating : .normal }
+            DispatchQueue.main.async { guard let window = view?.window else { return }
+                window.level = level == GHOSTTY_FLOAT_WINDOW_ON || (level == GHOSTTY_FLOAT_WINDOW_TOGGLE && window.level != .floating) ? .floating : .normal }
 
         case GHOSTTY_ACTION_SECURE_INPUT:
             let mode = action.action.secure_input

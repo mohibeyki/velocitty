@@ -12,6 +12,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var appearanceObservation: NSKeyValueObservation?
     var quitTimer: Timer?
     var closing = false
+    var resizeTimer: Timer?
+    var hasResized = false
+    var normalFrame: NSRect?
+    var normalStyle: NSWindow.StyleMask?
+    var titleAccessory: NSTitlebarAccessoryViewController?
+    var titleLabel: NSTextField?
+    var currentDirectory: String?
+    var opacityOverride: Double?
     var palette: CommandPalette?
     var shortcuts: GlobalShortcuts?
     var passwordInput = false
@@ -76,7 +84,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         quitTimer = nil
         if let window { window.makeKeyAndOrderFront(nil); return }
         guard let runtime, let terminalView = runtime.createView() else { return }
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 640),
+        let window = TerminalWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 640),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "Velocitty"
         window.isReleasedWhenClosed = false
@@ -113,7 +121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.makeFirstResponder(terminalView)
         if native.value("maximize", false) { window.zoom(nil) }
         if native.string("fullscreen", "false") != "false" || (shouldSaveState && UserDefaults.standard.bool(forKey: "TerminalFullscreen")) {
-            window.toggleFullScreen(nil)
+            toggleFullscreen()
         }
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -136,9 +144,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             window.standardWindowButton(button)?.isHidden = native.string("macos-window-buttons") == "hidden"
         }
         window.colorSpace = native.string("window-colorspace") == "display-p3" ? .displayP3 : .sRGB
+        if let titleAccessory { window.removeTitlebarAccessoryViewController(at: window.titlebarAccessoryViewControllers.firstIndex(of: titleAccessory) ?? 0); self.titleAccessory = nil; titleLabel = nil }
+        let family = native.string("window-title-font-family")
+        let foreground = runtime?.settings.options.contains { $0.key == "window-titlebar-foreground" } == true
+        let background = runtime?.settings.options.contains { $0.key == "window-titlebar-background" } == true
+        if !family.isEmpty || foreground || background {
+            let accessory = NSTitlebarAccessoryViewController()
+            let label = NSTextField(labelWithString: window.title)
+            label.frame = NSRect(x: 0, y: 0, width: 400, height: 24)
+            label.alignment = .center
+            label.font = NSFont(name: family, size: 13) ?? .systemFont(ofSize: 13)
+            if foreground { label.textColor = native.color("window-titlebar-foreground") }
+            if background { label.drawsBackground = true; label.backgroundColor = native.color("window-titlebar-background") }
+            accessory.view = label
+            accessory.layoutAttribute = .bottom
+            window.addTitlebarAccessoryViewController(accessory)
+            titleAccessory = accessory; titleLabel = label
+            window.titleVisibility = .hidden
+        }
         let theme = native.string("window-theme")
-        window.appearance = theme == "dark" ? NSAppearance(named: .darkAqua) : theme == "light" ? NSAppearance(named: .aqua) : nil
-        let opacity = native.value("background-opacity", 1.0)
+        let color = native.color("background").usingColorSpace(.sRGB) ?? .black
+        let dark = 0.2126 * color.redComponent + 0.7152 * color.greenComponent + 0.0722 * color.blueComponent < 0.5
+        let inferred = theme == "ghostty" || (theme == "auto" && titlebar != "native")
+        window.appearance = theme == "dark" || (inferred && dark) ? NSAppearance(named: .darkAqua) : theme == "light" || (inferred && !dark) ? NSAppearance(named: .aqua) : nil
+        let opacity = opacityOverride ?? native.value("background-opacity", 1.0)
         window.isOpaque = opacity >= 1
         window.backgroundColor = native.color("background").withAlphaComponent(opacity)
         let blur = native.value("background-blur", Int16(0))
@@ -172,7 +201,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         if shouldSaveState {
             window?.saveFrame(usingName: "TerminalWindow")
-            UserDefaults.standard.set(window?.styleMask.contains(.fullScreen) == true, forKey: "TerminalFullscreen")
+            UserDefaults.standard.set((window?.styleMask.contains(.fullScreen) == true || normalFrame != nil), forKey: "TerminalFullscreen")
         }
         passwordInput = false
         manualSecureInput = false
@@ -181,6 +210,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         runtime?.closeView()
         window = nil
         chrome = nil
+        palette?.close()
+        palette = nil
+        normalFrame = nil
+        normalStyle = nil
+        NSApp.presentationOptions = []
+        resizeTimer?.invalidate()
         if native.value("quit-after-last-window-closed", false) {
             quitTimer = Timer.scheduledTimer(withTimeInterval: max(0.01, native.seconds("quit-after-last-window-closed-delay", 0)), repeats: false) { [weak self] _ in
                 if self?.window == nil { NSApp.terminate(nil) }
@@ -279,6 +314,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         windowMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
 
         NSApp.mainMenu = mainMenu
+    }
+
+    func setTitle(_ title: String) {
+        window?.title = title
+        titleLabel?.stringValue = title
+    }
+    func setDirectory(_ path: String) {
+        currentDirectory = path
+        if native.string("window-subtitle") == "working-directory" { window?.subtitle = path }
+        window?.representedURL = native.string("macos-titlebar-proxy-icon") == "visible" ? URL(fileURLWithPath: path) : nil
+    }
+    func toggleFullscreen() {
+        guard let window else { return }
+        let mode = native.string("macos-non-native-fullscreen", "false")
+        if let frame = normalFrame {
+            window.styleMask = normalStyle ?? [.titled, .closable, .miniaturizable, .resizable]
+            window.setFrame(frame, display: true)
+            normalFrame = nil; normalStyle = nil
+            NSApp.presentationOptions = []
+            return
+        }
+        guard mode != "false" || native.string("fullscreen") == "non-native" else { window.toggleFullScreen(nil); return }
+        normalFrame = window.frame; normalStyle = window.styleMask
+        window.styleMask = [.borderless, .resizable]
+        if let screen = window.screen {
+            var frame = mode == "visible-menu" ? screen.visibleFrame : screen.frame
+            if mode == "padded-notch" { frame.size.height -= screen.safeAreaInsets.top }
+            window.setFrame(frame, display: true)
+        }
+        NSApp.presentationOptions = mode == "visible-menu" ? [.autoHideDock] : [.autoHideDock, .autoHideMenuBar]
+    }
+    func windowDidResize(_ notification: Notification) {
+        defer { hasResized = true }
+        let policy = native.string("resize-overlay", "after-first")
+        guard policy != "never", policy == "always" || hasResized, window?.inLiveResize == true,
+              let chrome, let surface = runtime?.view?.surface else { return }
+        let size = velokit_surface_size(surface)
+        chrome.resizeLabel.stringValue = "\(size.columns) × \(size.rows)"
+        chrome.resizeLabel.isHidden = false
+        chrome.needsLayout = true
+        resizeTimer?.invalidate()
+        resizeTimer = Timer.scheduledTimer(withTimeInterval: max(0.01, native.seconds("resize-overlay-duration", 0.75)), repeats: false) { [weak chrome] _ in chrome?.resizeLabel.isHidden = true }
+    }
+    func windowDidEndLiveResize(_ notification: Notification) {
+        if shouldSaveState { window?.saveFrame(usingName: "TerminalWindow") }
     }
 
     @objc func showCommands() {

@@ -10,9 +10,10 @@ final class TerminalRuntime {
     private(set) var app: ghostty_app_t?
     private(set) var view: TerminalView?
 
+    var opacityOverride: Double?
     var settings: AppConfiguration
 
-    static func makeConfig(_ settings: AppConfiguration) throws -> ghostty_config_t {
+    static func makeConfig(_ settings: AppConfiguration, opacityOverride: Double? = nil) throws -> ghostty_config_t {
         guard let config = velokit_config_new() else {
             throw ConfigurationError("Could not allocate the terminal configuration.")
         }
@@ -26,6 +27,9 @@ final class TerminalRuntime {
                     option.value.withCString { velokit_config_set(config, key, $0) }
                 }
                 guard accepted else { throw failure("Invalid terminal setting: \(option.key)") }
+            }
+            if let opacityOverride {
+                _ = String(opacityOverride).withCString { velokit_config_set(config, "background-opacity", $0) }
             }
             let finalized = settings.source.deletingLastPathComponent().path.withCString {
                 velokit_config_finalize(config, $0)
@@ -67,7 +71,7 @@ final class TerminalRuntime {
 
     func updateConfiguration(_ settings: AppConfiguration) throws {
         guard let app else { return }
-        let updated = try Self.makeConfig(settings)
+        let updated = try Self.makeConfig(settings, opacityOverride: opacityOverride)
         guard velokit_app_update_config(app, updated) else {
             velokit_config_free(updated)
             throw ConfigurationError("VeloKit could not apply the configuration.")
