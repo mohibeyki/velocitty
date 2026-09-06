@@ -1,0 +1,246 @@
+# Cleanup review
+
+Updated 2026-09-06. This is the working list for the cleanup session. Original issue
+IDs are retained; resolved findings and rejected claims are removed from the queue.
+
+Discuss one issue at a time: choose an approach, implement it, validate it, update
+this file, and commit the change as a self-contained chunk. A recommendation below
+is not an approved decision. **Current issue: C02 — awaiting a choice.**
+
+Scope: our macOS host, private VeloKit bridge, configuration, and build/test integration.
+Untouched libghostty internals and new mux functionality are outside this cleanup.
+
+## Remaining issues
+
+### C02. Typed configuration access
+
+**Design risk.** `NativeSettings.value<T>` accepts an arbitrary string key and Swift
+type, then gives the resulting buffer to an untyped native getter. A mismatched type
+can produce an incorrect value or an invalid memory write. No current call-site
+mismatch has been demonstrated. The separate trigger ABI defect is already fixed.
+
+**Choose:** typed Swift keys/accessors, checked private bridge getters plus Swift
+accessors, or defer. Keep engine defaults and native parsing as the source of truth.
+
+Code: [NativeSettings.swift](macos/Velocitty/NativeSettings.swift),
+[CApi.zig](VeloKit/src/config/CApi.zig).
+
+### C04. Terminal link policy
+
+**High; missing host policy confirmed.** OSC 8 hyperlinks are terminal-supplied
+URLs. The host opens them through `NSWorkspace` without distinguishing schemes;
+a label can conceal an unusual application handler. No exploit was reproduced.
+
+**Choose:** schemes that open directly, require confirmation, or are rejected.
+Keep engine-generated text/HTML export paths separate from this policy.
+
+Code: [RuntimeContext.swift](macos/Velocitty/RuntimeContext.swift), `OPEN_URL`.
+
+### C05. Effective focus and input composition
+
+**High; focus gap confirmed, IME symptoms need reproduction.** A terminal can remain
+its window's first responder after the window loses focus. Surface focus currently
+follows responder changes without consistently accounting for key-window state.
+
+**Choose:** one effective-focus rule using app activity, key window, and responder.
+Test composition across search, palette, and window transitions before choosing
+when unfinished input should commit, remain pending, or be discarded.
+
+Code: [TerminalView.swift](macos/Velocitty/TerminalView.swift),
+[AppDelegate.swift](macos/Velocitty/AppDelegate.swift).
+
+### C07. Pending clipboard confirmations
+
+**High; abandoned requests confirmed, leak/stall scenarios need targeted tests.**
+Confirmation callbacks can return without completing a request when its window or
+surface disappears. Denying through an already freed surface would be unsafe.
+
+**Choose:** ownership and exactly-once cancellation while the surface is still alive.
+Test closing a terminal with a pending confirmation. Read and write callbacks have
+different contracts; do not apply read-request cancellation to writes.
+
+Code: [RuntimeContext.swift](macos/Velocitty/RuntimeContext.swift).
+
+### C08. Engine and surface ownership
+
+**Before mux; confirmed design limitation.** Each window owns a separate engine app,
+so engine-wide surface actions stop at that window and shared caches are duplicated.
+Closing the view destroys its terminal process.
+
+**Choose:** how to separate application runtime, terminal surface, and window
+presentation. One shared engine app is a candidate; persistence remains future work.
+
+Code: [TerminalRuntime.swift](macos/Velocitty/TerminalRuntime.swift),
+[AppDelegate.swift](macos/Velocitty/AppDelegate.swift).
+
+### C09. Test workflow
+
+**Before mux; confirmed gap.** SwiftPM runs configuration tests only. Native bridge
+and AppKit regressions require manual compilation, and there is no CI workflow.
+
+**Choose:** normal test targets and CI coverage using existing build tools. Cover
+our bridge and host, including ABI, teardown, input, focus, and clipboard cancellation.
+
+Code: [Package.swift](macos/Package.swift), [EngineTests](macos/EngineTests/Configuration.c),
+[WindowTests](macos/WindowTests/main.swift).
+
+### C10. Engine artifact freshness
+
+**Before mux; confirmed gap.** Xcode consumes a manually copied, ignored XCFramework
+without checking whether it matches engine source. Terminfo is generated separately.
+
+**Choose:** an engine build dependency or a freshness/resource check using Zig/Xcode.
+Avoid adding a bespoke development-tool wrapper. A successful stale build is not
+validation of current engine source.
+
+Code: [Xcode project](macos/Velocitty.xcodeproj/project.pbxproj),
+[build.zig](VeloKit/build.zig).
+
+### C11. Consistent configuration reload
+
+**Medium; confirmed gap.** Windows update sequentially after prevalidation. A later
+failure can leave earlier windows using a different configuration. Native control
+refresh is already fixed.
+
+**Choose:** preparation/application/rollback semantics, coordinated with C08.
+The original claim of a config-pointer race during the synchronous update was not
+established and is not an additional open defect.
+
+Code: [AppDelegate.swift](macos/Velocitty/AppDelegate.swift), `reloadConfiguration`.
+
+### C12. Supported features and actions
+
+**Medium; confirmed mismatches.** Decide each subitem separately:
+
+- **C12a:** `goto_window` ignores direction.
+- **C12b:** `open_config:new_window` opens externally.
+- **C12c:** blur variants and radii produce one native visual treatment.
+- **C12d:** decoration toggles are lost during later appearance/config updates.
+- **C12e:** size-limit handling ignores maximums.
+- **C12f:** unsupported keybinding actions can parse; the palette has a separate denylist.
+- **C12g:** bell borders flash briefly rather than providing persistent feedback.
+
+**Choose for each:** implement, reject, or explicitly define Velocitty's behavior.
+Consider a shared capability registry when addressing C12f.
+
+Code: [RuntimeContext.swift](macos/Velocitty/RuntimeContext.swift),
+[CommandPalette.swift](macos/Velocitty/CommandPalette.swift),
+[AppDelegate.swift](macos/Velocitty/AppDelegate.swift).
+
+### C13. Process-wide UI ownership
+
+**Medium; Dock/fullscreen conflicts confirmed.** One window's timers can clear
+another window's Dock progress. Borderless fullscreen windows independently modify
+application-wide presentation options.
+
+**Choose separately:** Dock aggregation/selection and timeout policy; fullscreen
+ownership; centralized Secure Input ownership. Balance only successful acquisitions.
+A process crash leaving Secure Input locked until logout was not substantiated.
+
+Code: [AppDelegate.swift](macos/Velocitty/AppDelegate.swift).
+
+### C14. Configuration include semantics
+
+**Medium; intentional compatibility difference.** Our loader applies includes first,
+then lets the parent override; repeatable arrays replace earlier arrays. The engine's
+native loader applies includes afterward and uses per-setting repeat/reset semantics.
+
+**Choose:** retain and document our policy or align it with the native loader.
+Changing array behavior needs per-setting reset rules, not blanket concatenation.
+
+Code: [AppConfiguration.swift](macos/Configuration/AppConfiguration.swift).
+
+### C15. Direct file drops
+
+**Optional feature.** File-open failure reporting is fixed. Dropping files directly
+onto the terminal view is not implemented.
+
+**Choose:** implement direct drops or defer as feature work.
+
+Code: [TerminalView.swift](macos/Velocitty/TerminalView.swift).
+
+### C16. Window placement and restoration
+
+**Medium; precedence conflict confirmed.** Cascading overrides explicit coordinates
+on subsequent windows. All windows also share saved frame/fullscreen keys.
+
+**Choose separately:** explicit-position versus cascade precedence; last-closed versus
+per-window restoration. Preserve diagonal placement for ordinary new windows.
+
+Code: [AppDelegate.swift](macos/Velocitty/AppDelegate.swift).
+
+### C17. Terminal accessibility
+
+**Medium; missing host interface.** Rendered terminal output has no accessibility
+text, selection, or cursor interface.
+
+**Choose:** implementation scope and timing; preserve a suitable surface/view boundary.
+
+Code: [TerminalView.swift](macos/Velocitty/TerminalView.swift).
+
+### C18. Portable defaults and home expansion
+
+**Lower; policy/testability.** Dumped working-directory defaults contain an absolute
+machine-specific path. Theme expansion uses the process home even when configuration
+loading receives an injected home. Error provenance is already fixed.
+
+**Choose separately:** portable automatic-directory representation and consistent
+home injection. Preserve the requested workspace/home default. Explicit `inherit`
+currently means process cwd and is a separate compatibility decision.
+
+Code: [ConfigurationTemplate.swift](macos/Configuration/ConfigurationTemplate.swift),
+[TerminalTheme.swift](macos/Configuration/TerminalTheme.swift).
+
+### C19. Commands while editing fields
+
+**Lower; UX decision.** Find and Command Palette target the active terminal even when
+another input field has focus. Their no-terminal availability is already fixed.
+
+**Choose:** retain app-directed behavior or use responder-specific behavior.
+Explicitly unbound shortcuts must stay unbound; shared config ownership belongs to C08.
+
+Code: [AppDelegate.swift](macos/Velocitty/AppDelegate.swift).
+
+### C20. Distribution housekeeping
+
+**Before distribution; inventory and policy decisions.** Discuss separately:
+
+- **C20a:** inventory shipped dependencies and complete their texts in VeloKit's
+  consolidated third-party notice; its “Other dependencies” section is currently an index.
+- **C20b:** keep broad `public.item` file handling or narrow the Open With registration.
+- **C20c:** distribution signing is deferred; ad-hoc signing is intentional for development.
+
+GPLv3-only is settled. Documentation, duplicate project licensing, and About metadata
+have already been cleaned up.
+
+Code: [THIRD_PARTY_NOTICES.md](VeloKit/THIRD_PARTY_NOTICES.md),
+[Info.plist](macos/Velocitty/Info.plist).
+
+## Completed fixes
+
+| Issue | Completed work |
+| --- | --- |
+| C01 | Invalidate runtime callback handles and borrowed view handles before teardown. |
+| C02, ABI portion | Serialize complete C trigger fields; test modifier width, offsets, and nonzero output buffers. |
+| C03 | Preserve Unicode above AppKit's special-key range. |
+| C06 | Safely remove accessories and avoid adding them to hidden titlebars; reproduced crash fixed. |
+| C11, controls | Refresh scrollbar visibility/layout on reload; remove unreachable scrollbar policy branch. |
+| C15, delivery | Report file-delivery outcomes, including startup failure/cancellation. |
+| C18, diagnostics | Attribute native setting errors to their included source file. |
+| C19, availability | Disable terminal commands without a live destination; preserve unbinding. |
+| C20, docs | Update README, consolidate project license, use bundle About metadata, fix SPDX placement. |
+
+Validation: rebuilt VeloKit; native configuration/ABI tests, 13 Swift configuration
+tests, both AppKit lifecycle/automatic-quit suites, and Debug app build passed.
+Tests include queued wakeups, Unicode conversion, titlebar reloads, scrollbar refresh,
+menu availability, and included-file diagnostics. Real IME transitions, clipboard
+cancellation, and injected file-open creation failures still need coverage.
+
+## Review conclusions retained
+
+The original reviews were consolidated and removed. These rejected claims should
+not reappear as open issues: incorrect precise-scroll scaling, treating exported
+text/HTML file paths as arbitrary URLs, missing engine child-exit/wait behavior,
+Foundation nested-path handling, and retaining menu shortcuts after explicit unbind.
+Speculative GTK ports, moving TOML to Zig, untouched vendor names, and cosmetic
+Xcode identifiers are outside this cleanup.

@@ -1,5 +1,5 @@
-import AppKit
 // SPDX-License-Identifier: GPL-3.0
+import AppKit
 import Foundation
 
 public enum TerminalTheme {

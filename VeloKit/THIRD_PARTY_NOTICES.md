@@ -2,7 +2,7 @@
 
 This is the consolidated third-party provenance and license notice for Velocitty
 and VeloKit.
-VeloKit's own license is in [LICENSE](LICENSE). Dependency source trees may
+VeloKit's own license is in [../LICENSE](../LICENSE). Dependency source trees may
 also contain their original license files; those files stay with the code they
 govern, while this document is the project-level notice.
 
@@ -212,4 +212,3 @@ LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
-

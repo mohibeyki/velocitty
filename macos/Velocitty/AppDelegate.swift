@@ -383,7 +383,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   @objc private func showAboutPanel(_ sender: Any?) {
     NSApp.orderFrontStandardAboutPanel(options: [
       .applicationName: "Velocitty",
-      .applicationVersion: "0.1.0",
       .credits: NSAttributedString(string: "A macOS terminal powered by libghostty."),
     ])
   }

@@ -5,7 +5,7 @@ Velocitty is a native macOS terminal built with Swift and AppKit, powered by
 terminal engine.
 
 The goal is to manage terminal and agent sessions in a single window. Today,
-Velocitty provides one interactive terminal with shell integration, search,
+Velocitty provides independent terminal windows with shell integration, search,
 copy/paste, clickable links, and file-based configuration. Tabs, panes, and
 persistent multiplexing are still ahead.
 
@@ -65,6 +65,5 @@ The shell starts in `~/workspace`, falling back to `~` if it does not exist.
 
 ## License
 
-Velocitty and VeloKit use GPLv3. See [LICENSE](LICENSE) and
-[VeloKit/LICENSE](VeloKit/LICENSE). Third-party licenses and provenance are
-collected in [VeloKit/THIRD_PARTY_NOTICES.md](VeloKit/THIRD_PARTY_NOTICES.md).
+Velocitty and VeloKit use GPLv3. See [LICENSE](LICENSE). Third-party licenses and
+provenance are collected in [VeloKit/THIRD_PARTY_NOTICES.md](VeloKit/THIRD_PARTY_NOTICES.md).

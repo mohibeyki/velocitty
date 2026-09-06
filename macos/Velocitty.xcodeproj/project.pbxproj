@@ -302,6 +302,8 @@
                 INFOPLIST_FILE = Velocitty/Info.plist;
 				INFOPLIST_KEY_NSHighResolutionCapable = YES;
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 0.1.0;
+				CURRENT_PROJECT_VERSION = 1;
 				PRODUCT_BUNDLE_IDENTIFIER = app.velocitty;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 			};
@@ -319,6 +321,8 @@
                 INFOPLIST_FILE = Velocitty/Info.plist;
 				INFOPLIST_KEY_NSHighResolutionCapable = YES;
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 0.1.0;
+				CURRENT_PROJECT_VERSION = 1;
 				PRODUCT_BUNDLE_IDENTIFIER = app.velocitty;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 			};
