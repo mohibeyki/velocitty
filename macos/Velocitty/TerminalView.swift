@@ -324,6 +324,7 @@ final class TerminalView: NSView, NSTextInputClient {
 final class TerminalChrome: NSView, NSSearchFieldDelegate {
     let terminal: TerminalView
     let search = NSSearchField()
+    let secure = NSTextField(labelWithString: "")
     let count = NSTextField(labelWithString: "")
     let previous = NSButton(title: "↑", target: nil, action: nil)
     let next = NSButton(title: "↓", target: nil, action: nil)
@@ -339,7 +340,9 @@ final class TerminalChrome: NSView, NSSearchFieldDelegate {
         self.terminal = terminal
         super.init(frame: terminal.frame)
         addSubview(terminal)
-        for view in [search, count, previous, next, close, scroller] { addSubview(view) }
+        for view in [search, count, previous, next, close, scroller, secure] { addSubview(view) }
+        secure.font = .systemFont(ofSize: 11)
+        secure.textColor = .secondaryLabelColor
         search.placeholderString = "Find in terminal"
         search.delegate = self
         search.sendsSearchStringImmediately = true
@@ -360,6 +363,7 @@ final class TerminalChrome: NSView, NSSearchFieldDelegate {
         super.layout()
         let height: CGFloat = searching ? 38 : 0
         let width: CGFloat = showScroll ? 14 : 0
+        secure.frame = NSRect(x: max(8, bounds.width - 125), y: 5, width: 120, height: 18)
         terminal.frame = NSRect(x: 0, y: 0, width: bounds.width - width, height: bounds.height - height)
         scroller.frame = NSRect(x: bounds.width - width, y: 0, width: width, height: bounds.height - height)
         search.frame = NSRect(x: 8, y: bounds.height - 31, width: max(80, bounds.width - 270), height: 24)

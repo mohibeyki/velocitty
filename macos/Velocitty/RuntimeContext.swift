@@ -46,6 +46,10 @@ final class RuntimeContext: NSObject {
                 view?.window?.title = title
             }
 
+        case GHOSTTY_ACTION_SECURE_INPUT:
+            let mode = action.action.secure_input
+            DispatchQueue.main.async { (NSApp.delegate as? AppDelegate)?.secureInput(mode) }
+
         case GHOSTTY_ACTION_RING_BELL:
             DispatchQueue.main.async { (NSApp.delegate as? AppDelegate)?.ringBell() }
 

@@ -4,6 +4,8 @@
 // Unsupported options are explicit errors, never silently accepted no-ops.
 public enum TerminalSettings {
     public static let supported: Set<String> = [
+        "macos-secure-input-indication",
+        "macos-auto-secure-input",
         "bell-audio-path",
         "bell-audio-volume",
         "bell-features",
@@ -204,7 +206,6 @@ public enum TerminalSettings {
         "linux-cgroup-memory-limit": "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
         "linux-cgroup-processes-limit": "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
         "macos-applescript": "Needs an AppleScript command interface.",
-        "macos-auto-secure-input": "Needs macOS secure-input lifecycle handling and its indicator.",
         "macos-custom-icon": "Needs configurable application icon generation/loading; the app has fixed artwork.",
         "macos-dock-drop-behavior": "Needs the corresponding AppKit window, Dock, or launch behavior.",
         "macos-icon": "Needs configurable application icon generation/loading; the app has fixed artwork.",
@@ -212,7 +213,6 @@ public enum TerminalSettings {
         "macos-icon-ghost-color": "Needs configurable application icon generation/loading; the app has fixed artwork.",
         "macos-icon-screen-color": "Needs configurable application icon generation/loading; the app has fixed artwork.",
         "macos-non-native-fullscreen": "Needs the corresponding AppKit window, Dock, or launch behavior.",
-        "macos-secure-input-indication": "Needs macOS secure-input lifecycle handling and its indicator.",
         "macos-shortcuts": "Needs Shortcuts integration and authorization handling.",
         "macos-titlebar-proxy-icon": "Needs the corresponding AppKit window, Dock, or launch behavior.",
         "middle-click-action": "Needs middle-click event handling and primary-selection clipboard support.",

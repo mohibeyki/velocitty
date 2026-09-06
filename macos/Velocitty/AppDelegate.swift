@@ -12,6 +12,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var appearanceObservation: NSKeyValueObservation?
     var quitTimer: Timer?
     var closing = false
+    var passwordInput = false
+    var manualSecureInput = false
+    var secureInputEnabled = false
     var bellSound: NSSound?
     var bellTitle: String?
     var progressTimer: Timer?
@@ -164,6 +167,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             window?.saveFrame(usingName: "TerminalWindow")
             UserDefaults.standard.set(window?.styleMask.contains(.fullScreen) == true, forKey: "TerminalFullscreen")
         }
+        passwordInput = false
+        manualSecureInput = false
+        updateSecureInput(forceOff: true)
         clearProgress()
         runtime?.closeView()
         window = nil
@@ -283,6 +289,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         do {
             try runtime.updateConfiguration(AppConfiguration.load())
             applyWindowSettings()
+            updateSecureInput()
         } catch {
             configurationAlert(error).runModal()
         }
@@ -297,6 +304,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
+        updateSecureInput()
         if let bellTitle { window?.title = bellTitle; self.bellTitle = nil }
         if let app = runtime?.app {
             velokit_app_set_focus(app, true)
@@ -304,6 +312,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationDidResignActive(_ notification: Notification) {
+        updateSecureInput(forceOff: true)
         if let app = runtime?.app {
             velokit_app_set_focus(app, false)
         }
@@ -397,4 +406,24 @@ extension AppDelegate {
         progressTimer?.invalidate()
         progressTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: false) { [weak self] _ in self?.clearProgress() }
     }
+}
+
+
+extension AppDelegate {
+    func secureInput(_ mode: ghostty_action_secure_input_e) {
+        if mode == GHOSTTY_SECURE_INPUT_TOGGLE { manualSecureInput.toggle() }
+        else { passwordInput = mode == GHOSTTY_SECURE_INPUT_ON }
+        updateSecureInput()
+    }
+    func updateSecureInput(forceOff: Bool = false) {
+        let wanted = !forceOff && NSApp.isActive && window?.isKeyWindow == true &&
+            (manualSecureInput || (passwordInput && native.value("macos-auto-secure-input", true)))
+        if wanted != secureInputEnabled {
+            if wanted { secureInputEnabled = EnableSecureEventInput() == noErr }
+            else if DisableSecureEventInput() == noErr { secureInputEnabled = false }
+        }
+        chrome?.secure.stringValue = secureInputEnabled && native.value("macos-secure-input-indication", true) ? "􀎡 Secure Input" : ""
+    }
+    func windowDidBecomeKey(_ notification: Notification) { updateSecureInput() }
+    func windowDidResignKey(_ notification: Notification) { updateSecureInput(forceOff: true) }
 }
