@@ -19,9 +19,9 @@ final class TerminalRuntime {
     guard let config = velokit_config_new() else {
       throw ConfigurationError("Could not allocate the terminal configuration.")
     }
-    func failure(_ context: String) -> ConfigurationError {
+    func failure(_ context: String, source: URL? = nil) -> ConfigurationError {
       let detail = velokit_config_error(config).map { String(cString: $0) } ?? context
-      return ConfigurationError("\(settings.source.path): \(detail)")
+      return ConfigurationError("\((source ?? settings.source).path): \(detail)")
     }
     do {
       for option in try TerminalTheme.options(
@@ -31,7 +31,9 @@ final class TerminalRuntime {
         let accepted = option.key.withCString { key in
           option.value.withCString { velokit_config_set(config, key, $0) }
         }
-        guard accepted else { throw failure("Invalid terminal setting: \(option.key)") }
+        guard accepted else {
+          throw failure("Invalid terminal setting: \(option.key)", source: option.source)
+        }
       }
       if let opacityOverride {
         _ = String(opacityOverride).withCString {
@@ -103,6 +105,7 @@ final class TerminalRuntime {
   }
 
   func closeView() {
+    view?.config = nil
     if let surface = view?.surface {
       view?.surface = nil
       velokit_surface_free(surface)
@@ -111,10 +114,10 @@ final class TerminalRuntime {
   }
 
   deinit {
-    if let view, let surface = view.surface {
-      view.surface = nil
-      velokit_surface_free(surface)
-    }
+    // Queued wakeups retain the context beyond this runtime's lifetime.
+    context.app = nil
+    context.owner = nil
+    closeView()
     if let app {
       velokit_app_free(app)
     }

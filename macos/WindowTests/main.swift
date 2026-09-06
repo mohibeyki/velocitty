@@ -22,6 +22,36 @@ delegate.idleRuntime = try TerminalRuntime(settings: settings)
 delegate.installMainMenu()
 delegate.updateMenuShortcuts()
 
+do {
+  let directory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("velocitty-review-\(UUID().uuidString)", isDirectory: true)
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let root = directory.appendingPathComponent("config.toml")
+  let included = directory.appendingPathComponent("included.toml")
+  try Data("[terminal]\nconfig_file = [\"included.toml\"]\ntheme = \"\"".utf8).write(to: root)
+  try Data("[terminal]\nfont_size = \"not-a-number\"".utf8).write(to: included)
+  let invalid = try AppConfiguration.load(from: root)
+  do {
+    let config = try TerminalRuntime.makeConfig(invalid)
+    velokit_config_free(config)
+    fatalError("Invalid included setting was accepted")
+  } catch {
+    precondition(error.localizedDescription.hasPrefix(included.path + ":"))
+  }
+}
+
+// A queued wakeup can outlive its runtime, but must not retain a native handle.
+do {
+  var runtime: TerminalRuntime? = try TerminalRuntime(settings: settings)
+  let context = runtime!.context
+  RuntimeContext.wakeup(Unmanaged.passUnretained(context).toOpaque())
+  runtime = nil
+  precondition(context.app == nil)
+  context.tick()
+  RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.15))
+}
+
 func menuItem(_ title: String, in menu: NSMenu = NSApp.mainMenu!) -> NSMenuItem {
   for item in menu.items {
     if item.title == title { return item }
@@ -39,6 +69,24 @@ precondition(!delegate.validateMenuItem(closeMenuItem))
 precondition(app.sendAction(new.action!, to: new.target, from: new))
 drain()
 let first = delegate.windows[0]
+
+// Exercise the keyboard-event/committed-text bridge, not the paste path.
+let terminal = first.runtime!.view!
+let event = NSEvent.keyEvent(
+  with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+  windowNumber: first.window!.windowNumber, context: nil,
+  characters: "a", charactersIgnoringModifiers: "a", isARepeat: false, keyCode: 0)!
+for text in ["a", "Ａ！", "🙂", "𠮷", "e\u{301}"] {
+  precondition(terminal.withKey(event, action: GHOSTTY_ACTION_PRESS, overrideText: text) {
+    $0.text.map { String(cString: $0) } == text
+  })
+}
+for text in ["\u{1b}", "\u{F700}", "\u{F8FF}"] {
+  precondition(terminal.withKey(event, action: GHOSTTY_ACTION_PRESS, overrideText: text) {
+    $0.text == nil
+  })
+}
+
 precondition(app.sendAction(new.action!, to: new.target, from: new))
 drain()
 precondition(delegate.windows.count == 2)
@@ -92,6 +140,7 @@ precondition(second.runtime?.view == nil)
 first.window?.performClose(nil)
 drain()
 precondition(delegate.windows.isEmpty)
+precondition(terminal.surface == nil && terminal.config == nil)
 precondition(!delegate.validateMenuItem(closeMenuItem))
 precondition(delegate.idleRuntime != nil)
 precondition(app.sendAction(new.action!, to: new.target, from: new))

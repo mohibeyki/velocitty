@@ -274,7 +274,9 @@ final class TerminalView: NSView, NSTextInputClient {
     key.composing = hasMarkedText()
     let characters = overrideText ?? event.characters(byApplyingModifiers: flags)
     if action != GHOSTTY_ACTION_RELEASE, let text = characters, !text.isEmpty,
-      text.unicodeScalars.allSatisfy({ $0.value >= 0x20 && $0.value < 0xF700 })
+      text.unicodeScalars.allSatisfy({
+        $0.value >= 0x20 && !(0xF700...0xF8FF).contains($0.value)
+      })
     {
       return text.withCString {
         key.text = $0
