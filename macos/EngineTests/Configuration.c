@@ -26,6 +26,12 @@ static void rejects(const char *key, const char *value) {
 
 int main(int argc, char **argv) {
     assert(velokit_init((uintptr_t)argc, argv) == GHOSTTY_SUCCESS);
+    ghostty_config_t defaults = velokit_config_new();
+    assert(defaults);
+    const char *formatted = velokit_config_format(defaults, "font-size");
+    assert(formatted && strcmp(formatted, "font-size = 13\n") == 0);
+    assert(!velokit_config_format(defaults, "not-a-setting"));
+    velokit_config_free(defaults);
     const char *valid[][2] = {
         {"font-family", "Menlo"}, {"font-size", "14.5"},
         {"font-feature", "-calt"}, {"font-style-italic", "false"},
@@ -38,6 +44,7 @@ int main(int argc, char **argv) {
         {"scrollback-compression", "false"}, {"scroll-to-bottom", "keystroke,no-output"},
         {"clipboard-trim-trailing-spaces", "true"}, {"clipboard-write", "deny"},
         {"keybind", "ctrl+shift+j=text:hello"}, {"key-remap", "ctrl=super"},
+        {"command-palette-entry", "title:Copy ANSI,action:\"write_screen_file:copy,vt\""},
         {"command", "/bin/zsh"}, {"env", "TEST=a=b"}, {"input", "raw:hello\\n"},
         {"wait-after-command", "true"}, {"title", "Configured terminal"},
         {"term", "xterm-256color"}, {"image-storage-limit", "1000000"},

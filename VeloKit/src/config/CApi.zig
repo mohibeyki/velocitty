@@ -138,3 +138,18 @@ export fn velokit_config_trigger(self: *Config, action_z: [*:0]const u8, output:
     }
     return false;
 }
+
+// Formatting uses the engine's own serializers so defaults cannot drift from
+// the implementation. The returned string belongs to this configuration.
+export fn velokit_config_format(self: *Config, key_z: [*:0]const u8) ?[*:0]const u8 {
+    const key = std.meta.stringToEnum(Config.Key, std.mem.span(key_z)) orelse return null;
+    var buf: std.Io.Writer.Allocating = .init(global.alloc());
+    defer buf.deinit();
+    switch (key) {
+        inline else => |tag| {
+            const value = @field(self, @tagName(tag));
+            @import("formatter.zig").formatEntry(@TypeOf(value), @tagName(tag), value, &buf.writer) catch return null;
+        },
+    }
+    return (self.arenaAlloc().dupeZ(u8, buf.written()) catch return null).ptr;
+}

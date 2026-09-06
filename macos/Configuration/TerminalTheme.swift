@@ -3,6 +3,8 @@ import AppKit
 import Foundation
 
 public enum TerminalTheme {
+  public static let defaultSelection = "light:Rose Pine Dawn,dark:Rose Pine"
+
   public static let names = [
     "TokyoNight Night", "TokyoNight Storm", "TokyoNight Moon", "TokyoNight Day",
     "Rose Pine", "Rose Pine Moon", "Rose Pine Dawn", "Catppuccin Latte", "Catppuccin Frappe",
@@ -11,7 +13,7 @@ public enum TerminalTheme {
 
   public static func options(for config: AppConfiguration, dark: Bool) throws -> [TerminalOption] {
     let selection = config.options.last { $0.key == "theme" }
-    let requested = selection?.value ?? "light:Rose Pine Dawn,dark:Rose Pine"
+    let requested = selection?.value ?? defaultSelection
     let explicit = config.options.filter { $0.key != "theme" }
     if requested.isEmpty { return explicit }
     var name = requested

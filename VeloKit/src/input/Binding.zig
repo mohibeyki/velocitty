@@ -1279,6 +1279,12 @@ pub const Action = union(enum) {
         };
     }
 
+    // Config command-palette entries must use the same action grammar as
+    // keybindings, including compound parameters such as copy,vt.
+    pub fn parseCLI(value: ?[]const u8) !Action {
+        return parse(value orelse return Error.InvalidAction);
+    }
+
     /// Parse an action in the format of "key=value" where key is the
     /// action name and value is the action parameter. The parameter
     /// is optional depending on the action.

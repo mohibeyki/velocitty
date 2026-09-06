@@ -1128,6 +1128,8 @@ void velokit_config_free(ghostty_config_t);
 
 bool velokit_config_set(ghostty_config_t, const char*, const char*);
 const char* velokit_config_error(ghostty_config_t);
+// Formatted engine entries; storage belongs to the configuration.
+const char* velokit_config_format(ghostty_config_t, const char*);
 bool velokit_config_finalize(ghostty_config_t, const char*);
 
 ghostty_app_t velokit_app_new(const ghostty_runtime_config_s*,

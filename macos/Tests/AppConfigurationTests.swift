@@ -9,6 +9,26 @@ final class AppConfigurationTests: XCTestCase {
     try AppConfiguration.parse(Data(text.utf8))
   }
 
+  func testConfigurationTemplateRoundTrip() throws {
+    let template = try ConfigurationTemplate.render { key in
+      switch key {
+      case "title": return "title = a \"quote\" \\ path\t雪\n"
+      case "font-family": return "font-family = Menlo\nfont-family = Monaco\n"
+      default: return "\(key) = \n"
+      }
+    }
+    XCTAssertEqual(try parse(template).options, [])
+    let active = template.split(separator: "\n", omittingEmptySubsequences: false).map {
+      $0.hasPrefix("# ") && ($0.contains(" = ") || $0.hasPrefix("#   ") || $0 == "# ]")
+        ? String($0.dropFirst(2)) : String($0)
+    }.joined(separator: "\n")
+    let settings = try parse(active)
+    XCTAssertEqual(Set(settings.options.map(\.key)), TerminalSettings.supported)
+    XCTAssertEqual(settings.options.first { $0.key == "title" }?.value, "a \"quote\" \\ path\t雪")
+    XCTAssertEqual(settings.options.filter { $0.key == "font-family" }.map(\.value), ["Menlo", "Monaco"])
+    XCTAssertEqual(settings.options.first { $0.key == "theme" }?.value, TerminalTheme.defaultSelection)
+  }
+
   func testDroppedPathsAreLiteralShellArguments() throws {
     let paths = [
       "/tmp/a b", "/tmp/it's", "/tmp/$(printf WRONG)", "/tmp/a;printf WRONG", "/tmp/雪\nline",
