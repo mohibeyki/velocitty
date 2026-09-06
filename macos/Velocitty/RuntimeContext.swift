@@ -46,6 +46,31 @@ final class RuntimeContext: NSObject {
                 view?.window?.title = title
             }
 
+        case GHOSTTY_ACTION_START_SEARCH:
+            let needle = action.action.start_search.needle.map { String(cString: $0) }
+            DispatchQueue.main.async { (NSApp.delegate as? AppDelegate)?.chrome?.startSearch(needle) }
+
+        case GHOSTTY_ACTION_END_SEARCH:
+            DispatchQueue.main.async { (NSApp.delegate as? AppDelegate)?.chrome?.hideSearch() }
+
+        case GHOSTTY_ACTION_SEARCH_TOTAL:
+            let total = action.action.search_total.total
+            DispatchQueue.main.async {
+                let chrome = (NSApp.delegate as? AppDelegate)?.chrome
+                chrome?.total = max(0, total); chrome?.updateCount()
+            }
+
+        case GHOSTTY_ACTION_SEARCH_SELECTED:
+            let selected = action.action.search_selected.selected
+            DispatchQueue.main.async {
+                let chrome = (NSApp.delegate as? AppDelegate)?.chrome
+                chrome?.selected = selected; chrome?.updateCount()
+            }
+
+        case GHOSTTY_ACTION_SCROLLBAR:
+            let state = action.action.scrollbar
+            DispatchQueue.main.async { (NSApp.delegate as? AppDelegate)?.chrome?.updateScrollbar(state) }
+
         case GHOSTTY_ACTION_OPEN_URL:
             let link = action.action.open_url
             guard let ptr = link.url, let url = URL(string: String(decoding: UnsafeBufferPointer(start: UnsafeRawPointer(ptr).assumingMemoryBound(to: UInt8.self), count: Int(link.len)), as: UTF8.self)) else { return false }

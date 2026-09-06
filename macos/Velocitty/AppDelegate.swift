@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var appearanceObservation: NSKeyValueObservation?
     var quitTimer: Timer?
     var closing = false
+    var chrome: TerminalChrome?
     var native: NativeSettings { NativeSettings(config: runtime?.config) }
     var keyboardObservation: NSObjectProtocol?
 
@@ -67,7 +68,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
         window.delegate = self
-        window.contentView = terminalView
+        let chrome = TerminalChrome(terminalView)
+        self.chrome = chrome
+        window.contentView = chrome
         self.window = window
         applyWindowSettings()
         if let surface = terminalView.surface {
@@ -125,7 +128,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.isOpaque = opacity >= 1
         window.backgroundColor = native.color("background").withAlphaComponent(opacity)
         let blur = native.value("background-blur", Int16(0))
-        if blur != 0 && opacity < 1, let terminal = runtime?.view, window.contentView === terminal {
+        if blur != 0 && opacity < 1, let terminal = chrome, window.contentView === terminal {
             let visual = NSVisualEffectView(frame: terminal.frame)
             visual.material = .underWindowBackground
             visual.blendingMode = .behindWindow
@@ -134,7 +137,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             terminal.frame = visual.bounds
             terminal.autoresizingMask = [.width, .height]
             visual.addSubview(terminal)
-        } else if (blur == 0 || opacity >= 1), let terminal = runtime?.view, window.contentView is NSVisualEffectView {
+        } else if (blur == 0 || opacity >= 1), let terminal = chrome, window.contentView is NSVisualEffectView {
             terminal.removeFromSuperview()
             window.contentView = terminal
         }
@@ -159,6 +162,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         runtime?.closeView()
         window = nil
+        chrome = nil
         if native.value("quit-after-last-window-closed", false) {
             quitTimer = Timer.scheduledTimer(withTimeInterval: max(0.01, native.seconds("quit-after-last-window-closed-delay", 0)), repeats: false) { [weak self] _ in
                 if self?.window == nil { NSApp.terminate(nil) }
@@ -232,6 +236,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             action: #selector(TerminalView.selectAllMenuItem(_:)),
             keyEquivalent: "a")
 
+        editMenu.addItem(.separator())
+        let find = editMenu.addItem(withTitle: "Find…", action: #selector(findTerminal), keyEquivalent: "f")
+        find.target = self
+        let next = editMenu.addItem(withTitle: "Find Next", action: #selector(findNext), keyEquivalent: "g")
+        next.target = self
+        let previous = editMenu.addItem(withTitle: "Find Previous", action: #selector(findPrevious), keyEquivalent: "g")
+        previous.keyEquivalentModifierMask = [.command, .shift]
+        previous.target = self
+
         let windowMenu = NSMenu(title: "Window")
         let windowMenuItem = NSMenuItem()
         windowMenuItem.submenu = windowMenu
@@ -246,6 +259,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         NSApp.mainMenu = mainMenu
     }
+
+    @objc func findTerminal() { runtime?.view?.performSurfaceAction("start_search") }
+    @objc func findNext() { runtime?.view?.performSurfaceAction("navigate_search:next") }
+    @objc func findPrevious() { runtime?.view?.performSurfaceAction("navigate_search:previous") }
 
     func configurationAlert(_ error: Error) -> NSAlert {
         NSLog("Configuration error: %@", error.localizedDescription)

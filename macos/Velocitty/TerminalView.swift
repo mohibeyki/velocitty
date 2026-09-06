@@ -319,3 +319,98 @@ final class TerminalView: NSView, NSTextInputClient {
     }
 }
 
+
+// Search and scrolling are native controls; the engine owns matches and viewport state.
+final class TerminalChrome: NSView, NSSearchFieldDelegate {
+    let terminal: TerminalView
+    let search = NSSearchField()
+    let count = NSTextField(labelWithString: "")
+    let previous = NSButton(title: "↑", target: nil, action: nil)
+    let next = NSButton(title: "↓", target: nil, action: nil)
+    let close = NSButton(title: "Done", target: nil, action: nil)
+    let scroller = NSScroller()
+    var scrollState = ghostty_action_scrollbar_s(total: 0, offset: 0, len: 0)
+    var total = 0
+    var selected = -1
+    var searching = false
+    var showScroll = false
+
+    init(_ terminal: TerminalView) {
+        self.terminal = terminal
+        super.init(frame: terminal.frame)
+        addSubview(terminal)
+        for view in [search, count, previous, next, close, scroller] { addSubview(view) }
+        search.placeholderString = "Find in terminal"
+        search.delegate = self
+        search.sendsSearchStringImmediately = true
+        search.target = self
+        search.action = #selector(updateSearch)
+        previous.target = self; previous.action = #selector(previousMatch)
+        next.target = self; next.action = #selector(nextMatch)
+        close.target = self; close.action = #selector(endSearch)
+        scroller.target = self; scroller.action = #selector(scrollViewport)
+        scroller.scrollerStyle = NSScroller.preferredScrollerStyle
+        scroller.controlSize = .small
+        scroller.isContinuous = true
+        refreshVisibility()
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layout() {
+        super.layout()
+        let height: CGFloat = searching ? 38 : 0
+        let width: CGFloat = showScroll ? 14 : 0
+        terminal.frame = NSRect(x: 0, y: 0, width: bounds.width - width, height: bounds.height - height)
+        scroller.frame = NSRect(x: bounds.width - width, y: 0, width: width, height: bounds.height - height)
+        search.frame = NSRect(x: 8, y: bounds.height - 31, width: max(80, bounds.width - 270), height: 24)
+        count.frame = NSRect(x: bounds.width - 250, y: bounds.height - 28, width: 115, height: 20)
+        previous.frame = NSRect(x: bounds.width - 135, y: bounds.height - 32, width: 32, height: 26)
+        next.frame = NSRect(x: bounds.width - 101, y: bounds.height - 32, width: 32, height: 26)
+        close.frame = NSRect(x: bounds.width - 67, y: bounds.height - 32, width: 60, height: 26)
+    }
+    func refreshVisibility() {
+        for view in [search, count, previous, next, close] { view.isHidden = !searching }
+        let policy = NativeSettings(config: terminal.config).string("scrollbar", "system")
+        showScroll = policy != "never" && (policy == "always" || scrollState.total > scrollState.len)
+        scroller.isHidden = !showScroll
+        needsLayout = true
+    }
+    func startSearch(_ needle: String?) {
+        searching = true
+        if let needle { search.stringValue = needle }
+        refreshVisibility()
+        window?.makeFirstResponder(search)
+    }
+    func updateCount() { count.stringValue = total == 0 ? "No matches" : "\(selected < 0 ? 0 : selected + 1) of \(total)" }
+    @objc func updateSearch() { terminal.performSurfaceAction("search:" + search.stringValue) }
+    @objc func previousMatch() { terminal.performSurfaceAction("navigate_search:previous") }
+    @objc func nextMatch() { terminal.performSurfaceAction("navigate_search:next") }
+    @objc func endSearch() { terminal.performSurfaceAction("end_search"); hideSearch() }
+    func hideSearch() { searching = false; refreshVisibility(); window?.makeFirstResponder(terminal) }
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) { endSearch(); return true }
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            if NSApp.currentEvent?.modifierFlags.contains(.shift) == true { previousMatch() } else { nextMatch() }
+            return true
+        }
+        return false
+    }
+    func updateScrollbar(_ value: ghostty_action_scrollbar_s) {
+        scrollState = value
+        scroller.knobProportion = value.total == 0 ? 1 : Double(value.len) / Double(value.total)
+        scroller.doubleValue = value.total <= value.len ? 1 : Double(value.offset) / Double(value.total - value.len)
+        refreshVisibility()
+    }
+    @objc func scrollViewport() {
+        let limit = scrollState.total > scrollState.len ? scrollState.total - scrollState.len : 0
+        var row = Double(scrollState.offset)
+        switch scroller.hitPart {
+        case .decrementLine: row -= 1
+        case .incrementLine: row += 1
+        case .decrementPage: row -= Double(scrollState.len)
+        case .incrementPage: row += Double(scrollState.len)
+        default: row = scroller.doubleValue * Double(limit)
+        }
+        terminal.performSurfaceAction("scroll_to_row:\(UInt64(max(0, min(Double(limit), row))))")
+    }
+}

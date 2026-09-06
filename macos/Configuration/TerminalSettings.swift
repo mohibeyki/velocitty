@@ -4,6 +4,12 @@
 // Unsupported options are explicit errors, never silently accepted no-ops.
 public enum TerminalSettings {
     public static let supported: Set<String> = [
+        "scrollbar",
+        "search-background",
+        "search-foreground",
+        "search-selected-background",
+        "search-selected-foreground",
+
         "initial-window",
         "quit-after-last-window-closed",
         "quit-after-last-window-closed-delay",
@@ -219,11 +225,6 @@ public enum TerminalSettings {
         "resize-overlay": "Needs a resize overlay view.",
         "resize-overlay-duration": "Needs a resize overlay view.",
         "resize-overlay-position": "Needs a resize overlay view.",
-        "scrollbar": "Needs a scrollbar view and scroll-position callbacks.",
-        "search-background": "Needs a search UI and search callbacks.",
-        "search-foreground": "Needs a search UI and search callbacks.",
-        "search-selected-background": "Needs a search UI and search callbacks.",
-        "search-selected-foreground": "Needs a search UI and search callbacks.",
         "split-divider-color": "Needs pane layout, focus, and split rendering in the app.",
         "split-inherit-working-directory": "Needs window/tab/pane creation and inheritance policies.",
         "split-preserve-zoom": "Needs pane layout, focus, and split rendering in the app.",
