@@ -6,6 +6,22 @@ import XCTest
 final class AppConfigurationTests: XCTestCase {
     func parse(_ text: String) throws -> AppConfiguration { try AppConfiguration.parse(Data(text.utf8)) }
 
+    func testDroppedPathsAreLiteralShellArguments() throws {
+        let paths = ["/tmp/a b", "/tmp/it's", "/tmp/$(printf WRONG)", "/tmp/a;printf WRONG", "/tmp/雪\nline"]
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", "printf '%s\\0' " + ShellInput.paths(paths)]
+        let output = Pipe()
+        process.standardOutput = output
+        try process.run()
+        let bytes = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+        XCTAssertEqual(bytes, Data((paths.joined(separator: "\0") + "\0").utf8))
+        XCTAssertEqual(ShellInput.paths([]), "")
+        XCTAssertFalse(ShellInput.paths(paths).hasSuffix("\n"))
+    }
+
     func testDefaultsAndMissingFile() throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)

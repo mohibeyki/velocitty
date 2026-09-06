@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var appearanceObservation: NSKeyValueObservation?
     var quitTimer: Timer?
     var closing = false
+    var pendingFiles: [String] = []
     var resizeTimer: Timer?
     var hasResized = false
     var normalFrame: NSRect?
@@ -76,6 +77,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         shortcuts?.reload()
         updateMenuShortcuts()
         if native.value("initial-window", true) { openWindow() }
+        if !pendingFiles.isEmpty {
+            insertFiles(pendingFiles)
+            pendingFiles.removeAll()
+        }
+        scheduleQuitIfNeeded()
         if native.string("macos-hidden") == "always" { NSApp.hide(nil) }
     }
 
@@ -200,7 +206,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         if shouldSaveState {
-            window?.saveFrame(usingName: "TerminalWindow")
+            if window?.styleMask.contains(.fullScreen) != true && normalFrame == nil { window?.saveFrame(usingName: "TerminalWindow") }
             UserDefaults.standard.set((window?.styleMask.contains(.fullScreen) == true || normalFrame != nil), forKey: "TerminalFullscreen")
         }
         passwordInput = false
@@ -216,10 +222,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         normalStyle = nil
         NSApp.presentationOptions = []
         resizeTimer?.invalidate()
-        if native.value("quit-after-last-window-closed", false) {
-            quitTimer = Timer.scheduledTimer(withTimeInterval: max(0.01, native.seconds("quit-after-last-window-closed-delay", 0)), repeats: false) { [weak self] _ in
-                if self?.window == nil { NSApp.terminate(nil) }
-            }
+        scheduleQuitIfNeeded()
+    }
+
+    func scheduleQuitIfNeeded() {
+        guard window == nil, native.value("quit-after-last-window-closed", false) else { return }
+        quitTimer?.invalidate()
+        quitTimer = Timer.scheduledTimer(withTimeInterval: max(0.01, native.seconds("quit-after-last-window-closed-delay", 0)), repeats: false) { [weak self] _ in
+            if self?.window == nil { NSApp.terminate(nil) }
         }
     }
 
@@ -236,12 +246,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func application(_ sender: NSApplication, openFiles filenames: [String]) {
+        if runtime == nil { pendingFiles.append(contentsOf: filenames) }
+        else { insertFiles(filenames) }
+        sender.reply(toOpenOrPrint: .success)
+    }
+
+    func insertFiles(_ filenames: [String]) {
         openWindow()
-        let text = filenames.map { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }.joined(separator: " ") + " "
+        let text = ShellInput.paths(filenames)
         if let surface = runtime?.view?.surface {
             text.withCString { velokit_surface_text(surface, $0, UInt(text.utf8.count)) }
         }
-        sender.reply(toOpenOrPrint: .success)
     }
 
     func installMainMenu() {
@@ -336,6 +351,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         guard mode != "false" || native.string("fullscreen") == "non-native" else { window.toggleFullScreen(nil); return }
+        if shouldSaveState { window.saveFrame(usingName: "TerminalWindow") }
         normalFrame = window.frame; normalStyle = window.styleMask
         window.styleMask = [.borderless, .resizable]
         if let screen = window.screen {
@@ -356,6 +372,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         chrome.needsLayout = true
         resizeTimer?.invalidate()
         resizeTimer = Timer.scheduledTimer(withTimeInterval: max(0.01, native.seconds("resize-overlay-duration", 0.75)), repeats: false) { [weak chrome] _ in chrome?.resizeLabel.isHidden = true }
+    }
+    func windowWillEnterFullScreen(_ notification: Notification) {
+        if shouldSaveState { window?.saveFrame(usingName: "TerminalWindow") }
+    }
+    func windowDidChangeOcclusionState(_ notification: Notification) {
+        if let window, let surface = runtime?.view?.surface { velokit_surface_set_occlusion(surface, window.occlusionState.contains(.visible)) }
     }
     func windowDidEndLiveResize(_ notification: Notification) {
         if shouldSaveState { window?.saveFrame(usingName: "TerminalWindow") }

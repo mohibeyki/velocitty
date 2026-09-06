@@ -219,7 +219,7 @@ public enum TerminalSettings {
         "linux-cgroup-processes-limit": "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
         "macos-applescript": "Needs an AppleScript command interface.",
         "macos-custom-icon": "Needs configurable application icon generation/loading; the app has fixed artwork.",
-        "macos-dock-drop-behavior": "Needs the corresponding AppKit window, Dock, or launch behavior.",
+        "macos-dock-drop-behavior": "Velocitty inserts dropped paths into its single terminal; new-tab/new-window policies do not apply.",
         "macos-icon": "Needs configurable application icon generation/loading; the app has fixed artwork.",
         "macos-icon-frame": "Needs configurable application icon generation/loading; the app has fixed artwork.",
         "macos-icon-ghost-color": "Needs configurable application icon generation/loading; the app has fixed artwork.",

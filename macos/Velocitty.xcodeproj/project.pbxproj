@@ -281,6 +281,7 @@
 				CODE_SIGN_STYLE = Manual;
 				DEAD_CODE_STRIPPING = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+                INFOPLIST_FILE = Velocitty/Info.plist;
 				INFOPLIST_KEY_NSHighResolutionCapable = YES;
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				PRODUCT_BUNDLE_IDENTIFIER = app.velocitty;
@@ -297,6 +298,7 @@
 				CODE_SIGN_STYLE = Manual;
 				DEAD_CODE_STRIPPING = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+                INFOPLIST_FILE = Velocitty/Info.plist;
 				INFOPLIST_KEY_NSHighResolutionCapable = YES;
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				PRODUCT_BUNDLE_IDENTIFIER = app.velocitty;
