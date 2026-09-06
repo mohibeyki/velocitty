@@ -112,9 +112,29 @@ export fn velokit_keycode_for_key(key: @import("../input/key.zig").Key) u32 {
 }
 
 export fn velokit_config_trigger(self: *Config, action_z: [*:0]const u8, output: *@import("../input/Binding.zig").Trigger.C) bool {
-    const Action = @import("../input/Binding.zig").Action;
-    const action = Action.parse(std.mem.span(action_z)) catch return false;
-    const trigger = self.keybind.set.reverse.get(action) orelse return false;
-    output.* = trigger.cval();
-    return true;
+    const Binding = @import("../input/Binding.zig");
+    const action = Binding.Action.parse(std.mem.span(action_z)) catch return false;
+    // The engine reverse map deliberately omits performable bindings. AppKit
+    // menus still need their labels (and standard editing shortcuts in fields).
+    // Prefer the last usable binding; ignore unmapped dedicated Copy/Paste keys.
+    const keys = self.keybind.set.bindings.keys();
+    const values = self.keybind.set.bindings.values();
+    var index = keys.len;
+    while (index > 0) {
+        index -= 1;
+        const leaf = switch (values[index]) {
+            .leaf => |value| value,
+            else => continue,
+        };
+        if (!leaf.action.equal(action) or !leaf.flags.consumed) continue;
+        const trigger = keys[index];
+        switch (trigger.key) {
+            .physical => |key| if (velokit_keycode_for_key(key) >= 128) { continue; },
+            .unicode => {},
+            .catch_all => continue,
+        }
+        output.* = trigger.cval();
+        return true;
+    }
+    return false;
 }

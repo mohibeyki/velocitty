@@ -81,6 +81,20 @@ int main(int argc, char **argv) {
     assert(velokit_config_get(config, &opacity, "background-opacity", strlen("background-opacity")) && opacity == 1);
     assert(velokit_config_get(config, &width, "window-width", strlen("window-width")) && width == 0);
     velokit_config_free(config);
+    config = velokit_config_new();
+    assert(velokit_config_finalize(config, "/tmp"));
+    ghostty_input_trigger_s trigger = {0};
+    assert(velokit_config_trigger(config, "copy_to_clipboard", &trigger));
+    assert(trigger.tag == GHOSTTY_TRIGGER_UNICODE && trigger.key.unicode == 'c');
+    assert(velokit_config_trigger(config, "start_search", &trigger));
+    assert(trigger.tag == GHOSTTY_TRIGGER_UNICODE && trigger.key.unicode == 'f');
+    assert(velokit_config_set(config, "keybind", "super+f=unbind"));
+    assert(!velokit_config_trigger(config, "start_search", &trigger));
+    assert(velokit_config_set(config, "keybind", "global:super+shift+k=toggle_visibility"));
+    assert(velokit_config_global_trigger(config, 0, &trigger));
+    assert(trigger.tag == GHOSTTY_TRIGGER_UNICODE && trigger.key.unicode == 'k');
+    assert(!velokit_config_global_trigger(config, 1, &trigger));
+    velokit_config_free(config);
     puts("Engine configuration tests passed.");
     return 0;
 }
