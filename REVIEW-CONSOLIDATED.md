@@ -5,23 +5,12 @@ IDs are retained; resolved findings and rejected claims are removed from the que
 
 Discuss one issue at a time: choose an approach, implement it, validate it, update
 this file, and commit the change as a self-contained chunk. A recommendation below
-is not an approved decision. **Current issue: C09 — awaiting a choice.**
+is not an approved decision. **Current issue: C10 — awaiting a choice.**
 
 Scope: our macOS host, private VeloKit bridge, configuration, and build/test integration.
 Untouched libghostty internals and new mux functionality are outside this cleanup.
 
 ## Remaining issues
-
-### C09. Test workflow
-
-**Before mux; confirmed gap.** SwiftPM runs configuration tests only. Native bridge
-and AppKit regressions require manual compilation, and there is no CI workflow.
-
-**Choose:** normal test targets and CI coverage using existing build tools. Cover
-our bridge and host, including ABI, teardown, input, focus, and clipboard cancellation.
-
-Code: [Package.swift](macos/Package.swift), [EngineTests](macos/EngineTests/Configuration.c),
-[WindowTests](macos/WindowTests/main.swift).
 
 ### C10. Engine artifact freshness
 
@@ -168,6 +157,7 @@ Code: [THIRD_PARTY_NOTICES.md](VeloKit/THIRD_PARTY_NOTICES.md),
 | C06 | Safely remove accessories and avoid adding them to hidden titlebars; reproduced crash fixed. |
 | C07 | Own clipboard confirmations per terminal, queue sheets, and resolve pending requests exactly once before native surface teardown. |
 | C08 | Share one engine and configuration across the app; sessions own surfaces and backing views, with callbacks routed to their current window. |
+| C09 | Build regression executables as Xcode targets; run them through XCTest Core/GUI plans and add CI for configuration, native bridge, and app builds. |
 | C11, controls | Refresh scrollbar visibility/layout on reload; remove unreachable scrollbar policy branch. |
 | C15, delivery | Report file-delivery outcomes, including startup failure/cancellation. |
 | C18, diagnostics | Attribute native setting errors to their included source file. |
@@ -239,6 +229,22 @@ callbacks and real PTY input; C07 adds clipboard queue and cancellation coverage
   configuration, local opacity across reload/new windows, independent pending sheets,
   stale callbacks after close, session/engine/view teardown, and engine reuse after
   closing every window. Existing PTY focus, composition, clipboard, and quit checks pass.
+
+- **C09 — standard test targets and CI.** Approved option 1.
+  EngineChecks and WindowChecks build with Xcode. XCTest launches each check in its
+  own process, captures output in test-result attachments, and reports crashes,
+  nonzero exits, missing completion markers, and timeouts as failures. This isolates
+  the intentional quit test from the test runner. Existing checks and assertions are
+  preserved. The shared Velocitty scheme defaults to Core; GUI runs both interactive
+  lifecycle/quit checks serially. SwiftPM retains the configuration test target.
+  CI uses an Apple Silicon macOS runner, builds the engine through the pinned Nix
+  flake, and runs configuration tests and the Core plan. GUI tests remain local.
+  Actions are pinned to commits; results are uploaded for inspection. README contains
+  all test commands and desktop requirements.
+  Validation: Core and both GUI tests passed through xcodebuild test; the CI engine
+  build command passed locally, and actionlint accepted the workflow. Configuration
+  tests passed earlier in this cleanup. The GitHub workflow has not run remotely;
+  its first run awaits a push. Engine freshness during local builds remains C10.
 
 ## Review conclusions retained
 

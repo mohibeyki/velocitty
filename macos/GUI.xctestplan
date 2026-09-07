@@ -1,0 +1,30 @@
+{
+  "configurations": [
+    {
+      "id": "67A02098-B461-4D76-A073-B1D3C6EF5EA2",
+      "name": "Default",
+      "options": {}
+    }
+  ],
+  "defaultOptions": {
+    "targetForVariableExpansion": {
+      "containerPath": "container:Velocitty.xcodeproj",
+      "identifier": "A00000000000000000000007",
+      "name": "Velocitty"
+    }
+  },
+  "testTargets": [
+    {
+      "target": {
+        "containerPath": "container:Velocitty.xcodeproj",
+        "identifier": "F00000000000000000000033",
+        "name": "VelocittyTests"
+      },
+      "parallelizable": false,
+      "selectedTests": [
+        "WindowTests"
+      ]
+    }
+  ],
+  "version": 1
+}

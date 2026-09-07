@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0
-// Standalone AppKit lifecycle check; compile with the app sources except main.swift.
+// AppKit regression executable, built by WindowChecks and launched by the GUI test plan.
 import AppKit
 import VeloKit
 import VelocittyConfiguration

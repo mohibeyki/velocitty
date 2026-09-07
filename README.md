@@ -34,7 +34,23 @@ open build/Build/Products/Debug/Velocitty.app
 
 Rebuild and copy VeloKit whenever its source changes. The generated framework
 is ignored by Git. `macos/` contains the app; `VeloKit/` contains the engine.
-Run configuration tests with `swift test --package-path macos`.
+
+## Tests
+
+After building VeloKit, run configuration and native bridge tests from the repo root:
+
+```sh
+swift test --package-path macos
+xcodebuild -project macos/Velocitty.xcodeproj -scheme Velocitty \
+  -destination 'platform=macOS,arch=arm64' -derivedDataPath macos/build \
+  -testPlan Core test
+```
+
+Use `-testPlan GUI` for the window, input, clipboard, and quit checks. Run these on
+an unlocked desktop with another application open; the tests briefly switch focus.
+Both plans are available in Xcode's Velocitty scheme. Failures include captured logs
+in the test results. GitHub Actions builds the engine and app and runs the Core and
+configuration tests on pushes and pull requests.
 
 ## Configuration
 
