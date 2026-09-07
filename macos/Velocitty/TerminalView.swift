@@ -13,6 +13,7 @@ final class TerminalView: NSView, NSTextInputClient {
   var tracking: NSTrackingArea?
   var keyInProgress: NSEvent?
   var keyHandled = false
+  private var terminalFocused = false
   var linkURL: String?
   var pointer: NSCursor = .iBeam
   var config: ghostty_config_t? { surface == nil ? nil : session?.config }
@@ -149,6 +150,8 @@ final class TerminalView: NSView, NSTextInputClient {
     guard let surface else { return }
     let focused = !forceOff && NSApp.isActive && window?.isKeyWindow == true
       && window?.attachedSheet == nil && (firstResponder ?? (window?.firstResponder === self))
+    if focused && !terminalFocused { session?.windowController?.clearBell() }
+    terminalFocused = focused
     velokit_surface_set_focus(surface, focused)
   }
 
@@ -203,6 +206,7 @@ final class TerminalView: NSView, NSTextInputClient {
   }
 
   override func keyDown(with event: NSEvent) {
+    session?.windowController?.clearBell()
     guard let surface else { return }
     if withKey(
       event, action: GHOSTTY_ACTION_PRESS,

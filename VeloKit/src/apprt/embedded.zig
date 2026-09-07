@@ -1882,6 +1882,7 @@ pub const CAPI = struct {
             return false;
         };
 
+        if (!@import("../config/Capabilities.zig").supported(action)) return false;
         return ptr.core_surface.performBindingAction(action) catch |err| {
             log.err("error performing binding action action={f} err={}", .{ action, err });
             return false;

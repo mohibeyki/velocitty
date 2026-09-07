@@ -4,7 +4,7 @@ import Foundation
 import VeloKit
 import VelocittyConfiguration
 
-final class CommandPalette: NSPanel, NSSearchFieldDelegate, NSTableViewDataSource,
+final class CommandPalette: NSPanel, NSTextFieldDelegate, NSWindowDelegate, NSTableViewDataSource,
   NSTableViewDelegate
 {
   struct Entry {
@@ -12,65 +12,166 @@ final class CommandPalette: NSPanel, NSSearchFieldDelegate, NSTableViewDataSourc
     let detail: String
     let action: String
   }
-  let query = NSSearchField()
+  let query = NSTextField()
   let table = NSTableView()
   let list = NSScrollView()
   var entries: [Entry] = []
   var filtered: [Entry] = []
   weak var terminal: TerminalView?
+  private let emptyLabel = NSTextField(labelWithString: "No matches")
+  override var canBecomeKey: Bool { true }
+  override var canBecomeMain: Bool { false }
 
-  static let unsupported: Set<String> = [
-    "new_tab", "previous_tab", "next_tab", "last_tab", "close_tab", "prompt_tab_title",
-    "set_tab_title", "show_on_screen_keyboard", "new_split", "goto_tab", "goto_split", "move_tab",
-    "move_tab_to_new_window",
-    "resize_split", "equalize_splits", "toggle_split_zoom", "toggle_tab_overview",
-    "toggle_quick_terminal",
-    "undo", "redo", "check_for_updates", "inspector", "show_gtk_inspector", "crash",
-    "export_terminal_io",
-  ]
   init(terminal: TerminalView) {
     self.terminal = terminal
     super.init(
-      contentRect: NSRect(x: 0, y: 0, width: 620, height: 420), styleMask: [.titled, .closable],
+      contentRect: NSRect(x: 0, y: 0, width: 500, height: 249), styleMask: [.borderless],
       backing: .buffered, defer: false)
     title = "Commands"
     isReleasedWhenClosed = false
+    isOpaque = false
+    backgroundColor = .clear
+    hasShadow = true
+    delegate = self
     let native = NativeSettings(config: terminal.config)
     entries = native.commands.compactMap { command in
-      guard !Self.unsupported.contains(command.actionKey), command.title != "Ghostty"
+      guard command.action.withCString({ velokit_action_supported($0) }), command.title != "Ghostty"
       else { return nil }
       return Entry(title: command.title, detail: command.detail, action: command.action)
     }
-    query.frame = NSRect(x: 12, y: 376, width: 596, height: 28)
-    query.placeholderString = "Search commands"
+    let color = native.background.usingColorSpace(.sRGB) ?? .windowBackgroundColor
+    let dark = 0.2126 * color.redComponent + 0.7152 * color.greenComponent
+      + 0.0722 * color.blueComponent < 0.5
+    appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+    let background = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 500, height: 249))
+    background.material = .popover
+    background.blendingMode = .behindWindow
+    background.state = .active
+    background.wantsLayer = true
+    background.layer?.cornerRadius = 10
+    background.layer?.masksToBounds = true
+    background.layer?.borderWidth = 1
+    appearance?.performAsCurrentDrawingAppearance {
+      background.layer?.borderColor = NSColor.labelColor.withAlphaComponent(0.16).cgColor
+    }
+    contentView = background
+    let tint = NSView(frame: background.bounds)
+    tint.autoresizingMask = [.width, .height]
+    tint.wantsLayer = true
+    tint.layer?.backgroundColor = color.withAlphaComponent(0.75).cgColor
+    background.addSubview(tint)
+
+    query.frame = NSRect(x: 16, y: 213, width: 468, height: 26)
+    query.placeholderString = "Execute a command…"
+    query.font = .systemFont(ofSize: 20)
+    query.isBezeled = false
+    query.drawsBackground = false
+    query.focusRingType = .none
     query.delegate = self
-    contentView?.addSubview(query)
-    list.frame = NSRect(x: 12, y: 12, width: 596, height: 352)
+    query.autoresizingMask = [.width, .minYMargin]
+    background.addSubview(query)
+    let divider = NSBox(frame: NSRect(x: 0, y: 200, width: 500, height: 1))
+    divider.boxType = .separator
+    divider.autoresizingMask = [.width, .minYMargin]
+    background.addSubview(divider)
+
+    list.frame = NSRect(x: 0, y: 0, width: 500, height: 200)
+    list.autoresizingMask = [.width, .height]
     list.hasVerticalScroller = true
+    list.autohidesScrollers = true
+    list.drawsBackground = false
+    list.automaticallyAdjustsContentInsets = false
+    list.contentInsets = NSEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
     let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("command"))
-    column.width = 580
+    column.width = 480
     table.addTableColumn(column)
+    table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
     table.headerView = nil
-    table.rowHeight = 45
+    table.backgroundColor = .clear
+    table.style = .plain
+    table.intercellSpacing = NSSize(width: 0, height: 4)
+    table.rowHeight = 33
+    table.selectionHighlightStyle = .none
     table.delegate = self
     table.dataSource = self
     table.target = self
-    table.doubleAction = #selector(runSelected)
+    table.action = #selector(runSelected)
     list.documentView = table
-    contentView?.addSubview(list)
+    background.addSubview(list)
+    emptyLabel.alignment = .center
+    emptyLabel.textColor = .secondaryLabelColor
+    emptyLabel.frame = NSRect(x: 10, y: 80, width: 480, height: 24)
+    background.addSubview(emptyLabel)
     filter()
   }
   func numberOfRows(in tableView: NSTableView) -> Int { filtered.count }
   func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView?
   {
     let entry = filtered[row]
-    let text = NSTextField(
-      labelWithString: entry.title + (entry.detail.isEmpty ? "" : "\n" + entry.detail))
-    text.maximumNumberOfLines = 2
+    let text = NSTextField(labelWithString: entry.title)
+    text.maximumNumberOfLines = 1
     text.lineBreakMode = .byTruncatingTail
-    text.font = .systemFont(ofSize: 12)
-    return text
+    text.font = .systemFont(ofSize: 14)
+    let shortcut = NSTextField(labelWithString: shortcut(for: entry.action))
+    shortcut.font = .systemFont(ofSize: 13)
+    shortcut.textColor = .secondaryLabelColor
+    shortcut.setContentCompressionResistancePriority(.required, for: .horizontal)
+    let cell = NSTableCellView()
+    cell.toolTip = entry.detail.isEmpty ? entry.title : entry.detail
+    for label in [text, shortcut] {
+      label.translatesAutoresizingMaskIntoConstraints = false
+      cell.addSubview(label)
+    }
+    cell.textField = text
+    NSLayoutConstraint.activate([
+      text.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
+      text.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+      shortcut.leadingAnchor.constraint(greaterThanOrEqualTo: text.trailingAnchor, constant: 12),
+      shortcut.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
+      shortcut.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+    ])
+    return cell
   }
+  func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+    PaletteRow()
+  }
+  func shortcut(for action: String) -> String {
+    guard let config = terminal?.config else { return "" }
+    var trigger = ghostty_input_trigger_s()
+    guard action.withCString({ velokit_config_trigger(config, $0, &trigger) }) else { return "" }
+    let key: String
+    if trigger.tag == GHOSTTY_TRIGGER_UNICODE, let scalar = UnicodeScalar(trigger.key.unicode) {
+      key = String(scalar)
+    } else if trigger.tag == GHOSTTY_TRIGGER_PHYSICAL {
+      key = GlobalShortcuts.character(for: velokit_keycode_for_key(trigger.key.physical)) ?? ""
+    } else { return "" }
+    guard !key.isEmpty else { return "" }
+    let mods = trigger.mods.rawValue
+    return (mods & GHOSTTY_MODS_CTRL.rawValue != 0 ? "⌃" : "")
+      + (mods & GHOSTTY_MODS_ALT.rawValue != 0 ? "⌥" : "")
+      + (mods & GHOSTTY_MODS_SHIFT.rawValue != 0 ? "⇧" : "")
+      + (mods & GHOSTTY_MODS_SUPER.rawValue != 0 ? "⌘" : "") + key.uppercased()
+  }
+  func present() {
+    if let window = terminal?.window {
+      window.addChildWindow(self, ordered: .above)
+      let content = window.convertToScreen(window.contentLayoutRect)
+      setFrameOrigin(NSPoint(x: content.midX - frame.width / 2,
+        y: content.maxY - content.height * 0.05 - frame.height))
+    } else { center() }
+    makeKeyAndOrderFront(nil)
+    makeFirstResponder(query)
+  }
+  override func close() {
+    let restoreFocus = isKeyWindow && NSApp.isActive
+    parent?.removeChildWindow(self)
+    super.close()
+    if restoreFocus {
+      terminal?.window?.makeKeyAndOrderFront(nil)
+      terminal?.window?.makeFirstResponder(terminal)
+    }
+  }
+  func windowDidResignKey(_ notification: Notification) { if isVisible { close() } }
   func controlTextDidChange(_ obj: Notification) { filter() }
   func filter() {
     let needle = query.stringValue
@@ -79,9 +180,12 @@ final class CommandPalette: NSPanel, NSSearchFieldDelegate, NSTableViewDataSourc
         || $0.detail.localizedCaseInsensitiveContains(needle)
     }
     table.reloadData()
-    if !filtered.isEmpty {
+    emptyLabel.isHidden = !filtered.isEmpty
+    if !filtered.isEmpty && !needle.isEmpty {
       table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-    }
+    } else { table.deselectAll(nil) }
+    list.contentView.scroll(to: NSPoint(x: -10, y: -10))
+    list.reflectScrolledClipView(list.contentView)
   }
   func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector)
     -> Bool
@@ -98,7 +202,9 @@ final class CommandPalette: NSPanel, NSSearchFieldDelegate, NSTableViewDataSourc
       || commandSelector == #selector(NSResponder.moveUp(_:))
     {
       let direction = commandSelector == #selector(NSResponder.moveDown(_:)) ? 1 : -1
-      let row = min(filtered.count - 1, max(0, table.selectedRow + direction))
+      let row = filtered.isEmpty ? -1
+        : table.selectedRow < 0 ? (direction > 0 ? 0 : filtered.count - 1)
+        : (table.selectedRow + direction + filtered.count) % filtered.count
       if row >= 0 {
         table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         table.scrollRowToVisible(row)
@@ -113,5 +219,28 @@ final class CommandPalette: NSPanel, NSSearchFieldDelegate, NSTableViewDataSourc
     close()
     terminal?.window?.makeFirstResponder(terminal)
     terminal?.performSurfaceAction(action)
+  }
+}
+
+private final class PaletteRow: NSTableRowView {
+  private var hover = false
+  private var tracking: NSTrackingArea?
+  override func updateTrackingAreas() {
+    if let tracking { removeTrackingArea(tracking) }
+    let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+      owner: self)
+    addTrackingArea(area)
+    tracking = area
+    super.updateTrackingAreas()
+  }
+  override func mouseEntered(with event: NSEvent) { hover = true; needsDisplay = true }
+  override func mouseExited(with event: NSEvent) { hover = false; needsDisplay = true }
+  override var isSelected: Bool { didSet { needsDisplay = true } }
+  override func drawBackground(in dirtyRect: NSRect) {
+    if isSelected || hover {
+      (isSelected ? NSColor.controlAccentColor.withAlphaComponent(0.2)
+        : NSColor.labelColor.withAlphaComponent(0.06)).setFill()
+      NSBezierPath(roundedRect: bounds, xRadius: 5, yRadius: 5).fill()
+    }
   }
 }

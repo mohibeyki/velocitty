@@ -130,8 +130,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     for other in windows where other !== controller { other.updateSecureInput(forceOff: true) }
     focusedWindow = controller
     if controller.hasBell {
-      controller.hasBell = false
-      controller.setTitle(controller.terminalTitle)
+      controller.clearBell()
     }
     updateMenuShortcuts()
   }
@@ -591,26 +590,16 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
       theme == "dark" || (inferred && dark)
       ? NSAppearance(named: .darkAqua)
       : theme == "light" || (inferred && !dark) ? NSAppearance(named: .aqua) : nil
-    let opacity = native.backgroundOpacity
-    window.isOpaque = opacity >= 1
-    window.backgroundColor = native.background.withAlphaComponent(opacity)
-    let blur = native.backgroundBlur
-    if blur != 0 && opacity < 1, let terminal = chrome, window.contentView === terminal {
-      let visual = NSVisualEffectView(frame: terminal.frame)
-      visual.material = .underWindowBackground
-      visual.blendingMode = .behindWindow
-      visual.state = .active
-      window.contentView = visual
-      terminal.frame = visual.bounds
-      terminal.autoresizingMask = [.width, .height]
-      visual.addSubview(terminal)
-    } else if blur == 0 || opacity >= 1, let terminal = chrome,
-      window.contentView is NSVisualEffectView
-    {
-      terminal.removeFromSuperview()
-      window.contentView = terminal
-    }
+    applyBackground()
+    refreshBell()
   }
+
+  func applyBackground() {
+    guard let window, let chrome else { return }
+    WindowAppearance.apply(to: window, terminal: chrome, native: native,
+      forceOpaque: session?.opacityOverride != nil)
+  }
+
 
   func confirmClose() -> Bool {
     guard let surface = session?.view?.surface, velokit_surface_needs_confirm_quit(surface) else {
@@ -654,7 +643,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
 
   func setTitle(_ title: String) {
     terminalTitle = title
-    let displayed = (hasBell ? "● " : "") + (windowTitleOverride ?? title)
+    let displayed = (hasBell && native.bellFeatures & 8 != 0 ? "● " : "") + (windowTitleOverride ?? title)
     window?.title = displayed
     titleLabel?.stringValue = displayed
   }
@@ -738,6 +727,9 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
   func windowWillEnterFullScreen(_ notification: Notification) {
     if shouldSaveState { window?.saveFrame(usingName: "TerminalWindow") }
   }
+  func windowDidEnterFullScreen(_ notification: Notification) { applyBackground() }
+  func windowDidExitFullScreen(_ notification: Notification) { applyBackground() }
+
   func windowDidChangeOcclusionState(_ notification: Notification) {
     if let window, let surface = session?.view?.surface {
       velokit_surface_set_occlusion(surface, window.occlusionState.contains(.visible))
@@ -755,9 +747,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     guard let terminal = session?.view else { return }
     let palette = CommandPalette(terminal: terminal)
     self.palette = palette
-    palette.center()
-    palette.makeKeyAndOrderFront(nil)
-    palette.makeFirstResponder(palette.query)
+    palette.present()
   }
 
   @objc func findTerminal() { session?.view?.performSurfaceAction("start_search") }
@@ -778,21 +768,25 @@ extension TerminalWindowController {
       bellSound?.volume = Float(native.bellAudioVolume)
       bellSound?.play()
     }
-    if !NSApp.isActive || window?.isKeyWindow != true {
-      if features & 4 != 0 { NSApp.requestUserAttention(.informationalRequest) }
-      if features & 8 != 0, !hasBell {
-        hasBell = true
-        setTitle(terminalTitle)
-      }
+    if (!NSApp.isActive || window?.isKeyWindow != true) && features & 4 != 0 {
+      NSApp.requestUserAttention(.informationalRequest)
     }
-    if features & 16 != 0, let chrome {
-      chrome.wantsLayer = true
-      chrome.layer?.borderColor = NSColor.controlAccentColor.cgColor
-      chrome.layer?.borderWidth = 2
-      DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak chrome] in
-        chrome?.layer?.borderWidth = 0
-      }
-    }
+    hasBell = true
+    setTitle(terminalTitle)
+    refreshBell()
+  }
+
+  func clearBell() {
+    guard hasBell else { return }
+    hasBell = false
+    setTitle(terminalTitle)
+    refreshBell()
+  }
+
+  func refreshBell() {
+    chrome?.wantsLayer = true
+    chrome?.layer?.borderColor = NSColor(srgbRed: 1, green: 0.8, blue: 0, alpha: 0.5).cgColor
+    chrome?.layer?.borderWidth = hasBell && native.bellFeatures & 16 != 0 ? 3 : 0
   }
 
   func notify(title: String, body: String) {
@@ -912,6 +906,7 @@ extension TerminalWindowController {
     chrome?.secure.stringValue = indicators.joined(separator: " · ")
   }
   func windowDidBecomeKey(_ notification: Notification) {
+    applyBackground()
     owner?.windowFocused(self)
     updateSecureInput()
     session?.view?.updateFocus()

@@ -1136,6 +1136,7 @@ int velokit_init(uintptr_t, char**);
 ghostty_config_t velokit_config_new();
 void velokit_config_free(ghostty_config_t);
 
+bool velokit_action_supported(const char*);
 bool velokit_config_set(ghostty_config_t, const char*, const char*);
 const char* velokit_config_error(ghostty_config_t);
 const char* velokit_config_diagnostic(ghostty_config_t, uintptr_t);

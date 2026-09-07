@@ -387,6 +387,60 @@ do {
   precondition(first.native.backgroundOpacity == 1 && second.native.backgroundOpacity == 1)
 }
 
+// Native visual policies retain their distinct meanings.
+do {
+  let runtime = delegate.runtime!
+  for blur in ["12", "macos-glass-regular", "macos-glass-clear", "false"] {
+    let config = try AppConfiguration.parse(Data(("""
+    [terminal]
+    command = "/bin/sh"
+    shell_integration = "none"
+    theme = ""
+    confirm_close_surface = false
+    window_save_state = "never"
+    background_opacity = 0.5
+    bell_features = "no-attention,no-title,border"
+    background_blur = "\(blur)"
+    """).utf8))
+    try runtime.updateConfiguration(config)
+    drain()
+    if #available(macOS 26, *), blur.hasPrefix("macos-glass") {
+      let effect = first.window!.contentView as! NSGlassEffectView
+      precondition(effect.style == (blur.hasSuffix("clear") ? .clear : .regular))
+      precondition(effect.contentView === first.chrome)
+    } else {
+      precondition(first.window!.contentView === first.chrome)
+    }
+    precondition(first.session!.surface != nil && !first.window!.isOpaque)
+  }
+  first.ringBell()
+  drain()
+  precondition(first.hasBell && first.chrome!.layer!.borderWidth == 3)
+  first.clearBell()
+  precondition(!first.hasBell && first.chrome!.layer!.borderWidth == 0)
+  var target = ghostty_target_s()
+  target.tag = GHOSTTY_TARGET_SURFACE
+  target.target.surface = first.session!.surface
+  var action = ghostty_action_s()
+  action.tag = GHOSTTY_ACTION_SIZE_LIMIT
+  action.action.size_limit.min_width = 200
+  action.action.size_limit.min_height = 100
+  action.action.size_limit.max_width = 1600
+  action.action.size_limit.max_height = 1200
+  precondition(runtime.context.handleAction(target: target, action: action))
+  drain()
+  let scale = first.window!.backingScaleFactor
+  precondition(first.window!.contentMaxSize.width == 1600 / scale)
+  precondition(first.window!.contentMinSize.height == 100 / scale)
+  action.action.size_limit.max_width = 0
+  action.action.size_limit.max_height = 0
+  precondition(runtime.context.handleAction(target: target, action: action))
+  drain()
+  precondition(first.window!.contentMaxSize.width > 100_000)
+  try runtime.updateConfiguration(settings)
+  drain()
+}
+
 if CommandLine.arguments.contains("--configuration-only") {
   delegate.terminating = true
   for controller in delegate.windows {

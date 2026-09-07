@@ -16,6 +16,8 @@ export fn velokit_config_new() ?*Config {
         return null;
     };
 
+    @import("Capabilities.zig").prune(&result.keybind.set, result.arenaAlloc());
+    @import("Capabilities.zig").pruneCommands(&result.@"command-palette-entry");
     return result;
 }
 
@@ -46,6 +48,11 @@ export fn velokit_config_set(self: *Config, key_z: [*:0]const u8, value_z: [*:0]
     }
     if (key.len == 0) return false;
     const alloc = self.arenaAlloc();
+    if (!(@import("Capabilities.zig").optionSupported(key, value, alloc) catch return false)) {
+        self._diagnostics.append(alloc, .{ .key = alloc.dupeZ(u8, key) catch return false,
+            .message = "action is not supported by Velocitty" }) catch return false;
+        return false;
+    }
     const arg = std.fmt.allocPrintSentinel(alloc, "--{s}={s}", .{ key, value }, 0) catch return false;
     var iter = struct {
         arg: ?[:0]const u8,
@@ -55,6 +62,10 @@ export fn velokit_config_set(self: *Config, key_z: [*:0]const u8, value_z: [*:0]
         }
     }{ .arg = arg };
     self.loadIter(global.alloc(), &iter) catch return false;
+    if (std.mem.eql(u8, key, "keybind") and value.len == 0)
+        @import("Capabilities.zig").prune(&self.keybind.set, alloc);
+    if (std.mem.eql(u8, key, "command-palette-entry") and value.len == 0)
+        @import("Capabilities.zig").pruneCommands(&self.@"command-palette-entry");
 
     // The native numeric parser accepts NaN/Infinity. They cannot be used by
     // the renderer safely, even when supplied as TOML strings.
@@ -268,3 +279,5 @@ export fn velokit_config_format(self: *Config, key_z: [*:0]const u8) ?[*:0]const
     }
     return (self.arenaAlloc().dupeZ(u8, buf.written()) catch return null).ptr;
 }
+
+comptime { _ = @import("Capabilities.zig"); }

@@ -124,6 +124,11 @@ final class RuntimeContext: NSObject {
         let scale = window.backingScaleFactor
         window.contentMinSize = NSSize(
           width: CGFloat(limit.min_width) / scale, height: CGFloat(limit.min_height) / scale)
+        window.contentMaxSize = NSSize(
+          width: limit.max_width == 0 ? CGFloat.greatestFiniteMagnitude
+            : max(window.contentMinSize.width, CGFloat(limit.max_width) / scale),
+          height: limit.max_height == 0 ? CGFloat.greatestFiniteMagnitude
+            : max(window.contentMinSize.height, CGFloat(limit.max_height) / scale))
       }
 
     case GHOSTTY_ACTION_CELL_SIZE:
@@ -181,16 +186,6 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_TOGGLE_FULLSCREEN:
       perform { view, owner in owner?.toggleFullscreen() }
-
-    case GHOSTTY_ACTION_TOGGLE_WINDOW_DECORATIONS:
-      perform { view, owner in
-        guard let window = view?.window else { return }
-        if window.styleMask.contains(.titled) {
-          window.styleMask.remove(.titled)
-        } else {
-          window.styleMask.insert(.titled)
-        }
-      }
 
     case GHOSTTY_ACTION_TOGGLE_VISIBILITY:
       perform { view, owner in
