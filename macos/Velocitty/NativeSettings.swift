@@ -42,9 +42,9 @@ struct NativeSettings {
   var quitDelay: Double { seconds("quit-after-last-window-closed-delay", 0) }
   var resizeOverlayDuration: Double { seconds("resize-overlay-duration", 0.75) }
   var commandFinishDelay: Double { seconds("notify-on-command-finish-after", 5) }
-  var background: NSColor { color("background", .windowBackgroundColor) }
-  var titlebarForeground: NSColor { color("window-titlebar-foreground", .labelColor) }
-  var titlebarBackground: NSColor { color("window-titlebar-background", .windowBackgroundColor) }
+  var background: NSColor { color("background") ?? .windowBackgroundColor }
+  var titlebarForeground: NSColor? { color("window-titlebar-foreground") }
+  var titlebarBackground: NSColor? { color("window-titlebar-background") }
 
   var bellAudioPath: String {
     guard let config else { return "" }
@@ -109,10 +109,10 @@ struct NativeSettings {
     guard velokit_config_get_milliseconds(config, key, &milliseconds) else { return fallback }
     return Double(milliseconds) / 1000
   }
-  private func color(_ key: String, _ fallback: NSColor) -> NSColor {
-    guard let config else { return fallback }
+  private func color(_ key: String) -> NSColor? {
+    guard let config else { return nil }
     var result = ghostty_config_color_s(r: 0, g: 0, b: 0)
-    guard velokit_config_get_color(config, key, &result) else { return fallback }
+    guard velokit_config_get_color(config, key, &result) else { return nil }
     return NSColor(
       srgbRed: Double(result.r) / 255, green: Double(result.g) / 255,
       blue: Double(result.b) / 255, alpha: 1)

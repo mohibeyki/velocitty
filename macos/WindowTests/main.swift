@@ -95,14 +95,11 @@ do {
   let included = directory.appendingPathComponent("included.toml")
   try Data("[terminal]\nconfig_file = [\"included.toml\"]\ntheme = \"\"".utf8).write(to: root)
   try Data("[terminal]\nfont_size = \"not-a-number\"".utf8).write(to: included)
-  let invalid = try AppConfiguration.load(from: root)
-  do {
-    let config = try TerminalRuntime.makeConfig(invalid)
-    velokit_config_free(config)
-    fatalError("Invalid included setting was accepted")
-  } catch {
-    precondition(error.localizedDescription.hasPrefix(included.path + ":"))
-  }
+  let invalid = AppConfiguration.load(from: root)
+  var diagnostics: [String] = []
+  let config = try TerminalRuntime.makeConfig(invalid) { diagnostics.append($0) }
+  velokit_config_free(config)
+  precondition(diagnostics.count == 1 && diagnostics[0].hasPrefix(included.path + ":"))
 }
 
 // A queued wakeup can outlive its runtime, but must not retain a native handle.
@@ -238,6 +235,8 @@ do {
   """.utf8)))
   precondition(velokit_surface_update_config(firstSurface, scoped))
   velokit_config_free(scoped)
+  let scopedFontSize = String(cString: velokit_config_format(first.session!.config!, "font-size")!)
+  precondition(scopedFontSize == "font-size = 36\n", "The host must copy the borrowed applied configuration")
   drain()
   precondition(velokit_surface_size(firstSurface).cell_height_px > velokit_surface_size(secondSurface).cell_height_px,
     "A surface-only update must leave sibling terminals unchanged")
@@ -279,6 +278,94 @@ do {
   precondition(first.session!.surface == firstSurface && second.session!.surface == secondSurface)
   try runtime.updateConfiguration(settings)
   drain()
+}
+
+// Reload bad values alongside valid settings without replacing terminals or losing overrides.
+do {
+  let runtime = delegate.runtime!
+  let firstSurface = first.session!.surface!
+  let secondSurface = second.session!.surface!
+  let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let file = directory.appendingPathComponent("config.toml")
+  try Data("""
+  [terminal]
+  command = "/bin/sh"
+  shell_integration = "none"
+  confirm_close_surface = false
+  window_save_state = "never"
+  theme = "missing-theme"
+  font_size = "nan"
+  cursor_style = "not-a-style"
+  background_opacity = 0.45
+  scrollbar = "system"
+  title = "Reloaded"
+  window_titlebar_foreground = "not-a-color"
+  window_titlebar_background = "not-a-color"
+  palette = ["0=#112233", "invalid", "1=#445566"]
+  keybind = ["super+f=unbind", "invalid-key=invalid-action", "super+shift+c=copy_to_clipboard"]
+  working_directory = "relative"
+  """.utf8).write(to: file)
+  try first.session!.toggleOpacity()
+  try runtime.updateConfiguration(AppConfiguration.load(from: file))
+  drain()
+  precondition(runtime.diagnostics.count == 8, runtime.diagnostics.joined(separator: "\n"))
+  precondition(first.session!.surface == firstSurface && second.session!.surface == secondSurface)
+  precondition(first.native.backgroundOpacity == 1 && second.native.backgroundOpacity == 0.45)
+  precondition(second.window!.backgroundColor.alphaComponent == 0.45)
+  precondition(first.window!.title == "Reloaded" && second.window!.title == "Reloaded")
+  precondition(first.titleAccessory == nil && second.titleAccessory == nil,
+    "Rejected titlebar colors must not enable custom titlebars")
+  precondition(!menuItem("Find…").isEnabled || menuItem("Find…").keyEquivalent.isEmpty)
+  let defaults = try TerminalRuntime.makeConfig(.defaults())
+  defer { velokit_config_free(defaults) }
+  let defaultFontSize = String(cString: velokit_config_format(defaults, "font-size")!)
+  precondition(String(cString: velokit_config_format(runtime.config!, "font-size")!) == defaultFontSize)
+  let palette = String(cString: velokit_config_format(runtime.config!, "palette")!)
+  precondition(palette.contains("0=#112233") && palette.contains("1=#445566"), palette)
+  precondition(runtime.settings.workingDirectory == AppConfiguration.defaults().workingDirectory)
+
+  delegate.showConfigurationDiagnostics()
+  drain()
+  let diagnosticWindow = delegate.activeWindow!.window!
+  precondition(diagnosticWindow.attachedSheet != nil, "Reload diagnostics must be visible")
+  diagnosticWindow.endSheet(diagnosticWindow.attachedSheet!)
+  drain()
+
+  // Overrides use already prepared theme colors, even if the theme disappears.
+  let themeFile = directory.appendingPathComponent("custom.itermcolors")
+  let color: [String: Any] = ["Red Component": 0.25, "Green Component": 0.5,
+    "Blue Component": 0.75, "Color Space": "sRGB"]
+  try PropertyListSerialization.data(fromPropertyList:
+    ["Background Color": color, "Foreground Color": color], format: .xml, options: 0)
+    .write(to: themeFile)
+  let custom = try AppConfiguration.parse(Data("[terminal]\ntheme = '\(themeFile.path)'".utf8))
+  let prepared = try TerminalRuntime.makeConfig(custom)
+  defer { velokit_config_free(prepared) }
+  try FileManager.default.removeItem(at: themeFile)
+  let override = try first.session!.prepareOverride(from: prepared)!
+  precondition(first.session!.applyPreparedConfiguration(override))
+  velokit_config_free(override)
+  precondition(first.native.backgroundOpacity == 1)
+  precondition(first.native.background == NativeSettings(config: prepared).background)
+
+  // A subsequent clean reload clears diagnostics and the opacity toggle still works.
+  try runtime.updateConfiguration(settings)
+  try first.session!.toggleOpacity()
+  drain()
+  precondition(runtime.diagnostics.isEmpty)
+  precondition(first.native.backgroundOpacity == 1 && second.native.backgroundOpacity == 1)
+}
+
+if CommandLine.arguments.contains("--configuration-only") {
+  delegate.terminating = true
+  for controller in delegate.windows {
+    controller.closing = true
+    controller.window?.close()
+  }
+  print("Configuration reload tests passed.")
+  exit(0)
 }
 
 // Independent sessions retain independent sheets, and queued callbacks cannot reach replacements.
@@ -381,7 +468,7 @@ do {
   app.activate(ignoringOtherApps: true)
   window.makeKeyAndOrderFront(nil)
   window.makeFirstResponder(terminal)
-  waitUntil("Test application did not activate") { app.isActive && window.isKeyWindow }
+  waitUntil("Test application did not activate: active=\(app.isActive), key=\(window.isKeyWindow), visible=\(window.isVisible), keyWindow=\(String(describing: app.keyWindow)), target=\(window)") { app.isActive && window.isKeyWindow }
   waitUntil("Focus recorder did not start") { FileManager.default.fileExists(atPath: ready.path) }
   drain()
   func received() -> Data { (try? Data(contentsOf: input)) ?? Data() }

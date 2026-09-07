@@ -56,23 +56,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     do {
       runtime = try TerminalRuntime(settings: AppConfiguration.load())
     } catch {
-      let alert = configurationAlert(error)
-      alert.informativeText += "\n\nUse the defaults for this launch, or quit to fix the file."
-      alert.addButton(withTitle: "Use Defaults")
-      alert.addButton(withTitle: "Quit")
-      guard alert.runModal() == .alertFirstButtonReturn else {
-        if !pendingFiles.isEmpty { NSApp.reply(toOpenOrPrint: .cancel) }
-        NSApp.terminate(nil)
-        return
-      }
-      do {
-        runtime = try TerminalRuntime(settings: .defaults())
-      } catch {
-        configurationAlert(error).runModal()
-        if !pendingFiles.isEmpty { NSApp.reply(toOpenOrPrint: .failure) }
-        NSApp.terminate(nil)
-        return
-      }
+      configurationAlert(error).runModal()
+      if !pendingFiles.isEmpty { NSApp.reply(toOpenOrPrint: .failure) }
+      NSApp.terminate(nil)
+      return
     }
 
     self.runtime = runtime
@@ -86,6 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
     scheduleQuitIfNeeded()
     if native.hiddenPolicy == "always" { NSApp.hide(nil) }
+    showConfigurationDiagnostics()
   }
 
   @objc func newWindow() {
@@ -197,20 +185,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     guard let runtime else { return }
     do {
       try runtime.updateConfiguration(runtime.settings)
-      for controller in windows { controller.applyWindowSettings() }
+      for diagnostic in runtime.diagnostics { NSLog("Configuration: %@", diagnostic) }
     } catch { NSLog("Appearance update failed: %@", error.localizedDescription) }
+  }
+
+  func configurationDidChange() {
+    for controller in windows {
+      controller.applyWindowSettings()
+      controller.updateSecureInput()
+    }
+    shortcuts?.reload()
+    updateMenuShortcuts()
   }
 
   @objc func reloadConfiguration(_ sender: Any?) {
     do {
       try runtime?.updateConfiguration(AppConfiguration.load())
-      for controller in windows {
-        controller.applyWindowSettings()
-        controller.updateSecureInput()
-      }
-      shortcuts?.reload()
-      updateMenuShortcuts()
+      showConfigurationDiagnostics()
     } catch { configurationAlert(error).runModal() }
+  }
+
+  func showConfigurationDiagnostics() {
+    guard let diagnostics = runtime?.diagnostics, !diagnostics.isEmpty else { return }
+    for diagnostic in diagnostics { NSLog("Configuration: %@", diagnostic) }
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "Configuration has errors"
+    alert.informativeText =
+      "Valid settings were applied. Invalid values were skipped, leaving defaults or earlier valid values."
+    let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 560, height: 180))
+    scroll.hasVerticalScroller = true
+    scroll.borderType = .bezelBorder
+    let text = NSTextView(frame: scroll.contentView.bounds)
+    text.isEditable = false
+    text.isSelectable = true
+    text.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+    text.string = diagnostics.joined(separator: "\n\n")
+    text.textContainerInset = NSSize(width: 6, height: 6)
+    text.isVerticallyResizable = true
+    text.maxSize = NSSize(width: 560, height: CGFloat.greatestFiniteMagnitude)
+    text.autoresizingMask = [.width]
+    text.textContainer?.widthTracksTextView = true
+    scroll.documentView = text
+    alert.accessoryView = scroll
+    alert.addButton(withTitle: "OK")
+    if let window = activeWindow?.window, window.attachedSheet == nil {
+      alert.beginSheetModal(for: window)
+    } else {
+      alert.runModal()
+    }
   }
 
   @objc func showCommands() { activeWindow?.showCommands() }
@@ -507,24 +530,18 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     }
     window.colorSpace = native.windowColorspace == "display-p3" ? .displayP3 : .sRGB
     let family = native.titleFontFamily
-    let foreground =
-      session?.settings.options.contains {
-        $0.key == "window-titlebar-foreground" && !$0.value.isEmpty
-      } == true
-    let background =
-      session?.settings.options.contains {
-        $0.key == "window-titlebar-background" && !$0.value.isEmpty
-      } == true
-    if window.styleMask.contains(.titled) && (!family.isEmpty || foreground || background) {
+    let foreground = native.titlebarForeground
+    let background = native.titlebarBackground
+    if window.styleMask.contains(.titled) && (!family.isEmpty || foreground != nil || background != nil) {
       let accessory = NSTitlebarAccessoryViewController()
       let label = NSTextField(labelWithString: window.title)
       label.frame = NSRect(x: 0, y: 0, width: 400, height: 24)
       label.alignment = .center
       label.font = NSFont(name: family, size: 13) ?? .systemFont(ofSize: 13)
-      if foreground { label.textColor = native.titlebarForeground }
-      if background {
+      if let foreground { label.textColor = foreground }
+      if let background {
         label.drawsBackground = true
-        label.backgroundColor = native.titlebarBackground
+        label.backgroundColor = background
       }
       accessory.view = label
       accessory.layoutAttribute = .bottom

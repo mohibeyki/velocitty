@@ -10,38 +10,60 @@ final class TerminalRuntime {
   private(set) var app: ghostty_app_t?
   private let sessions = NSHashTable<TerminalSession>.weakObjects()
   private(set) var settings: AppConfiguration
+  private(set) var diagnostics: [String] = []
 
-  static func makeConfig(_ settings: AppConfiguration, opacityOverride: Double? = nil) throws
-    -> ghostty_config_t
-  {
-    guard let config = velokit_config_new() else {
-      throw ConfigurationError("Could not allocate the terminal configuration.")
+  static func makeConfig(
+    _ settings: AppConfiguration,
+    diagnostic: (String) -> Void = { NSLog("Configuration: %@", $0) }
+  ) throws -> ghostty_config_t {
+    func allocate() throws -> ghostty_config_t {
+      guard let config = velokit_config_new() else {
+        throw ConfigurationError("Could not allocate the terminal configuration.")
+      }
+      return config
     }
-    func failure(_ context: String, source: URL? = nil) -> ConfigurationError {
-      let detail = velokit_config_error(config).map { String(cString: $0) } ?? context
-      return ConfigurationError("\((source ?? settings.source).path): \(detail)")
+    func set(_ option: TerminalOption, on config: ghostty_config_t) -> Bool {
+      option.key.withCString { key in
+        option.value.withCString { velokit_config_set(config, key, $0) }
+      }
     }
+    var config = try allocate()
     do {
+      // Keep only accepted inputs. Rebuild on an invalid value to discard any
+      // partial parser mutation (including non-finite numbers and repeatables).
+      var accepted: [TerminalOption] = []
       for option in try TerminalTheme.options(
         for: settings,
-        dark: NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
+        dark: NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua,
+        diagnostic: diagnostic)
       {
-        let accepted = option.key.withCString { key in
-          option.value.withCString { velokit_config_set(config, key, $0) }
+        if set(option, on: config) {
+          accepted.append(option)
+          continue
         }
-        guard accepted else {
-          throw failure("Invalid terminal setting: \(option.key)", source: option.source)
+        guard let message = velokit_config_error(config).map({ String(cString: $0) }) else {
+          throw ConfigurationError("Could not prepare terminal setting: \(option.key)")
+        }
+        diagnostic("\((option.source ?? settings.source).path): \(message)")
+        let clean = try allocate()
+        velokit_config_free(config)
+        config = clean
+        for previous in accepted {
+          guard set(previous, on: config) else {
+            throw ConfigurationError("Could not prepare terminal setting: \(previous.key)")
+          }
         }
       }
-      if let opacityOverride {
-        _ = String(opacityOverride).withCString {
-          velokit_config_set(config, "background-opacity", $0)
-        }
+      guard
+        settings.source.deletingLastPathComponent().path.withCString({
+          velokit_config_finalize(config, $0)
+        })
+      else { throw ConfigurationError("Could not finalize the terminal configuration.") }
+      var index: UInt = 0
+      while let message = velokit_config_diagnostic(config, index) {
+        diagnostic("\(settings.source.path): \(String(cString: message))")
+        index += 1
       }
-      let finalized = settings.source.deletingLastPathComponent().path.withCString {
-        velokit_config_finalize(config, $0)
-      }
-      guard finalized else { throw failure("Could not finalize the terminal configuration.") }
       return config
     } catch {
       velokit_config_free(config)
@@ -49,10 +71,20 @@ final class TerminalRuntime {
     }
   }
 
+  // Called synchronously: the engine's notification pointer is borrowed.
+  func configurationChanged(_ applied: ghostty_config_t) -> Bool {
+    guard let copy = velokit_config_clone(applied) else { return false }
+    if let config { velokit_config_free(config) }
+    config = copy
+    return true
+  }
+
   init(settings: AppConfiguration) throws {
     self.settings = settings
-    let config = try Self.makeConfig(settings)
+    var diagnostics = settings.diagnostics
+    let config = try Self.makeConfig(settings) { diagnostics.append($0) }
     self.config = config
+    self.diagnostics = diagnostics
 
     var runtimeConfig = ghostty_runtime_config_s(
       userdata: Unmanaged.passUnretained(context).toOpaque(),
@@ -72,6 +104,7 @@ final class TerminalRuntime {
 
     self.app = app
     context.app = app
+    context.runtime = self
     velokit_app_set_focus(app, NSApp.isActive)
     velokit_app_set_color_scheme(
       app, NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? 1 : 0)
@@ -92,18 +125,42 @@ final class TerminalRuntime {
 
   func updateConfiguration(_ settings: AppConfiguration) throws {
     guard let app else { return }
-    let updated = try Self.makeConfig(settings)
-    guard velokit_app_update_config(app, updated) else {
-      velokit_config_free(updated)
-      throw ConfigurationError("VeloKit could not apply the configuration.")
+    var diagnostics = settings.diagnostics
+    let updated = try Self.makeConfig(settings) { diagnostics.append($0) }
+    defer { velokit_config_free(updated) }
+    let terminals = sessions.allObjects
+    var overrides: [(TerminalSession, ghostty_config_t)] = []
+    defer { for (_, config) in overrides { velokit_config_free(config) } }
+    // No file reads or configuration preparation once application starts.
+    for session in terminals {
+      if let config = try session.prepareOverride(from: updated) {
+        overrides.append((session, config))
+      }
     }
-    let previous = config
-    config = updated
-    self.settings = settings
-    defer { if let previous { velokit_config_free(previous) } }
-    for session in sessions.allObjects { try session.refreshConfiguration() }
+
+    // Like Ghostty, apply best-effort. Config-change notifications own the
+    // host's applied snapshots; failures do not trigger a rollback.
+    if velokit_app_update_config(app, updated) {
+      self.settings = settings
+    } else {
+      diagnostics.append("VeloKit could not update every terminal. Some settings may have applied.")
+    }
+    for (session, config) in overrides {
+      if !session.applyPreparedConfiguration(config) {
+        diagnostics.append("VeloKit could not apply a terminal's opacity override.")
+      }
+    }
+    for session in terminals {
+      if let surface = session.surface {
+        velokit_surface_set_color_scheme(
+          surface, NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? 1 : 0)
+      }
+    }
     velokit_app_set_color_scheme(
       app, NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? 1 : 0)
+    var seen: Set<String> = []
+    self.diagnostics = diagnostics.filter { seen.insert($0).inserted }
+    context.owner?.configurationDidChange()
   }
 
   deinit {

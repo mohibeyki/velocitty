@@ -161,6 +161,44 @@ int main(int argc, char **argv) {
     assert(velokit_config_error(config));
     velokit_config_free(config);
     accepts("font-size", "13");
+
+    // Applied notifications carry borrowed configs. Copies must survive their
+    // source, and preparing a local override must leave the base unchanged.
+    config = velokit_config_new();
+    assert(velokit_config_set(config, "background-opacity", "0.4"));
+    assert(velokit_config_finalize(config, "/tmp"));
+    ghostty_config_t copy = velokit_config_clone(config);
+    assert(copy && velokit_config_set(copy, "background-opacity", "1"));
+    double base_opacity = 0;
+    assert(velokit_config_get_double(config, "background-opacity", &base_opacity));
+    assert(base_opacity == 0.4);
+    velokit_config_free(config);
+    assert(velokit_config_get_double(copy, "background-opacity", &base_opacity));
+    assert(base_opacity == 1);
+    assert(!velokit_config_diagnostic(copy, 0));
+    velokit_config_free(copy);
+
+    // Recoverable path-expansion errors must not prevent finalization. Preserve
+    // every diagnostic, and allow a prepared override on the resulting config.
+    char long_path[301];
+    memset(long_path, 'x', sizeof(long_path) - 1);
+    long_path[sizeof(long_path) - 1] = '\0';
+    config = velokit_config_new();
+    assert(velokit_config_set(config, "bell-audio-path", long_path));
+    assert(velokit_config_set(config, "background-image", long_path));
+    assert(velokit_config_finalize(config, "/tmp"));
+    assert(velokit_config_diagnostic(config, 0));
+    assert(velokit_config_diagnostic(config, 1));
+    assert(!velokit_config_diagnostic(config, 2));
+    ghostty_config_path_s cleared_path;
+    assert(velokit_config_get_path(config, "bell-audio-path", &cleared_path));
+    assert(cleared_path.path[0] == '\0');
+    copy = velokit_config_clone(config);
+    assert(copy && velokit_config_set(copy, "background-opacity", "1"));
+    velokit_config_free(config);
+    assert(velokit_config_diagnostic(copy, 1));
+    velokit_config_free(copy);
+
     config = velokit_config_new();
     assert(velokit_config_finalize(config, "/tmp"));
     const char *mode = NULL;

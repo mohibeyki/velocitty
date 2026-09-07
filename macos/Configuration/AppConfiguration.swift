@@ -12,6 +12,7 @@ public struct TerminalOption: Equatable, Sendable {
 public struct AppConfiguration: Equatable, Sendable {
   public let workingDirectory: URL
   public let options: [TerminalOption]
+  public var diagnostics: [String] = []
   // Relative asset paths are resolved against the TOML file, not the shell.
   public let source: URL
 
@@ -40,11 +41,19 @@ public struct AppConfiguration: Equatable, Sendable {
   public static func load(
     from url: URL = fileURL(),
     home: URL = FileManager.default.homeDirectoryForCurrentUser
-  ) throws -> Self {
-    try loadFile(url, home: home, stack: [], optional: true)
+  ) -> Self {
+    loadFile(url, home: home, stack: [], optional: true)
   }
 
-  private static func loadFile(_ url: URL, home: URL, stack: [URL], optional: Bool) throws -> Self {
+  private static func loadFile(_ url: URL, home: URL, stack: [URL], optional: Bool) -> Self {
+    do { return try readFile(url, home: home, stack: stack, optional: optional) } catch {
+      var config = defaults(home: home, source: url)
+      config.diagnostics = [error.localizedDescription]
+      return config
+    }
+  }
+
+  private static func readFile(_ url: URL, home: URL, stack: [URL], optional: Bool) throws -> Self {
     let canonical = url.standardizedFileURL.resolvingSymlinksInPath()
     guard !stack.contains(canonical), stack.count < 64 else {
       throw ConfigurationError(
@@ -59,12 +68,14 @@ public struct AppConfiguration: Equatable, Sendable {
     } catch { throw ConfigurationError("\(url.path): \(error.localizedDescription)") }
     let own = try parse(data, home: home, source: url)
     var merged: [TerminalOption] = []
+    var diagnostics = own.diagnostics
     for option in own.options where option.key == "config-file" && !option.value.isEmpty {
       let isOptional = option.value.hasPrefix("?")
       let path = isOptional ? String(option.value.dropFirst()) : option.value
       let child = assetURL(path, relativeTo: url, home: home)
-      let included = try loadFile(
+      let included = loadFile(
         child, home: home, stack: stack + [canonical], optional: isOptional)
+      diagnostics += included.diagnostics
       let keys = Set(included.options.map(\.key))
       merged.removeAll { keys.contains($0.key) }
       merged += included.options
@@ -78,7 +89,7 @@ public struct AppConfiguration: Equatable, Sendable {
         URL(fileURLWithPath: $0.value, isDirectory: true)
       }
       ?? defaults(home: home).workingDirectory
-    return Self(workingDirectory: directory, options: merged, source: url)
+    return Self(workingDirectory: directory, options: merged, diagnostics: diagnostics, source: url)
   }
 
   static func assetURL(_ path: String, relativeTo source: URL, home: URL) -> URL {
@@ -95,67 +106,90 @@ public struct AppConfiguration: Equatable, Sendable {
     do {
       let document = try TOMLDecoder().decode(Document.self, from: data)
       var options: [TerminalOption] = []
-      var seen: Set<String> = []
+      var diagnostics = document.diagnostics.map { "\(source.path): \($0)" }
+      let aliases = Dictionary(grouping: (document.terminal ?? [:]).keys) {
+        $0.replacingOccurrences(of: "_", with: "-")
+      }
       var directory = defaults(home: home, source: source).workingDirectory
       for (spelling, value) in (document.terminal ?? [:]).sorted(by: { $0.key < $1.key }) {
         let key = spelling.replacingOccurrences(of: "_", with: "-")
-        guard seen.insert(key).inserted else {
-          throw ConfigurationError("Duplicate setting aliases: terminal.\(spelling)")
-        }
-        if let reason = TerminalSettings.unavailable[key] {
-          throw ConfigurationError("terminal.\(spelling) is not available yet. \(reason)")
-        }
-        guard TerminalSettings.supported.contains(key) else {
-          throw ConfigurationError("Unknown configuration key: terminal.\(spelling)")
-        }
-        let values: [String]
-        switch value {
-        case .scalar(let scalar): values = [scalar]
-        case .array(let array):
-          guard TerminalSettings.repeatable.contains(key) else {
-            throw ConfigurationError("terminal.\(spelling) does not accept an array.")
+        do {
+          guard aliases[key]?.count == 1 else {
+            throw ConfigurationError("Duplicate setting aliases: terminal.\(spelling)")
           }
-          // Empty repeatable arrays explicitly reset to the engine default.
-          values = array.isEmpty ? [""] : array
-        }
-        for text in values {
-          guard !text.contains("\0") else {
-            throw ConfigurationError("terminal.\(spelling) cannot contain a NUL character.")
+          if let reason = TerminalSettings.unavailable[key] {
+            throw ConfigurationError("terminal.\(spelling) is not available yet. \(reason)")
           }
-          if key == "shell-integration-features" {
-            let flags = text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-            for feature in ["ssh-env", "ssh-terminfo"] {
-              if flags.last(where: { $0 == feature || $0 == "no-" + feature }) == feature {
-                throw ConfigurationError(
-                  "terminal.shell_integration_features: \(feature) requires an upstream command-line helper that Velocitty does not bundle."
+          guard TerminalSettings.supported.contains(key) else {
+            throw ConfigurationError("Unknown configuration key: terminal.\(spelling)")
+          }
+          let values: [String]
+          switch value {
+          case .invalid(let reason):
+            throw ConfigurationError("terminal.\(spelling): \(reason)")
+          case .scalar(let scalar): values = [scalar]
+          case .array(let array):
+            guard TerminalSettings.repeatable.contains(key) else {
+              throw ConfigurationError("terminal.\(spelling) does not accept an array.")
+            }
+            // Empty repeatable arrays explicitly reset to the engine default.
+            values =
+              array.isEmpty
+              ? [""]
+              : array.compactMap { element in
+                if let text = element.text { return text }
+                diagnostics.append(
+                  "\(source.path): terminal.\(spelling): Invalid array element; expected a string, boolean, or finite number."
                 )
+                return nil
               }
-            }
           }
-          if key == "working-directory" {
-            directory = try resolveDirectory(text, home: home)
-            options.append(TerminalOption(key: key, value: directory.path, source: source))
-          } else {
-            var resolved = text
-            if ["background-image", "custom-shader", "bell-audio-path"].contains(key), !text.isEmpty
-            {
-              let optional = text.hasPrefix("?")
-              resolved =
-                (optional ? "?" : "")
-                + Self.assetURL(
-                  optional ? String(text.dropFirst()) : text, relativeTo: source, home: home
-                ).path
-            }
-            if key == "input", text.hasPrefix("path:") {
-              resolved =
-                "path:"
-                + Self.assetURL(String(text.dropFirst(5)), relativeTo: source, home: home).path
-            }
-            options.append(TerminalOption(key: key, value: resolved, source: source))
+          for text in values {
+            do {
+              guard !text.contains("\0") else {
+                throw ConfigurationError("terminal.\(spelling) cannot contain a NUL character.")
+              }
+              if key == "shell-integration-features" {
+                let flags = text.split(separator: ",").map {
+                  $0.trimmingCharacters(in: .whitespaces)
+                }
+                for feature in ["ssh-env", "ssh-terminfo"] {
+                  if flags.last(where: { $0 == feature || $0 == "no-" + feature }) == feature {
+                    throw ConfigurationError(
+                      "terminal.shell_integration_features: \(feature) requires an upstream command-line helper that Velocitty does not bundle."
+                    )
+                  }
+                }
+              }
+              if key == "working-directory" {
+                directory = try resolveDirectory(text, home: home)
+                options.append(TerminalOption(key: key, value: directory.path, source: source))
+              } else {
+                var resolved = text
+                if ["background-image", "custom-shader", "bell-audio-path"].contains(key),
+                  !text.isEmpty
+                {
+                  let optional = text.hasPrefix("?")
+                  resolved =
+                    (optional ? "?" : "")
+                    + Self.assetURL(
+                      optional ? String(text.dropFirst()) : text, relativeTo: source, home: home
+                    ).path
+                }
+                if key == "input", text.hasPrefix("path:") {
+                  resolved =
+                    "path:"
+                    + Self.assetURL(String(text.dropFirst(5)), relativeTo: source, home: home).path
+                }
+                options.append(TerminalOption(key: key, value: resolved, source: source))
+              }
+            } catch { diagnostics.append("\(source.path): \(error.localizedDescription)") }
           }
-        }
+        } catch { diagnostics.append("\(source.path): \(error.localizedDescription)") }
       }
-      return Self(workingDirectory: directory.standardizedFileURL, options: options, source: source)
+      return Self(
+        workingDirectory: directory.standardizedFileURL, options: options,
+        diagnostics: diagnostics, source: source)
     } catch let error as DecodingError {
       let detail: String
       switch error {
@@ -219,14 +253,18 @@ private struct Key: CodingKey {
 
 private struct Document: Decodable {
   let terminal: [String: Value]?
+  let diagnostics: [String]
   enum CodingKeys: String, CodingKey { case terminal }
   init(from decoder: Decoder) throws {
     let keys = try decoder.container(keyedBy: Key.self).allKeys.map(\.stringValue)
-    if let unknown = keys.sorted().first(where: { $0 != "terminal" }) {
-      throw ConfigurationError("Unknown configuration key: \(unknown)")
+    diagnostics = keys.sorted().filter { $0 != "terminal" }.map {
+      "Unknown configuration key: \($0)"
     }
-    terminal = try decoder.container(keyedBy: CodingKeys.self).decodeIfPresent(
-      [String: Value].self, forKey: .terminal)
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    // Validate the table explicitly: TOMLDecoder can otherwise decode a scalar
+    // dictionary using the enclosing table's keys.
+    if container.contains(.terminal) { _ = try container.decode(TOMLTable.self, forKey: .terminal) }
+    terminal = try container.decodeIfPresent([String: Value].self, forKey: .terminal)
   }
 }
 
@@ -234,16 +272,29 @@ private struct Document: Decodable {
 // durations, percentages, colors, and other compound setting syntax.
 private enum Value: Decodable {
   case scalar(String)
-  case array([String])
+  case array([Element])
+  case invalid(String)
   init(from decoder: Decoder) throws {
-    if var array = try? decoder.unkeyedContainer() {
-      var values: [String] = []
-      while !array.isAtEnd { values.append(try array.decode(Scalar.self).text) }
-      self = .array(values)
-    } else {
-      self = .scalar(try Scalar(from: decoder).text)
+    do {
+      if var array = try? decoder.unkeyedContainer() {
+        var values: [Element] = []
+        while !array.isAtEnd { values.append(try array.decode(Element.self)) }
+        self = .array(values)
+      } else {
+        self = .scalar(try Scalar(from: decoder).text)
+      }
+    } catch {
+      self = .invalid("Expected a string, boolean, finite number, or an array of these values.")
     }
   }
+}
+
+// Array elements use a scalar-only decoder. In TOMLDecoder a scalar element
+// shares its parent's unkeyed container; recursively probing it as an array
+// would start decoding the parent again.
+private struct Element: Decodable {
+  let text: String?
+  init(from decoder: Decoder) throws { text = try? Scalar(from: decoder).text }
 }
 
 private struct Scalar: Decodable {

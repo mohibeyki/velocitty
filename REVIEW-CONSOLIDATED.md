@@ -5,25 +5,12 @@ IDs are retained; resolved findings and rejected claims are removed from the que
 
 Discuss one issue at a time: choose an approach, implement it, validate it, update
 this file, and commit the change as a self-contained chunk. A recommendation below
-is not an approved decision. **Current issue: C11 — awaiting a choice.**
+is not an approved decision. **Current issue: C12a — awaiting a choice.**
 
 Scope: our macOS host, private VeloKit bridge, configuration, and build/test integration.
 Untouched libghostty internals and new mux functionality are outside this cleanup.
 
 ## Remaining issues
-
-### C11. Consistent configuration reload
-
-**Medium; confirmed gap.** The shared engine update applies settings to existing
-surfaces, followed by per-session overrides. A failure during application can leave
-a partial update; the host has no rollback. Native control refresh is already fixed.
-
-**Choose:** preparation/application/rollback semantics for the shared runtime.
-The original claim of a config-pointer race during the synchronous update was not
-established and is not an additional open defect.
-
-Code: [TerminalRuntime.swift](macos/Velocitty/TerminalRuntime.swift),
-[AppDelegate.swift](macos/Velocitty/AppDelegate.swift), `reloadConfiguration`.
 
 ### C12. Supported features and actions
 
@@ -147,7 +134,7 @@ Code: [THIRD_PARTY_NOTICES.md](VeloKit/THIRD_PARTY_NOTICES.md),
 | C08 | Share one engine and configuration across the app; sessions own surfaces and backing views, with callbacks routed to their current window. |
 | C09 | Build regression executables as Xcode targets; run them through XCTest Core/GUI plans and add CI for configuration, native bridge, and app builds. |
 | C10 | Build the private static engine, headers, and terminfo as an Xcode dependency through direnv and Zig; remove manual XCFramework packaging/copying. |
-| C11, controls | Refresh scrollbar visibility/layout on reload; remove unreachable scrollbar policy branch. |
+| C11 | Prepare base/override configurations before application; use best-effort reloads and engine notifications for applied snapshots. Report invalid values and use defaults or earlier valid values; refresh native controls. |
 | C15, delivery | Report file-delivery outcomes, including startup failure/cancellation. |
 | C18, diagnostics | Attribute native setting errors to their included source file. |
 | C19, availability | Disable terminal commands without a live destination; preserve unbinding. |
@@ -211,7 +198,7 @@ callbacks and real PTY input; C07 adds clipboard queue and cancellation coverage
   application ownership. Focus, keyboard layout, global shortcuts, appearance, and
   configuration use the shared engine. Links and clipboard prompts remain per terminal.
   A private surface configuration call preserves local opacity overrides without
-  updating siblings. Configuration failure rollback remains C11; persistence is future work.
+  updating siblings. Reload failure semantics are handled in C11; persistence is future work.
   Validation: rebuilt VeloKit and passed native bridge/configuration tests, 13 Swift
   configuration tests, both AppKit suites, and the Debug build. Tests cover native
   all/global broadcasts, shared reload without replacing surfaces, scoped native
@@ -251,6 +238,30 @@ callbacks and real PTY input; C07 adds clipboard queue and cancellation coverage
   disappear from generated output and the app bundle, and Clean removes generated outputs.
   Core tests pass again after Clean. Workflow syntax passes actionlint; remote CI still
   awaits a push.
+
+- **C11 — best-effort reload and default fallback.** Approved Ghostty-like behavior;
+  no rollback. TOML decoding collects per-setting/per-array-element diagnostics and
+  preserves valid values. Unreadable, malformed, or cyclic includes are reported
+  without discarding valid settings in other files. Invalid native values are omitted
+  from a fresh configuration; valid repeatable entries survive. Invalid themes fall
+  back to bundled Rose Pine/Dawn, preserving explicit overrides.
+  The shared configuration and local opacity overrides are prepared before any live
+  update, with overrides cloned from the prepared base rather than rereading themes.
+  App and surface config-change callbacks synchronously copy borrowed configurations;
+  host controls use those applied snapshots. Optional titlebar colors come from the
+  native result so rejected values cannot enable custom titlebars. Application errors
+  are reported without rollback or stopping subsequent local override updates.
+  Startup/manual reload shows a scrollable diagnostic list after applying valid
+  settings; appearance refresh logs diagnostics. Fatal preparation failures still
+  stop the reload before application. Untouched engine updates remain best-effort,
+  not an all-or-nothing transaction.
+  Validation: 16 Swift configuration tests, native bridge/Core tests, and the focused
+  AppKit configuration-reload test pass. Coverage includes mixed invalid values,
+  includes, bad themes, non-finite numbers, repeated options, diagnostic ownership,
+  native path diagnostics, two live terminals, local opacity, applied-config lifetime,
+  updated controls, visible diagnostics, and theme removal after preparation.
+  Full GUI lifecycle/quit retesting is pending an unlocked desktop: macOS reported
+  `CGSSessionScreenIsLocked=Yes`, preventing the test app from acquiring focus.
 
 ## Review conclusions retained
 

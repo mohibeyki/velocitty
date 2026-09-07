@@ -10,13 +10,13 @@ final class TerminalSession {
   weak var windowController: TerminalWindowController?
   private(set) var surface: ghostty_surface_t?
   private(set) var view: TerminalView?
-  private var overrideConfig: ghostty_config_t?
+  private var appliedConfig: ghostty_config_t?
   private(set) var opacityOverride: Double?
   private var closed = false
   var links = TerminalLinks()
 
   var settings: AppConfiguration { runtime.settings }
-  var config: ghostty_config_t? { closed ? nil : overrideConfig ?? runtime.config }
+  var config: ghostty_config_t? { closed ? nil : appliedConfig ?? runtime.config }
 
   init(runtime: TerminalRuntime) { self.runtime = runtime }
 
@@ -45,30 +45,47 @@ final class TerminalSession {
   }
 
   func toggleOpacity() throws {
+    guard !closed, let base = runtime.config else { return }
     let value: Double? = opacityOverride == nil ? 1 : nil
-    try applyConfiguration(opacity: value)
+    let candidate = try Self.prepareConfig(from: base, opacity: value)
+    defer { velokit_config_free(candidate) }
+    guard applyPreparedConfiguration(candidate) else {
+      throw ConfigurationError("VeloKit could not apply the terminal configuration.")
+    }
     opacityOverride = value
   }
 
-  func refreshConfiguration() throws {
-    if opacityOverride != nil { try applyConfiguration(opacity: opacityOverride) }
-    if let surface {
-      velokit_surface_set_color_scheme(
-        surface, NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? 1 : 0)
-    }
+  func prepareOverride(from base: ghostty_config_t) throws -> ghostty_config_t? {
+    guard !closed, surface != nil, let opacityOverride else { return nil }
+    return try Self.prepareConfig(from: base, opacity: opacityOverride)
   }
 
-  private func applyConfiguration(opacity: Double?) throws {
-    guard !closed, let surface else { return }
-    let candidate = try opacity.map { try TerminalRuntime.makeConfig(settings, opacityOverride: $0) }
-    guard let configuration = candidate ?? runtime.config,
-      velokit_surface_update_config(surface, configuration)
-    else {
-      if let candidate { velokit_config_free(candidate) }
-      throw ConfigurationError("VeloKit could not apply the terminal configuration.")
+  private static func prepareConfig(from base: ghostty_config_t, opacity: Double?) throws
+    -> ghostty_config_t
+  {
+    guard let candidate = velokit_config_clone(base) else {
+      throw ConfigurationError("Could not copy the terminal configuration.")
     }
-    if let overrideConfig { velokit_config_free(overrideConfig) }
-    overrideConfig = candidate
+    // The base is already finalized. Only this scalar needs changing.
+    if let opacity,
+      !String(opacity).withCString({ velokit_config_set(candidate, "background-opacity", $0) })
+    {
+      velokit_config_free(candidate)
+      throw ConfigurationError("Could not prepare the opacity override.")
+    }
+    return candidate
+  }
+
+  func applyPreparedConfiguration(_ config: ghostty_config_t) -> Bool {
+    guard !closed, let surface else { return true }
+    return velokit_surface_update_config(surface, config)
+  }
+
+  func configurationChanged(_ config: ghostty_config_t) -> Bool {
+    guard !closed, let copy = velokit_config_clone(config) else { return false }
+    if let appliedConfig { velokit_config_free(appliedConfig) }
+    appliedConfig = copy
+    return true
   }
 
   func close() {
@@ -81,8 +98,8 @@ final class TerminalSession {
     windowController = nil
     if let previous { velokit_surface_free(previous) }
     view = nil
-    if let overrideConfig { velokit_config_free(overrideConfig) }
-    overrideConfig = nil
+    if let appliedConfig { velokit_config_free(appliedConfig) }
+    appliedConfig = nil
     runtime.remove(self)
   }
 

@@ -2,6 +2,10 @@
 import XCTest
 
 final class WindowTests: XCTestCase {
+  func testConfigurationReload() throws {
+    try runCheck("WindowChecks", arguments: ["--configuration-only"], success: "Configuration reload tests passed.")
+  }
+
   func testWindowLifecycle() throws {
     try runCheck("WindowChecks", success: "Window lifecycle tests passed.")
   }

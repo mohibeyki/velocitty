@@ -11,9 +11,27 @@ public enum TerminalTheme {
     "Catppuccin Macchiato", "Catppuccin Mocha",
   ]
 
-  public static func options(for config: AppConfiguration, dark: Bool) throws -> [TerminalOption] {
+  public static func options(
+    for config: AppConfiguration, dark: Bool, diagnostic: (String) -> Void = { _ in }
+  ) throws -> [TerminalOption] {
     let selection = config.options.last { $0.key == "theme" }
-    let requested = selection?.value ?? defaultSelection
+    let source = selection?.source ?? config.source
+    do {
+      return try resolveOptions(
+        for: config, dark: dark,
+        requested: selection?.value ?? defaultSelection, source: source)
+    } catch {
+      diagnostic("\(source.path): \(error.localizedDescription) Using the default theme.")
+      return try resolveOptions(
+        for: config, dark: dark,
+        requested: defaultSelection, source: source, bundledOnly: true)
+    }
+  }
+
+  private static func resolveOptions(
+    for config: AppConfiguration, dark: Bool, requested: String, source: URL,
+    bundledOnly: Bool = false
+  ) throws -> [TerminalOption] {
     let explicit = config.options.filter { $0.key != "theme" }
     if requested.isEmpty { return explicit }
     var name = requested
@@ -35,7 +53,6 @@ public enum TerminalTheme {
       }
       name = choices[dark ? "dark" : "light"]!
     }
-    let source = selection?.source ?? config.source
     let custom: URL
     if name.hasPrefix("/") || name.hasPrefix("~/") {
       custom = AppConfiguration.assetURL(
@@ -48,12 +65,12 @@ public enum TerminalTheme {
         .appendingPathComponent(name.hasSuffix(".itermcolors") ? name : name + ".itermcolors")
     }
     let url: URL
-    if FileManager.default.fileExists(atPath: custom.path) {
+    if !bundledOnly && FileManager.default.fileExists(atPath: custom.path) {
       url = custom
     } else if let bundled = Bundle.module.url(forResource: name, withExtension: "itermcolors") {
       url = bundled
     } else {
-      throw ConfigurationError("\(source.path): theme not found: \(name)")
+      throw ConfigurationError("theme not found: \(name)")
     }
     let colors = try decode(Data(contentsOf: url), source: url)
     let overrides = Set(explicit.map(\.key))

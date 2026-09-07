@@ -25,8 +25,10 @@ final class AppConfigurationTests: XCTestCase {
     let settings = try parse(active)
     XCTAssertEqual(Set(settings.options.map(\.key)), TerminalSettings.supported)
     XCTAssertEqual(settings.options.first { $0.key == "title" }?.value, "a \"quote\" \\ path\t雪")
-    XCTAssertEqual(settings.options.filter { $0.key == "font-family" }.map(\.value), ["Menlo", "Monaco"])
-    XCTAssertEqual(settings.options.first { $0.key == "theme" }?.value, TerminalTheme.defaultSelection)
+    XCTAssertEqual(
+      settings.options.filter { $0.key == "font-family" }.map(\.value), ["Menlo", "Monaco"])
+    XCTAssertEqual(
+      settings.options.first { $0.key == "theme" }?.value, TerminalTheme.defaultSelection)
   }
 
   func testDroppedPathsAreLiteralShellArguments() throws {
@@ -57,7 +59,7 @@ final class AppConfigurationTests: XCTestCase {
     let source = home.appendingPathComponent("missing.toml")
     let defaults = AppConfiguration.defaults(home: home, source: source)
     XCTAssertEqual(defaults.workingDirectory, workspace)
-    XCTAssertEqual(try AppConfiguration.load(from: source, home: home), defaults)
+    XCTAssertEqual(AppConfiguration.load(from: source, home: home), defaults)
     XCTAssertEqual(try AppConfiguration.parse(Data(), home: home, source: source), defaults)
   }
 
@@ -70,16 +72,17 @@ final class AppConfigurationTests: XCTestCase {
     try Data("[terminal]\nfont_size = 18\nforeground = '#ffffff'".utf8).write(to: child)
     try Data("[terminal]\nconfig_file = ['colors.toml', '?absent.toml']\nfont_size = 14".utf8)
       .write(to: parent)
-    let config = try AppConfiguration.load(from: parent)
+    let config = AppConfiguration.load(from: parent)
     XCTAssertEqual(config.options.first { $0.key == "font-size" }?.value, "14")
     XCTAssertEqual(config.options.first { $0.key == "foreground" }?.source, child)
     XCTAssertFalse(config.options.contains { $0.key == "config-file" })
     try Data("[terminal]\nconfig_file = 'config.toml'".utf8).write(to: child)
-    XCTAssertThrowsError(try AppConfiguration.load(from: parent)) {
-      XCTAssertTrue($0.localizedDescription.contains("cycle"))
-    }
+    let cycle = AppConfiguration.load(from: parent)
+    XCTAssertTrue(cycle.diagnostics.contains { $0.contains("cycle") })
+    XCTAssertEqual(cycle.options.first { $0.key == "font-size" }?.value, "14")
     try Data("[terminal]\nconfig_file = 'absent.toml'".utf8).write(to: parent)
-    XCTAssertThrowsError(try AppConfiguration.load(from: parent))
+    XCTAssertTrue(
+      AppConfiguration.load(from: parent).diagnostics.contains { $0.contains("absent.toml") })
   }
 
   func testBundledThemesAndAppearance() throws {
@@ -96,8 +99,12 @@ final class AppConfigurationTests: XCTestCase {
     XCTAssertEqual(
       try TerminalTheme.options(for: config, dark: true).filter { $0.key == "background" }.map(
         \.value), ["#123456"])
-    XCTAssertThrowsError(
-      try TerminalTheme.options(for: parse("[terminal]\ntheme = 'missing-theme'"), dark: true))
+    var diagnostics: [String] = []
+    let fallback = try TerminalTheme.options(
+      for: parse("[terminal]\ntheme = 'missing-theme'"), dark: true,
+      diagnostic: { diagnostics.append($0) })
+    XCTAssertEqual(fallback, try TerminalTheme.options(for: defaults, dark: true))
+    XCTAssertTrue(diagnostics.first?.contains("missing-theme") == true)
   }
 
   func testCustomThemeColorSpacesAndInvalidColors() throws {
@@ -120,6 +127,25 @@ final class AppConfigurationTests: XCTestCase {
     XCTAssertThrowsError(try TerminalTheme.decode(invalid, source: source))
     XCTAssertTrue(TerminalSettings.supported.isDisjoint(with: TerminalSettings.unavailable.keys))
     XCTAssertTrue(TerminalSettings.repeatable.isSubset(of: TerminalSettings.supported))
+  }
+
+  func testInvalidThemesUseBundledDefaultsAndKeepOverrides() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let themes = directory.appendingPathComponent("themes")
+    try FileManager.default.createDirectory(at: themes, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    // A broken custom theme shadowing the default must not break fallback too.
+    try Data("broken plist".utf8).write(to: themes.appendingPathComponent("Rose Pine.itermcolors"))
+    for selection in ["Rose Pine", "light:Rose Pine Dawn", "dark:,light:Rose Pine Dawn"] {
+      var diagnostics: [String] = []
+      let config = try AppConfiguration.parse(
+        Data("[terminal]\ntheme = '\(selection)'\nbackground = '#123456'".utf8),
+        source: directory.appendingPathComponent("config.toml"))
+      let colors = try TerminalTheme.options(for: config, dark: true) { diagnostics.append($0) }
+      XCTAssertEqual(diagnostics.count, 1)
+      XCTAssertEqual(colors.first { $0.key == "background" }?.value, "#123456")
+      XCTAssertEqual(colors.filter { $0.key == "palette" }.count, 16)
+    }
   }
 
   func testConfigLocation() {
@@ -161,7 +187,10 @@ final class AppConfigurationTests: XCTestCase {
     XCTAssertEqual(
       try parse("[terminal]\nfont-size = 14").options,
       try parse("[terminal]\nfont_size = 14").options)
-    XCTAssertThrowsError(try parse("[terminal]\nfont-size = 14\nfont_size = 15"))
+    let duplicate = try parse("[terminal]\nfont-size = 14\nfont_size = 15")
+    XCTAssertTrue(duplicate.options.isEmpty)
+    XCTAssertTrue(duplicate.diagnostics.allSatisfy { $0.contains("Duplicate setting aliases") })
+    XCTAssertEqual(duplicate.diagnostics.count, 2)
     XCTAssertEqual(try parse("[terminal]\nfont_family = []").options.first?.value, "")
     XCTAssertEqual(try parse("[terminal]\nfont_size = ''").options.first?.value, "")
   }
@@ -179,24 +208,59 @@ final class AppConfigurationTests: XCTestCase {
       FileManager.default.currentDirectoryPath)
   }
 
-  func testRejectsInvalidDocuments() {
+  func testSkipsInvalidValues() throws {
     for source in [
       "unknown = true", "[terminal]\nfont_siz = 14", "[terminal]\nfont_size = [14]",
       "[terminal]\nfont_size = nan", "[terminal]\nfont_size = inf",
       "[terminal]\nfont_family = { name = 'Menlo' }", "[terminal]\nfont_family = [['Menlo']]",
       "[terminal]\nworking_directory = 'relative'",
       "[terminal]\nworking_directory = '/nonexistent-velocitty-test-directory'",
-      "[terminal]\nfont_size = 12\nfont_size = 14", "[terminal", "terminal = 1",
       "[terminal]\nenv = ['BAD=\\u0000']".replacingOccurrences(of: "'", with: "\""),
       "[terminal]\nfont_size = 2026-09-06",
-    ] { XCTAssertThrowsError(try parse(source), source) }
+    ] {
+      let config = try parse(source)
+      XCTAssertTrue(config.options.isEmpty, source)
+      XCTAssertFalse(config.diagnostics.isEmpty, source)
+    }
   }
 
-  func testUnavailableOptionsExplainMissingBehavior() {
+  func testMalformedDocumentsFallBackWhenLoaded() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let file = directory.appendingPathComponent("config.toml")
+    for source in ["[terminal]\nfont_size = 12\nfont_size = 14", "[terminal", "terminal = 1"] {
+      XCTAssertThrowsError(try parse(source), source)
+      try Data(source.utf8).write(to: file)
+      let config = AppConfiguration.load(from: file, home: directory)
+      XCTAssertTrue(config.options.isEmpty)
+      XCTAssertEqual(config.workingDirectory, directory)
+      XCTAssertTrue(config.diagnostics.first?.hasPrefix(file.path) == true)
+    }
+  }
+
+  func testValidNeighborsSurviveInvalidValues() throws {
+    let config = try parse(
+      """
+      unknown = true
+      [terminal]
+      font_size = { invalid = 12 }
+      font_family = ["Menlo", ["invalid"], 2026-09-06, "Monaco"]
+      background_opacity = 0.5
+      working_directory = "relative"
+      """)
+    XCTAssertEqual(
+      config.options.filter { $0.key == "font-family" }.map(\.value), ["Menlo", "Monaco"])
+    XCTAssertEqual(config.options.first { $0.key == "background-opacity" }?.value, "0.5")
+    XCTAssertEqual(config.diagnostics.count, 5)
+    XCTAssertEqual(config.workingDirectory, AppConfiguration.defaults().workingDirectory)
+  }
+
+  func testUnavailableOptionsExplainMissingBehavior() throws {
     for (key, reason) in TerminalSettings.unavailable {
-      XCTAssertThrowsError(try parse("[terminal]\n\(key) = ''"), key) {
-        XCTAssertTrue($0.localizedDescription.contains(reason), key)
-      }
+      let config = try parse("[terminal]\n\(key) = ''")
+      XCTAssertTrue(config.options.isEmpty, key)
+      XCTAssertTrue(config.diagnostics.first?.contains(reason) == true, key)
     }
     XCTAssertNoThrow(try parse("[terminal]\nclipboard_write = 'ask'"))
   }
@@ -206,9 +270,8 @@ final class AppConfigurationTests: XCTestCase {
       UUID().uuidString + ".toml")
     try Data("[terminal]\nfont_siz = 12".utf8).write(to: file)
     defer { try? FileManager.default.removeItem(at: file) }
-    XCTAssertThrowsError(try AppConfiguration.load(from: file)) {
-      XCTAssertTrue($0.localizedDescription.contains(file.path))
-      XCTAssertTrue($0.localizedDescription.contains("terminal.font_siz"))
-    }
+    let config = AppConfiguration.load(from: file)
+    XCTAssertTrue(config.diagnostics.first?.contains(file.path) == true)
+    XCTAssertTrue(config.diagnostics.first?.contains("terminal.font_siz") == true)
   }
 }

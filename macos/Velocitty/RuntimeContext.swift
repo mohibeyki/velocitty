@@ -6,6 +6,7 @@ import VelocittyConfiguration
 
 final class RuntimeContext: NSObject {
   weak var owner: AppDelegate?
+  weak var runtime: TerminalRuntime?
   var app: ghostty_app_t?
 
   static func fromApp(_ app: ghostty_app_t) -> RuntimeContext? {
@@ -49,6 +50,16 @@ final class RuntimeContext: NSObject {
       }
     }
     switch action.tag {
+    case GHOSTTY_ACTION_CONFIG_CHANGE:
+      guard let config = action.action.config_change.config else { return false }
+      // Copy before returning; dispatching this borrowed pointer would outlive it.
+      let accepted = surfaceTarget
+        ? view?.session?.configurationChanged(config) ?? false
+        : runtime?.configurationChanged(config) ?? false
+      if !accepted { NSLog("Could not retain the applied terminal configuration.") }
+      perform { [weak self] _, _ in self?.owner?.configurationDidChange() }
+      return accepted
+
     case GHOSTTY_ACTION_RENDER:
       if target.tag == GHOSTTY_TARGET_SURFACE, let surface = target.target.surface {
         velokit_surface_draw(surface)

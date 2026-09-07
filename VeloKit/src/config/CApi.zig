@@ -26,9 +26,19 @@ export fn velokit_config_free(ptr: ?*Config) void {
     }
 }
 
+export fn velokit_config_clone(self: *const Config) ?*Config {
+    const result = global.alloc().create(Config) catch return null;
+    result.* = self.clone(global.alloc()) catch {
+        global.alloc().destroy(result);
+        return null;
+    };
+    return result;
+}
+
 // Use one argument per value, never a generated config file: embedded newlines
 // and equals signs stay inside the value and cannot introduce another setting.
 export fn velokit_config_set(self: *Config, key_z: [*:0]const u8, value_z: [*:0]const u8) bool {
+    const previous_diagnostics = self._diagnostics.precompute.messages.items.len;
     const key = std.mem.span(key_z);
     const value = std.mem.span(value_z);
     for (key) |c| {
@@ -58,24 +68,30 @@ export fn velokit_config_set(self: *Config, key_z: [*:0]const u8, value_z: [*:0]
             }
         }
     }
-    return self._diagnostics.empty();
+    return self._diagnostics.precompute.messages.items.len == previous_diagnostics;
 }
 
 // Returned message belongs to the configuration and stays valid until freed
 // or modified. Swift copies it before releasing a failed candidate.
 export fn velokit_config_error(self: *const Config) ?[*:0]const u8 {
+    return velokit_config_diagnostic(self, 0);
+}
+
+export fn velokit_config_diagnostic(self: *const Config, index: usize) ?[*:0]const u8 {
     const messages = self._diagnostics.precompute.messages.items;
-    return if (messages.len > 0) messages[0].ptr else null;
+    return if (index < messages.len) messages[index].ptr else null;
 }
 
 export fn velokit_config_finalize(self: *Config, base: [*:0]const u8) bool {
-    self.expandPaths(std.mem.span(base)) catch return false;
     if (!self._diagnostics.empty()) return false;
+    self.expandPaths(std.mem.span(base)) catch return false;
     self.finalize() catch |err| {
         log.err("error finalizing config err={}", .{err});
         return false;
     };
-    return self._diagnostics.empty();
+    // Path diagnostics are recoverable: the engine removes unusable paths.
+    // False is reserved for failures that prevent finalization itself.
+    return true;
 }
 
 // Check the native value's C representation before writing to a typed destination.
