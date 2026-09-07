@@ -173,11 +173,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     for controller in closingWindows where !controller.confirmClose() { return .terminateCancel }
     terminating = true
     quitTimer?.invalidate()
-    for controller in closingWindows {
-      controller.closing = true
-      controller.window?.close()
-    }
+    // Leave windows registered while AppKit captures their restorable state.
     return .terminateNow
+  }
+
+  func applicationWillTerminate(_ notification: Notification) {
+    secureInputOwner.update(wanted: false)
+    fullscreenPresentation.update(nil)
+    for controller in windows {
+      controller.clearProgress()
+      controller.session?.close()
+    }
   }
 
   @objc func closeWindow() { activeWindow?.window?.performClose(nil) }

@@ -5,6 +5,9 @@ import VeloKit
 import VelocittyConfiguration
 
 precondition(velokit_init(UInt(CommandLine.argc), CommandLine.unsafeArgv) == GHOSTTY_SUCCESS)
+if ProcessInfo.processInfo.environment["VELOKIT_TEST_RESTORATION"] != nil {
+  runRestorationCheck()
+}
 let previouslyActiveApplication = NSWorkspace.shared.frontmostApplication
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
@@ -619,6 +622,26 @@ do {
   drain()
 }
 
+// Quit preserves windows for AppKit state capture, then closes native sessions.
+do {
+  let runtime = delegate.runtime!
+  let quitter = AppDelegate()
+  quitter.runtime = runtime
+  quitter.newWindow()
+  let controller = quitter.windows.last!
+  precondition(quitter.applicationShouldTerminate(app) == .terminateNow)
+  precondition(controller.window != nil && controller.session?.surface != nil)
+  let coder = NSKeyedArchiver(requiringSecureCoding: true)
+  controller.window(controller.window!, willEncodeRestorableState: coder)
+  coder.finishEncoding()
+  quitter.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+  precondition(controller.window != nil && controller.session?.surface == nil)
+  controller.closing = true
+  controller.window?.close()
+  quitter.runtime = nil
+  runtime.context.owner = delegate
+}
+
 if CommandLine.arguments.contains("--configuration-only") {
   delegate.terminating = true
   for controller in delegate.windows {
@@ -1155,5 +1178,52 @@ let quit = menuItem("Quit Velocitty")
 precondition(quit.keyEquivalent == "q")
 precondition(quit.action == #selector(NSApplication.terminate(_:)))
 precondition(delegate.applicationShouldTerminate(app) == .terminateNow)
+precondition(delegate.windows.count == 2, "Quit must preserve windows for AppKit state capture")
+delegate.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+precondition(delegate.windows.allSatisfy { $0.session?.surface == nil })
+for controller in delegate.windows { controller.closing = true; controller.window?.close() }
 precondition(delegate.windows.isEmpty)
 print("Window lifecycle tests passed.")
+
+// Runs inside an isolated app bundle so AppKit, rather than a hand-made coder,
+// saves and restores windows across two processes.
+func runRestorationCheck() -> Never {
+  let application = NSApplication.shared
+  application.setActivationPolicy(.regular)
+  let owner = AppDelegate()
+  application.delegate = owner
+  let saving = ProcessInfo.processInfo.environment["VELOKIT_TEST_RESTORATION"] == "write"
+  DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+    if saving {
+      owner.newWindow()
+      precondition(owner.windows.count == 2)
+      for (index, controller) in owner.windows.enumerated() {
+        controller.windowTitleOverride = "Restoration \(index)"
+        controller.setTitle(controller.terminalTitle)
+        controller.window!.setFrame(NSRect(x: 80 + index * 50, y: 100 + index * 40,
+          width: 700, height: 450), display: true)
+        controller.window!.invalidateRestorableState()
+      }
+      owner.windows[1].toggleFullscreen(modeOverride: "true")
+      DispatchQueue.main.asyncAfter(deadline: .now() + 2) { application.terminate(nil) }
+    } else {
+      precondition(owner.windows.count == 2, "AppKit did not restore both windows: \(owner.windows.count)")
+      for index in 0..<2 {
+        let controller = owner.windows.first { $0.windowTitleOverride == "Restoration \(index)" }!
+        let expected = NSRect(x: 80 + index * 50, y: 100 + index * 40, width: 700, height: 450)
+        if index == 1 {
+          precondition(controller.normalFrame == expected && controller.fullscreenMode == "true",
+            "Borderless fullscreen did not survive relaunch")
+          controller.toggleFullscreen()
+        }
+        precondition(controller.window!.frame == expected, "Frame did not survive relaunch")
+        precondition(controller.session?.surface != nil)
+      }
+      print("AppKit relaunch restoration passed.")
+      application.terminate(nil)
+    }
+  }
+  application.run()
+  withExtendedLifetime(owner) {}
+  exit(0)
+}
