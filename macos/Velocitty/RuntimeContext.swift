@@ -102,7 +102,10 @@ final class RuntimeContext: NSObject {
       }
 
     case GHOSTTY_ACTION_GOTO_WINDOW:
-      perform { view, owner in owner?.openWindow() }
+      let direction = action.action.goto_window
+      perform { [weak self] _, controller in
+        self?.owner?.gotoWindow(direction, from: controller)
+      }
 
     case GHOSTTY_ACTION_COPY_TITLE_TO_CLIPBOARD:
       perform { view, owner in

@@ -100,6 +100,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     if let activeWindow { activeWindow.openWindow() } else { newWindow() }
   }
 
+  func gotoWindow(_ direction: ghostty_action_goto_window_e, from source: TerminalWindowController?) {
+    guard !terminating else { return }
+    let step: Int
+    switch direction {
+    case GHOSTTY_GOTO_WINDOW_NEXT: step = 1
+    case GHOSTTY_GOTO_WINDOW_PREVIOUS: step = -1
+    default: return
+    }
+    // The registry keeps creation order, independent of focus and window stacking.
+    let candidates = windows.filter { !$0.closing && $0.window != nil && $0.session?.surface != nil }
+    guard !candidates.isEmpty else { return }
+    let index: Int
+    if let current = source ?? activeWindow,
+      let currentIndex = candidates.firstIndex(where: { $0 === current })
+    {
+      index = (currentIndex + step + candidates.count) % candidates.count
+    } else {
+      index = step > 0 ? 0 : candidates.count - 1
+    }
+    guard let window = candidates[index].window else { return }
+    if window.isMiniaturized { window.deminiaturize(nil) }
+    if NSApp.isHidden { NSApp.unhide(nil) }
+    window.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
+  }
+
   func windowFocused(_ controller: TerminalWindowController) {
     for other in windows where other !== controller { other.updateSecureInput(forceOff: true) }
     focusedWindow = controller

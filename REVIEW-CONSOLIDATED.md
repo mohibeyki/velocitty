@@ -5,7 +5,7 @@ IDs are retained; resolved findings and rejected claims are removed from the que
 
 Discuss one issue at a time: choose an approach, implement it, validate it, update
 this file, and commit the change as a self-contained chunk. A recommendation below
-is not an approved decision. **Current issue: C12a — awaiting a choice.**
+is not an approved decision. **Current issue: C12b — awaiting a choice.**
 
 Scope: our macOS host, private VeloKit bridge, configuration, and build/test integration.
 Untouched libghostty internals and new mux functionality are outside this cleanup.
@@ -16,7 +16,6 @@ Untouched libghostty internals and new mux functionality are outside this cleanu
 
 **Medium; confirmed mismatches.** Decide each subitem separately:
 
-- **C12a:** `goto_window` ignores direction.
 - **C12b:** `open_config:new_window` opens externally.
 - **C12c:** blur variants and radii produce one native visual treatment.
 - **C12d:** decoration toggles are lost during later appearance/config updates.
@@ -135,6 +134,7 @@ Code: [THIRD_PARTY_NOTICES.md](VeloKit/THIRD_PARTY_NOTICES.md),
 | C09 | Build regression executables as Xcode targets; run them through XCTest Core/GUI plans and add CI for configuration, native bridge, and app builds. |
 | C10 | Build the private static engine, headers, and terminfo as an Xcode dependency through direnv and Zig; remove manual XCFramework packaging/copying. |
 | C11 | Prepare base/override configurations before application; use best-effort reloads and engine notifications for applied snapshots. Report invalid values and use defaults or earlier valid values; refresh native controls. |
+| C12a | Cycle next/previous through terminal windows in creation order, wrap at either end, restore minimized destinations, and skip closing or closed windows. |
 | C15, delivery | Report file-delivery outcomes, including startup failure/cancellation. |
 | C18, diagnostics | Attribute native setting errors to their included source file. |
 | C19, availability | Disable terminal commands without a live destination; preserve unbinding. |
@@ -260,8 +260,18 @@ callbacks and real PTY input; C07 adds clipboard queue and cancellation coverage
   includes, bad themes, non-finite numbers, repeated options, diagnostic ownership,
   native path diagnostics, two live terminals, local opacity, applied-config lifetime,
   updated controls, visible diagnostics, and theme removal after preparation.
-  Full GUI lifecycle/quit retesting is pending an unlocked desktop: macOS reported
-  `CGSSessionScreenIsLocked=Yes`, preventing the test app from acquiring focus.
+  Follow-up validation during C12a: all three GUI tests pass on an unlocked desktop,
+  including the previously blocked full lifecycle/focus and automatic-quit suites.
+
+- **C12a — window cycling in creation order.** Approved option 1.
+  Native next/previous actions navigate relative to the source terminal, or the
+  active terminal for app-level actions. The host wraps around its window registry,
+  skips closing/closed terminals, restores minimized destinations, and activates
+  the selected window. No-window navigation does nothing; one window selects itself.
+  No new windows are created and focus changes never reorder the registry.
+  Validation: all three GUI tests pass. Native binding actions cover both directions,
+  wraparound across three windows, minimized restoration, skipping closing entries,
+  app-level navigation after a window closes, and empty/single-window cases.
 
 ## Review conclusions retained
 

@@ -368,6 +368,63 @@ if CommandLine.arguments.contains("--configuration-only") {
   exit(0)
 }
 
+// Native window navigation uses creation order, not the current stacking order.
+do {
+  let empty = AppDelegate()
+  empty.gotoWindow(GHOSTTY_GOTO_WINDOW_NEXT, from: nil)
+  empty.gotoWindow(GHOSTTY_GOTO_WINDOW_PREVIOUS, from: nil)
+  precondition(empty.windows.isEmpty && empty.runtime == nil)
+
+  delegate.newWindow()
+  drain()
+  let third = delegate.windows.last!
+  func waitFor(_ message: String, _ condition: () -> Bool) {
+    let deadline = Date(timeIntervalSinceNow: 3)
+    while !condition() && Date() < deadline {
+      pumpEvents(until: Date(timeIntervalSinceNow: 0.02))
+    }
+    precondition(condition(), message)
+  }
+  func cycle(_ source: TerminalWindowController, _ direction: String,
+    to destination: TerminalWindowController)
+  {
+    let action = "goto_window:" + direction
+    precondition(action.withCString {
+      velokit_surface_binding_action(source.session!.surface!, $0, UInt(action.utf8.count))
+    })
+    waitFor("Window cycling did not focus the expected destination") {
+      app.isActive && destination.window!.isKeyWindow && !destination.window!.isMiniaturized
+    }
+    precondition(delegate.windows.count == 3)
+  }
+  first.window!.makeKeyAndOrderFront(nil)
+  cycle(first, "next", to: second)
+  cycle(second, "next", to: third)
+  cycle(third, "next", to: first)
+  cycle(first, "previous", to: third)
+  cycle(third, "previous", to: second)
+
+  second.window!.miniaturize(nil)
+  waitFor("Destination did not minimize") { second.window!.isMiniaturized }
+  first.window!.makeKeyAndOrderFront(nil)
+  cycle(first, "next", to: second)
+
+  // Closing entries cannot become destinations, even before deregistration.
+  third.closing = true
+  cycle(second, "next", to: first)
+  third.window!.close()
+  drain()
+  precondition(delegate.windows.count == 2)
+  var target = ghostty_target_s()
+  target.tag = GHOSTTY_TARGET_APP
+  var action = ghostty_action_s()
+  action.tag = GHOSTTY_ACTION_GOTO_WINDOW
+  action.action.goto_window = GHOSTTY_GOTO_WINDOW_PREVIOUS
+  precondition(delegate.runtime!.context.handleAction(target: target, action: action))
+  waitFor("App navigation did not wrap past the closed window") { second.window!.isKeyWindow }
+  precondition(delegate.windows[0] === first && delegate.windows[1] === second)
+}
+
 // Independent sessions retain independent sheets, and queued callbacks cannot reach replacements.
 do {
   let runtime = delegate.runtime!
@@ -818,6 +875,10 @@ drain()
 precondition(delegate.windows.count == 1)
 precondition(first.session?.view?.surface != nil)
 precondition(second.session?.view == nil)
+delegate.gotoWindow(GHOSTTY_GOTO_WINDOW_NEXT, from: first)
+delegate.gotoWindow(GHOSTTY_GOTO_WINDOW_PREVIOUS, from: first)
+drain()
+precondition(first.window!.isKeyWindow && delegate.windows.count == 1)
 first.window?.performClose(nil)
 drain()
 precondition(delegate.windows.isEmpty)
