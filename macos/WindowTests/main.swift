@@ -549,6 +549,76 @@ do {
   drain()
 }
 
+// Read actual rendered Unicode, then map its selection to AppKit UTF-16 indices.
+do {
+  let runtime = delegate.runtime!
+  let textSettings = try AppConfiguration.parse(Data(#"""
+  [terminal]
+  command = "/bin/sh -c 'printf \"AX 😀 café\\nsecond line\\n\"; exec cat'"
+  shell_integration = "none"
+  theme = ""
+  confirm_close_surface = false
+  window_save_state = "never"
+  """#.utf8))
+  try runtime.updateConfiguration(textSettings)
+  delegate.newWindow()
+  let controller = delegate.windows.last!
+  let view = controller.session!.view!
+  let deadline = Date(timeIntervalSinceNow: 5)
+  var snapshot = TerminalTextSnapshot()
+  repeat {
+    drain()
+    snapshot = TerminalTextSnapshot.read(view.surface!)
+  } while !snapshot.text.contains("AX 😀 café") && Date() < deadline
+  precondition(snapshot.text.contains("AX 😀 café"))
+  var accessibilityNotifications: [NSAccessibility.Notification] = []
+  view.postAccessibility = { _, notification in accessibilityNotifications.append(notification) }
+  _ = view.accessibilityValue() // Start observing only after an AX client asks for text.
+  view.performSurfaceAction("select_all")
+  pumpEvents(until: Date(timeIntervalSinceNow: 0.3))
+  precondition(accessibilityNotifications.contains(.selectedTextChanged))
+  let content = view.accessibilityValue() as! String
+  precondition(view.accessibilityNumberOfCharacters() == content.utf16.count)
+  let selected = view.accessibilitySelectedTextRange()
+  precondition(selected.location != NSNotFound && NSMaxRange(selected) <= content.utf16.count)
+  precondition(view.accessibilitySelectedText()?.contains("AX 😀 café") == true)
+  let emoji = (content as NSString).range(of: "😀")
+  precondition(emoji.length == 2 && view.accessibilityString(for: emoji) == "😀")
+  let emojiFrame = view.accessibilityFrame(for: emoji)
+  let letterFrame = view.accessibilityFrame(for: (content as NSString).range(of: "A"))
+  precondition(emojiFrame.width > letterFrame.width * 1.5 && emojiFrame.height > 0)
+  precondition(emojiFrame.width < view.bounds.width / 4)
+  precondition(view.accessibilityFrame(for: NSRange(location: Int.max, length: 1)) == .zero)
+  // New output must notify without another keypress or AX query.
+  accessibilityNotifications.removeAll()
+  let input = "AX changed output\n"
+  input.withCString { velokit_surface_text(view.surface!, $0, UInt(input.utf8.count)) }
+  let notificationDeadline = Date(timeIntervalSinceNow: 3)
+  while !accessibilityNotifications.contains(.valueChanged) && Date() < notificationDeadline { drain() }
+  precondition(accessibilityNotifications.contains(.valueChanged))
+  let dropped = NSPasteboard.withUniqueName()
+  defer { dropped.releaseGlobally() }
+  let droppedFile = URL(fileURLWithPath: "/tmp/AX-drop-'quoted'.txt")
+  dropped.writeObjects([droppedFile as NSURL])
+  controller.readonly = true
+  precondition(!view.insertDrop(from: dropped))
+  controller.readonly = false
+  precondition(view.insertDrop(from: dropped))
+  let dropDeadline = Date(timeIntervalSinceNow: 3)
+  while !TerminalTextSnapshot.read(view.surface!).text.contains("AX-drop-") && Date() < dropDeadline { drain() }
+  precondition(TerminalTextSnapshot.read(view.surface!).text.contains("AX-drop-"))
+  precondition(view.accessibilityLine(for: (content as NSString).range(of: "second").location)
+    == view.accessibilityLine(for: (content as NSString).range(of: "AX 😀 café").location) + 1, "Unexpected AX lines: \(content.debugDescription)")
+  precondition(view.accessibilityString(for: NSRange(location: Int.max, length: 1)) == nil)
+  controller.closing = true
+  controller.window?.close()
+  precondition((view.accessibilityValue() as? String) == "")
+  precondition(view.accessibilityTimer == nil && view.accessibilitySelectionWork == nil)
+  precondition(!view.insertDrop(from: dropped))
+  try runtime.updateConfiguration(settings)
+  drain()
+}
+
 if CommandLine.arguments.contains("--configuration-only") {
   delegate.terminating = true
   for controller in delegate.windows {

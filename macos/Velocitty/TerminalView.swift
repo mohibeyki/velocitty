@@ -5,6 +5,13 @@ import VeloKit
 import VelocittyConfiguration
 
 final class TerminalView: NSView, NSTextInputClient {
+  var accessibilityText = TerminalTextSnapshot()
+  var accessibilityReadAt = -Double.infinity
+  var accessibilityTimer: Timer?
+  var accessibilitySelectionWork: DispatchWorkItem?
+  var postAccessibility: (TerminalView, NSAccessibility.Notification) -> Void = {
+    NSAccessibility.post(element: $0, notification: $1)
+  }
   lazy var clipboard = TerminalClipboard(view: self)
   weak var session: TerminalSession?
   var surface: ghostty_surface_t? { session?.surface }
@@ -57,6 +64,7 @@ final class TerminalView: NSView, NSTextInputClient {
     let button =
       event.buttonNumber == 0
       ? 1 : event.buttonNumber == 1 ? 2 : event.buttonNumber == 2 ? 3 : event.buttonNumber + 1
+    defer { invalidateAccessibilityText() }
     _ = velokit_surface_mouse_button(
       surface, down ? GHOSTTY_MOUSE_PRESS : GHOSTTY_MOUSE_RELEASE,
       ghostty_input_mouse_button_e(rawValue: UInt32(button)),
@@ -209,6 +217,7 @@ final class TerminalView: NSView, NSTextInputClient {
 
   override func keyDown(with event: NSEvent) {
     session?.windowController?.clearBell()
+    invalidateAccessibilityText()
     guard let surface else { return }
     if withKey(
       event, action: GHOSTTY_ACTION_PRESS,

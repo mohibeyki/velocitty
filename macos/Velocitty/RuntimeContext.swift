@@ -275,6 +275,9 @@ final class RuntimeContext: NSObject {
         chrome?.updateCount()
       }
 
+    case GHOSTTY_ACTION_SELECTION_CHANGED:
+      perform { view, _ in view?.accessibilitySelectionChanged() }
+
     case GHOSTTY_ACTION_SCROLLBAR:
       let state = action.action.scrollbar
       perform { view, owner in owner?.chrome?.updateScrollbar(state) }

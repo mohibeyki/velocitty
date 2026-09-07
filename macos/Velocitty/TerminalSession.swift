@@ -97,6 +97,7 @@ final class TerminalSession {
 
   func close() {
     guard !closed else { return }
+    view?.stopAccessibility()
     view?.clipboard.cancel()
     links.cancel()
     let previous = surface

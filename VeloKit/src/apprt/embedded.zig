@@ -1471,6 +1471,88 @@ pub const Inspector = struct {
 pub const CAPI = struct {
     const SurfaceSize = extern struct { columns: u16, rows: u16, width_px: u32, height_px: u32, cell_width_px: u32, cell_height_px: u32 };
 
+    const AccessibilityRect = extern struct { x: f64 = 0, y: f64 = 0, width: f64 = 0, height: f64 = 0 };
+
+    const Accessibility = extern struct {
+        text: ?[*:0]const u8 = null,
+        text_len: usize = 0,
+        // One unscaled top-left-origin cell rectangle per UTF-8 byte.
+        rects: ?[*]AccessibilityRect = null,
+        selected_text: ?[*:0]const u8 = null,
+        selected_text_len: usize = 0,
+        selection_start: usize = std.math.maxInt(usize),
+        selection_end: usize = std.math.maxInt(usize),
+        cursor: usize = std.math.maxInt(usize),
+    };
+
+    // Keep rendered text and its selection mapping under one renderer lock.
+    // Reuse the engine formatter, including its handling of wrapped/grapheme cells.
+    export fn velokit_surface_read_accessibility(surface: *Surface, result: *Accessibility) bool {
+        result.* = .{};
+        const core = &surface.core_surface;
+        core.renderer_state.mutex.lockUncancelable(global.io());
+        defer core.renderer_state.mutex.unlock(global.io());
+        const screen = core.io.terminal.screens.active;
+        const end = screen.pages.getBottomRight(.viewport) orelse return false;
+        const selection: terminal.Selection = .{
+            .bounds = .{ .untracked = .{
+                .start = screen.pages.getTopLeft(.viewport),
+                .end = end,
+            } },
+            .rectangle = false,
+        };
+        var map = screen.selectionStringMap(global.alloc(), .{
+            .sel = selection, .trim = false,
+        }) catch return false;
+        defer map.map.deinit(global.alloc());
+        const rects = global.alloc().alloc(AccessibilityRect, map.string.len) catch {
+            global.alloc().free(map.string);
+            return false;
+        };
+        @memset(rects, .{});
+        result.rects = rects.ptr;
+        const scale = surface.getContentScale() catch .{ .x = 1, .y = 1 };
+        result.text = map.string.ptr;
+        result.text_len = map.string.len;
+        if (screen.selection) |sel| {
+            if (screen.selectionString(global.alloc(), .{ .sel = sel, .trim = false })) |text| {
+                result.selected_text = text.ptr;
+                result.selected_text_len = text.len;
+            } else |_| {}
+        }
+        for (0..map.string.len) |i| {
+            const pin = map.map.get(i) orelse continue;
+            if (screen.pages.pointFromPin(.viewport, pin)) |point| {
+                const coord = point.viewport;
+                const width: u32 = if (pin.rowAndCell().cell.wide == .wide) 2 else 1;
+                rects[i] = .{
+                    .x = @as(f64, @floatFromInt(coord.x * core.size.cell.width + core.size.padding.left)) / scale.x,
+                    .y = @as(f64, @floatFromInt(coord.y * core.size.cell.height + core.size.padding.top)) / scale.y,
+                    .width = @as(f64, @floatFromInt(width * core.size.cell.width)) / scale.x,
+                    .height = @as(f64, @floatFromInt(core.size.cell.height)) / scale.y,
+                };
+            }
+            if (screen.selection) |sel| {
+                // A rectangular selection cannot be represented by one text range.
+                if (!sel.rectangle and sel.contains(screen, pin)) {
+                    result.selection_start = @min(result.selection_start, i);
+                    result.selection_end = i + 1;
+                }
+            }
+            if (result.cursor == std.math.maxInt(usize) and pin.eql(screen.cursor.page_pin.*)) {
+                result.cursor = i;
+            }
+        }
+        return true;
+    }
+
+    export fn velokit_free_accessibility(result: *Accessibility) void {
+        if (result.rects) |ptr| global.alloc().free(ptr[0..result.text_len]);
+        if (result.text) |ptr| global.alloc().free(ptr[0..result.text_len :0]);
+        if (result.selected_text) |ptr| global.alloc().free(ptr[0..result.selected_text_len :0]);
+        result.* = .{};
+    }
+
     export fn velokit_app_set_color_scheme(v: *App, scheme_raw: c_int) void {
         const scheme = std.enums.fromInt(apprt.ColorScheme, scheme_raw) orelse return;
 

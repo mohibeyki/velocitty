@@ -1136,6 +1136,23 @@ int velokit_init(uintptr_t, char**);
 ghostty_config_t velokit_config_new();
 void velokit_config_free(ghostty_config_t);
 
+typedef struct { double x, y, width, height; } velokit_accessibility_rect_s;
+
+// Private AppKit accessibility snapshot. Offsets are UTF-8 byte offsets into text.
+// A SIZE_MAX offset means the selection/cursor is outside this viewport.
+typedef struct {
+  const char *text;
+  size_t text_len;
+  const velokit_accessibility_rect_s *rects;
+  const char *selected_text;
+  size_t selected_text_len;
+  size_t selection_start;
+  size_t selection_end;
+  size_t cursor;
+} velokit_accessibility_s;
+bool velokit_surface_read_accessibility(ghostty_surface_t, velokit_accessibility_s *);
+void velokit_free_accessibility(velokit_accessibility_s *);
+
 bool velokit_action_supported(const char*);
 bool velokit_config_set(ghostty_config_t, const char*, const char*);
 const char* velokit_config_error(ghostty_config_t);
