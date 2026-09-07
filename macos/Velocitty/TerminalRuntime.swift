@@ -8,10 +8,8 @@ final class TerminalRuntime {
   let context = RuntimeContext()
   private(set) var config: ghostty_config_t?
   private(set) var app: ghostty_app_t?
-  private(set) var view: TerminalView?
-
-  var opacityOverride: Double?
-  var settings: AppConfiguration
+  private let sessions = NSHashTable<TerminalSession>.weakObjects()
+  private(set) var settings: AppConfiguration
 
   static func makeConfig(_ settings: AppConfiguration, opacityOverride: Double? = nil) throws
     -> ghostty_config_t
@@ -79,57 +77,40 @@ final class TerminalRuntime {
       app, NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? 1 : 0)
   }
 
+  func makeSession() -> TerminalSession {
+    let session = TerminalSession(runtime: self)
+    sessions.add(session)
+    return session
+  }
+
+  func remove(_ session: TerminalSession) { sessions.remove(session) }
+
   func updateFocus() {
     if let app { velokit_app_set_focus(app, NSApp.isActive) }
-    view?.updateFocus()
+    for session in sessions.allObjects { session.view?.updateFocus() }
   }
 
   func updateConfiguration(_ settings: AppConfiguration) throws {
     guard let app else { return }
-    let updated = try Self.makeConfig(settings, opacityOverride: opacityOverride)
+    let updated = try Self.makeConfig(settings)
     guard velokit_app_update_config(app, updated) else {
       velokit_config_free(updated)
       throw ConfigurationError("VeloKit could not apply the configuration.")
     }
-    if let config { velokit_config_free(config) }
+    let previous = config
     config = updated
-    view?.config = updated
-    let scheme: Int32 =
-      NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? 1 : 0
-    velokit_app_set_color_scheme(app, scheme)
-    if let surface = view?.surface { velokit_surface_set_color_scheme(surface, scheme) }
     self.settings = settings
-  }
-
-  func createView() -> TerminalView? {
-    guard let app else { return nil }
-    let terminalView = TerminalView(app: app, workingDirectory: settings.workingDirectory)
-    terminalView?.config = config
-    view = terminalView
-    return terminalView
-  }
-
-  func closeView() {
-    view?.clipboard.cancel()
-    context.links.cancel()
-    view?.config = nil
-    if let surface = view?.surface {
-      view?.surface = nil
-      velokit_surface_free(surface)
-    }
-    view = nil
+    defer { if let previous { velokit_config_free(previous) } }
+    for session in sessions.allObjects { try session.refreshConfiguration() }
+    velokit_app_set_color_scheme(
+      app, NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? 1 : 0)
   }
 
   deinit {
     // Queued wakeups retain the context beyond this runtime's lifetime.
     context.app = nil
     context.owner = nil
-    closeView()
-    if let app {
-      velokit_app_free(app)
-    }
-    if let config {
-      velokit_config_free(config)
-    }
+    if let app { velokit_app_free(app) }
+    if let config { velokit_config_free(config) }
   }
 }

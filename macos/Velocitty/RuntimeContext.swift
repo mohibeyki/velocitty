@@ -5,9 +5,8 @@ import VeloKit
 import VelocittyConfiguration
 
 final class RuntimeContext: NSObject {
-  weak var owner: TerminalWindowController?
+  weak var owner: AppDelegate?
   var app: ghostty_app_t?
-  var links = TerminalLinks()
 
   static func fromApp(_ app: ghostty_app_t) -> RuntimeContext? {
     guard let userdata = velokit_app_userdata(app) else { return nil }
@@ -35,15 +34,20 @@ final class RuntimeContext: NSObject {
       return nil
     }()
 
-    // Pending callbacks from a closed surface must not update its replacement.
+    // Resolve presentation at delivery time. A session may have moved since the callback.
     let surfaceTarget = target.tag == GHOSTTY_TARGET_SURFACE
-    let perform: (@escaping () -> Void) -> Void = { [weak view] body in
-      DispatchQueue.main.async {
-        if surfaceTarget && view?.surface == nil { return }
-        body()
+    let perform: (@escaping (TerminalView?, TerminalWindowController?) -> Void) -> Void = { [self, view] body in
+      DispatchQueue.main.async { [weak self, weak view] in
+        guard let self, self.app != nil else { return }
+        if surfaceTarget {
+          guard let view, view.surface != nil else { return }
+          body(view, view.session?.windowController)
+        } else {
+          let controller = self.owner?.activeWindow
+          body(controller?.session?.view, controller)
+        }
       }
     }
-    let owner = self.owner
     switch action.tag {
     case GHOSTTY_ACTION_RENDER:
       if target.tag == GHOSTTY_TARGET_SURFACE, let surface = target.target.surface {
@@ -54,13 +58,13 @@ final class RuntimeContext: NSObject {
       guard let title = action.action.set_title.title.map({ String(cString: $0) }) else {
         return true
       }
-      perform {
+      perform { view, owner in
         owner?.setTitle(title)
       }
 
     case GHOSTTY_ACTION_SET_WINDOW_TITLE:
       let title = action.action.set_title.title.map { String(cString: $0) } ?? ""
-      perform {
+      perform { view, owner in
         guard let delegate = owner else { return }
         delegate.windowTitleOverride = title.isEmpty ? nil : title
         delegate.setTitle(delegate.terminalTitle)
@@ -69,11 +73,11 @@ final class RuntimeContext: NSObject {
     case GHOSTTY_ACTION_PROMPT_TITLE:
       let mode = action.action.prompt_title
       guard mode != GHOSTTY_PROMPT_TITLE_TAB else { return false }
-      perform { owner?.promptTitle(mode) }
+      perform { view, owner in owner?.promptTitle(mode) }
 
     case GHOSTTY_ACTION_READONLY:
       let readonly = action.action.readonly == GHOSTTY_READONLY_ON
-      perform {
+      perform { view, owner in
         let delegate = owner
         delegate?.readonly = readonly
         delegate?.updateSecureInput()
@@ -81,16 +85,16 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_QUIT_TIMER:
       let start = action.action.quit_timer == GHOSTTY_QUIT_TIMER_START
-      perform {
+      perform { view, owner in
         let delegate = NSApp.delegate as? AppDelegate
         if start { delegate?.scheduleQuitIfNeeded() } else { delegate?.quitTimer?.invalidate() }
       }
 
     case GHOSTTY_ACTION_GOTO_WINDOW:
-      perform { owner?.openWindow() }
+      perform { view, owner in owner?.openWindow() }
 
     case GHOSTTY_ACTION_COPY_TITLE_TO_CLIPBOARD:
-      perform {
+      perform { view, owner in
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(view?.window?.title ?? "Velocitty", forType: .string)
       }
@@ -101,7 +105,7 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_SIZE_LIMIT:
       let limit = action.action.size_limit
-      perform {
+      perform { view, owner in
         guard let window = view?.window else { return }
         let scale = window.backingScaleFactor
         window.contentMinSize = NSSize(
@@ -110,7 +114,7 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_CELL_SIZE:
       let cell = action.action.cell_size
-      perform {
+      perform { view, owner in
         guard let window = view?.window,
           NativeSettings(config: view?.config).windowStepResize
         else { return }
@@ -122,7 +126,7 @@ final class RuntimeContext: NSObject {
     case GHOSTTY_ACTION_COLOR_CHANGE:
       let color = action.action.color_change
       if color.kind == GHOSTTY_ACTION_COLOR_KIND_BACKGROUND {
-        perform {
+        perform { view, owner in
           guard let window = view?.window else { return }
           let alpha = window.backgroundColor.alphaComponent
           window.backgroundColor = NSColor(
@@ -133,40 +137,39 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_PWD:
       let path = action.action.pwd.pwd.map { String(cString: $0) } ?? ""
-      perform { owner?.setDirectory(path) }
+      perform { view, owner in owner?.setDirectory(path) }
 
     case GHOSTTY_ACTION_RESET_WINDOW_SIZE:
-      perform { owner?.resetWindowSize() }
+      perform { view, owner in owner?.resetWindowSize() }
 
     case GHOSTTY_ACTION_CLOSE_ALL_WINDOWS:
-      perform { (NSApp.delegate as? AppDelegate)?.closeAllWindows() }
+      perform { view, owner in (NSApp.delegate as? AppDelegate)?.closeAllWindows() }
 
     case GHOSTTY_ACTION_TOGGLE_BACKGROUND_OPACITY:
-      perform {
+      perform { view, owner in
         guard let delegate = owner else { return }
-        delegate.opacityOverride = delegate.opacityOverride == nil ? 1 : nil
-        delegate.runtime?.opacityOverride = delegate.opacityOverride
-        if let runtime = delegate.runtime { try? runtime.updateConfiguration(runtime.settings) }
+        do { try delegate.session?.toggleOpacity() }
+        catch { NSLog("Opacity update failed: %@", error.localizedDescription) }
         delegate.applyWindowSettings()
       }
 
     case GHOSTTY_ACTION_TOGGLE_COMMAND_PALETTE:
-      perform { owner?.showCommands() }
+      perform { view, owner in owner?.showCommands() }
 
     case GHOSTTY_ACTION_NEW_WINDOW:
-      perform { (NSApp.delegate as? AppDelegate)?.newWindow() }
+      perform { view, owner in (NSApp.delegate as? AppDelegate)?.newWindow() }
 
     case GHOSTTY_ACTION_PRESENT_TERMINAL:
-      perform { owner?.openWindow() ?? (NSApp.delegate as? AppDelegate)?.openWindow() }
+      perform { view, owner in owner?.openWindow() ?? (NSApp.delegate as? AppDelegate)?.openWindow() }
 
     case GHOSTTY_ACTION_TOGGLE_MAXIMIZE:
-      perform { view?.window?.zoom(nil) }
+      perform { view, owner in view?.window?.zoom(nil) }
 
     case GHOSTTY_ACTION_TOGGLE_FULLSCREEN:
-      perform { owner?.toggleFullscreen() }
+      perform { view, owner in owner?.toggleFullscreen() }
 
     case GHOSTTY_ACTION_TOGGLE_WINDOW_DECORATIONS:
-      perform {
+      perform { view, owner in
         guard let window = view?.window else { return }
         if window.styleMask.contains(.titled) {
           window.styleMask.remove(.titled)
@@ -176,7 +179,7 @@ final class RuntimeContext: NSObject {
       }
 
     case GHOSTTY_ACTION_TOGGLE_VISIBILITY:
-      perform {
+      perform { view, owner in
         if NSApp.isHidden || !NSApp.isActive {
           NSApp.unhide(nil)
           (NSApp.delegate as? AppDelegate)?.openWindow()
@@ -188,13 +191,13 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_RELOAD_CONFIG:
       let soft = action.action.reload_config.soft
-      perform {
+      perform { view, owner in
         let delegate = NSApp.delegate as? AppDelegate
         if soft { delegate?.refreshAppearance() } else { delegate?.reloadConfiguration(nil) }
       }
 
     case GHOSTTY_ACTION_OPEN_CONFIG:
-      perform {
+      perform { view, owner in
         guard let source = (NSApp.delegate as? AppDelegate)?.runtime?.settings.source else {
           return
         }
@@ -213,7 +216,7 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_FLOAT_WINDOW:
       let level = action.action.float_window
-      perform {
+      perform { view, owner in
         guard let window = view?.window else { return }
         window.level =
           level == GHOSTTY_FLOAT_WINDOW_ON
@@ -223,35 +226,35 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_SECURE_INPUT:
       let mode = action.action.secure_input
-      perform { owner?.secureInput(mode) }
+      perform { view, owner in owner?.secureInput(mode) }
 
     case GHOSTTY_ACTION_RING_BELL:
-      perform { owner?.ringBell() }
+      perform { view, owner in owner?.ringBell() }
 
     case GHOSTTY_ACTION_DESKTOP_NOTIFICATION:
       let notification = action.action.desktop_notification
       let title = notification.title.map { String(cString: $0) } ?? "Velocitty"
       let body = notification.body.map { String(cString: $0) } ?? ""
-      perform { owner?.notify(title: title, body: body) }
+      perform { view, owner in owner?.notify(title: title, body: body) }
 
     case GHOSTTY_ACTION_COMMAND_FINISHED:
       let value = action.action.command_finished
-      perform { owner?.commandFinished(value) }
+      perform { view, owner in owner?.commandFinished(value) }
 
     case GHOSTTY_ACTION_PROGRESS_REPORT:
       let value = action.action.progress_report
-      perform { owner?.showProgress(value) }
+      perform { view, owner in owner?.showProgress(value) }
 
     case GHOSTTY_ACTION_START_SEARCH:
       let needle = action.action.start_search.needle.map { String(cString: $0) }
-      perform { owner?.chrome?.startSearch(needle) }
+      perform { view, owner in owner?.chrome?.startSearch(needle) }
 
     case GHOSTTY_ACTION_END_SEARCH:
-      perform { owner?.chrome?.hideSearch() }
+      perform { view, owner in owner?.chrome?.hideSearch() }
 
     case GHOSTTY_ACTION_SEARCH_TOTAL:
       let total = action.action.search_total.total
-      perform {
+      perform { view, owner in
         let chrome = owner?.chrome
         chrome?.total = total
         chrome?.updateCount()
@@ -259,7 +262,7 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_SEARCH_SELECTED:
       let selected = action.action.search_selected.selected
-      perform {
+      perform { view, owner in
         let chrome = owner?.chrome
         chrome?.selected = selected
         chrome?.updateCount()
@@ -267,7 +270,7 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_SCROLLBAR:
       let state = action.action.scrollbar
-      perform { owner?.chrome?.updateScrollbar(state) }
+      perform { view, owner in owner?.chrome?.updateScrollbar(state) }
 
     case GHOSTTY_ACTION_OPEN_URL:
       let link = action.action.open_url
@@ -277,7 +280,7 @@ final class RuntimeContext: NSObject {
             start: UnsafeRawPointer(ptr).assumingMemoryBound(to: UInt8.self), count: Int(link.len)),
           encoding: .utf8)
       else { return true }
-      perform { self.links.open(value, kind: link.kind, from: view) }
+      perform { view, owner in view?.session?.links.open(value, kind: link.kind, from: view) }
 
     case GHOSTTY_ACTION_MOUSE_OVER_LINK:
       let link = action.action.mouse_over_link
@@ -287,14 +290,14 @@ final class RuntimeContext: NSObject {
             start: UnsafeRawPointer($0).assumingMemoryBound(to: UInt8.self), count: Int(link.len)),
           as: UTF8.self)
       }
-      perform {
+      perform { view, owner in
         view?.linkURL = value
         view?.toolTip = value
       }
 
     case GHOSTTY_ACTION_MOUSE_SHAPE:
       let shape = action.action.mouse_shape
-      perform {
+      perform { view, owner in
         let cursor: NSCursor =
           shape == GHOSTTY_MOUSE_SHAPE_POINTER
           ? .pointingHand : shape == GHOSTTY_MOUSE_SHAPE_TEXT ? .iBeam : .arrow
@@ -304,13 +307,13 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_MOUSE_VISIBILITY:
       let hidden = action.action.mouse_visibility == GHOSTTY_MOUSE_HIDDEN
-      perform { NSCursor.setHiddenUntilMouseMoves(hidden) }
+      perform { view, owner in NSCursor.setHiddenUntilMouseMoves(hidden) }
 
     case GHOSTTY_ACTION_CLOSE_WINDOW, GHOSTTY_ACTION_CLOSE_TAB:
-      perform { view?.window?.performClose(nil) }
+      perform { view, owner in view?.window?.performClose(nil) }
 
     case GHOSTTY_ACTION_QUIT:
-      perform {
+      perform { view, owner in
         NSApp.terminate(nil)
       }
 
@@ -474,8 +477,9 @@ final class RuntimeContext: NSObject {
 
   static let closeSurface: ghostty_runtime_close_surface_cb = { userdata, _ in
     guard let view = RuntimeContext.fromSurfaceUserdata(userdata) else { return }
-    DispatchQueue.main.async {
-      view.window?.performClose(nil)
+    DispatchQueue.main.async { [weak view] in
+      guard let view, view.surface != nil else { return }
+      view.session?.windowController?.window?.performClose(nil)
     }
   }
 }

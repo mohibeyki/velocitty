@@ -5,24 +5,12 @@ IDs are retained; resolved findings and rejected claims are removed from the que
 
 Discuss one issue at a time: choose an approach, implement it, validate it, update
 this file, and commit the change as a self-contained chunk. A recommendation below
-is not an approved decision. **Current issue: C08 — awaiting a choice.**
+is not an approved decision. **Current issue: C09 — awaiting a choice.**
 
 Scope: our macOS host, private VeloKit bridge, configuration, and build/test integration.
 Untouched libghostty internals and new mux functionality are outside this cleanup.
 
 ## Remaining issues
-
-### C08. Engine and surface ownership
-
-**Before mux; confirmed design limitation.** Each window owns a separate engine app,
-so engine-wide surface actions stop at that window and shared caches are duplicated.
-Closing the view destroys its terminal process.
-
-**Choose:** how to separate application runtime, terminal surface, and window
-presentation. One shared engine app is a candidate; persistence remains future work.
-
-Code: [TerminalRuntime.swift](macos/Velocitty/TerminalRuntime.swift),
-[AppDelegate.swift](macos/Velocitty/AppDelegate.swift).
 
 ### C09. Test workflow
 
@@ -49,15 +37,16 @@ Code: [Xcode project](macos/Velocitty.xcodeproj/project.pbxproj),
 
 ### C11. Consistent configuration reload
 
-**Medium; confirmed gap.** Windows update sequentially after prevalidation. A later
-failure can leave earlier windows using a different configuration. Native control
-refresh is already fixed.
+**Medium; confirmed gap.** The shared engine update applies settings to existing
+surfaces, followed by per-session overrides. A failure during application can leave
+a partial update; the host has no rollback. Native control refresh is already fixed.
 
-**Choose:** preparation/application/rollback semantics, coordinated with C08.
+**Choose:** preparation/application/rollback semantics for the shared runtime.
 The original claim of a config-pointer race during the synchronous update was not
 established and is not an additional open defect.
 
-Code: [AppDelegate.swift](macos/Velocitty/AppDelegate.swift), `reloadConfiguration`.
+Code: [TerminalRuntime.swift](macos/Velocitty/TerminalRuntime.swift),
+[AppDelegate.swift](macos/Velocitty/AppDelegate.swift), `reloadConfiguration`.
 
 ### C12. Supported features and actions
 
@@ -148,7 +137,7 @@ Code: [ConfigurationTemplate.swift](macos/Configuration/ConfigurationTemplate.sw
 another input field has focus. Their no-terminal availability is already fixed.
 
 **Choose:** retain app-directed behavior or use responder-specific behavior.
-Explicitly unbound shortcuts must stay unbound; shared config ownership belongs to C08.
+Explicitly unbound shortcuts must stay unbound; C08 centralized shared config ownership.
 
 Code: [AppDelegate.swift](macos/Velocitty/AppDelegate.swift).
 
@@ -178,6 +167,7 @@ Code: [THIRD_PARTY_NOTICES.md](VeloKit/THIRD_PARTY_NOTICES.md),
 | C05 | Derive terminal focus from app activity, key window, responder, and sheet state. Update on lifecycle transitions while retaining native composition callbacks. |
 | C06 | Safely remove accessories and avoid adding them to hidden titlebars; reproduced crash fixed. |
 | C07 | Own clipboard confirmations per terminal, queue sheets, and resolve pending requests exactly once before native surface teardown. |
+| C08 | Share one engine and configuration across the app; sessions own surfaces and backing views, with callbacks routed to their current window. |
 | C11, controls | Refresh scrollbar visibility/layout on reload; remove unreachable scrollbar policy branch. |
 | C15, delivery | Report file-delivery outcomes, including startup failure/cancellation. |
 | C18, diagnostics | Attribute native setting errors to their included source file. |
@@ -231,6 +221,24 @@ callbacks and real PTY input; C07 adds clipboard queue and cancellation coverage
   alive. Real native paste requests preserve their original clipboard bytes, deliver
   approved input to a PTY, and discard denied input. Closing with native requests
   pending and cancelling a write leave no late UI or clipboard write. Debug build passes.
+
+- **C08 — shared engine and separate terminal sessions.** Approved option 1.
+  AppDelegate retains one TerminalRuntime even with no windows. TerminalSession owns
+  its surface and backing view and retains the runtime until native teardown; the
+  runtime tracks sessions weakly. Windows explicitly close their sessions, preserving
+  existing close/quit behavior. The session controls process lifetime while its view
+  can be detached.
+  Callback dispatch resolves the source session's current window; app actions use
+  application ownership. Focus, keyboard layout, global shortcuts, appearance, and
+  configuration use the shared engine. Links and clipboard prompts remain per terminal.
+  A private surface configuration call preserves local opacity overrides without
+  updating siblings. Configuration failure rollback remains C11; persistence is future work.
+  Validation: rebuilt VeloKit and passed native bridge/configuration tests, 13 Swift
+  configuration tests, both AppKit suites, and the Debug build. Tests cover native
+  all/global broadcasts, shared reload without replacing surfaces, scoped native
+  configuration, local opacity across reload/new windows, independent pending sheets,
+  stale callbacks after close, session/engine/view teardown, and engine reuse after
+  closing every window. Existing PTY focus, composition, clipboard, and quit checks pass.
 
 ## Review conclusions retained
 

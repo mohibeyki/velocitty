@@ -1148,6 +1148,8 @@ void velokit_app_free(ghostty_app_t);
 void velokit_app_tick(ghostty_app_t);
 void* velokit_app_userdata(ghostty_app_t);
 bool velokit_app_update_config(ghostty_app_t, ghostty_config_t);
+// Apply a per-terminal override without changing the shared app or other surfaces.
+bool velokit_surface_update_config(ghostty_surface_t, ghostty_config_t);
 void velokit_app_set_focus(ghostty_app_t, bool);
 
 ghostty_surface_config_s velokit_surface_config_new();

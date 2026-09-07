@@ -9,7 +9,12 @@ import VelocittyConfiguration
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   var windows: [TerminalWindowController] = []
   weak var focusedWindow: TerminalWindowController?
-  var idleRuntime: TerminalRuntime?
+  var runtime: TerminalRuntime? {
+    didSet {
+      oldValue?.context.owner = nil
+      runtime?.context.owner = self
+    }
+  }
   var appearanceObservation: NSKeyValueObservation?
   var keyboardObservation: NSObjectProtocol?
   var shortcuts: GlobalShortcuts?
@@ -22,7 +27,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
       ?? windows.first { $0.window === NSApp.mainWindow }
       ?? focusedWindow ?? windows.last
   }
-  var runtime: TerminalRuntime? { activeWindow?.runtime ?? idleRuntime }
   var native: NativeSettings { NativeSettings(config: runtime?.config) }
 
   func applicationDidFinishLaunching(_ notification: Notification) {
@@ -39,9 +43,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
       forName: NSNotification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String),
       object: nil, queue: .main
     ) { [weak self] _ in
-      for controller in self?.windows ?? [] {
-        if let app = controller.runtime?.app { velokit_app_keyboard_changed(app) }
-      }
+      if let app = self?.runtime?.app { velokit_app_keyboard_changed(app) }
       self?.shortcuts?.reload()
       self?.updateMenuShortcuts()
     }
@@ -73,7 +75,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
       }
     }
 
-    self.idleRuntime = runtime
+    self.runtime = runtime
     shortcuts = GlobalShortcuts(owner: self)
     shortcuts?.reload()
     updateMenuShortcuts()
@@ -90,20 +92,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     quitTimer?.invalidate()
     quitTimer = nil
     do {
-      let runtime: TerminalRuntime
-      if let idleRuntime {
-        runtime = idleRuntime
-        self.idleRuntime = nil
-      } else {
-        runtime = try TerminalRuntime(settings: self.runtime?.settings ?? AppConfiguration.load())
-      }
+      if runtime == nil { runtime = try TerminalRuntime(settings: AppConfiguration.load()) }
+      guard let runtime else { return }
+      let session = runtime.makeSession()
       let previousWindow = activeWindow?.window
-      let controller = TerminalWindowController(runtime: runtime, owner: self)
+      let controller = TerminalWindowController(session: session, owner: self)
       windows.append(controller)
       controller.openWindow(cascadingFrom: previousWindow)
       if controller.window == nil {
         windows.removeAll { $0 === controller }
-        idleRuntime = runtime
+        session.close()
         configurationAlert(ConfigurationError("Could not create a terminal window.")).runModal()
       }
     } catch { configurationAlert(error).runModal() }
@@ -127,10 +125,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   func windowClosed(_ controller: TerminalWindowController) {
     windows.removeAll { $0 === controller }
     if focusedWindow === controller { focusedWindow = nil }
-    if windows.isEmpty {
-      idleRuntime = controller.runtime
-      idleRuntime?.context.owner = nil
-    }
     if !terminating { scheduleQuitIfNeeded() }
   }
 
@@ -169,7 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     switch menuItem.action {
     case #selector(closeWindow), #selector(showCommands), #selector(findTerminal),
       #selector(findNext), #selector(findPrevious):
-      return activeWindow?.runtime?.view?.surface != nil
+      return activeWindow?.session?.view?.surface != nil
     default:
       return true
     }
@@ -193,29 +187,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
   func insertFiles(_ filenames: [String]) -> Bool {
     openWindow()
-    guard let surface = activeWindow?.runtime?.view?.surface else { return false }
+    guard let surface = activeWindow?.session?.view?.surface else { return false }
     let text = ShellInput.paths(filenames)
     text.withCString { velokit_surface_text(surface, $0, UInt(text.utf8.count)) }
     return true
   }
 
   func refreshAppearance() {
-    for controller in windows { controller.refreshAppearance() }
-    if let idleRuntime { try? idleRuntime.updateConfiguration(idleRuntime.settings) }
+    guard let runtime else { return }
+    do {
+      try runtime.updateConfiguration(runtime.settings)
+      for controller in windows { controller.applyWindowSettings() }
+    } catch { NSLog("Appearance update failed: %@", error.localizedDescription) }
   }
 
   @objc func reloadConfiguration(_ sender: Any?) {
     do {
-      let settings = try AppConfiguration.load()
-      // Validate before changing any window.
-      let candidate = try TerminalRuntime.makeConfig(settings)
-      velokit_config_free(candidate)
+      try runtime?.updateConfiguration(AppConfiguration.load())
       for controller in windows {
-        try controller.runtime?.updateConfiguration(settings)
         controller.applyWindowSettings()
         controller.updateSecureInput()
       }
-      try idleRuntime?.updateConfiguration(settings)
       shortcuts?.reload()
       updateMenuShortcuts()
     } catch { configurationAlert(error).runModal() }
@@ -229,17 +221,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   func applicationDidBecomeActive(_ notification: Notification) {
     for controller in windows {
       controller.updateSecureInput()
-      controller.runtime?.updateFocus()
     }
-    idleRuntime?.updateFocus()
+    runtime?.updateFocus()
   }
 
   func applicationDidResignActive(_ notification: Notification) {
     for controller in windows {
       controller.updateSecureInput(forceOff: true)
-      controller.runtime?.updateFocus()
     }
-    idleRuntime?.updateFocus()
+    runtime?.updateFocus()
   }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -393,15 +383,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 final class TerminalWindowController: NSObject, NSWindowDelegate {
   weak var owner: AppDelegate?
 
-  init(runtime: TerminalRuntime, owner: AppDelegate) {
-    self.runtime = runtime
+  init(session: TerminalSession, owner: AppDelegate) {
+    self.session = session
     self.owner = owner
     super.init()
-    runtime.context.owner = self
+    session.windowController = self
   }
 
   var window: NSWindow?
-  var runtime: TerminalRuntime?
+  private(set) var session: TerminalSession?
   var closing = false
   var resizeTimer: Timer?
   var hasResized = false
@@ -410,7 +400,6 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
   var titleAccessory: NSTitlebarAccessoryViewController?
   var titleLabel: NSTextField?
   var currentDirectory: String?
-  var opacityOverride: Double?
   var palette: CommandPalette?
   var passwordInput = false
   var manualSecureInput = false
@@ -423,19 +412,19 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
   var progressTimer: Timer?
   var progressAnimationTimer: Timer?
   var chrome: TerminalChrome?
-  var native: NativeSettings { NativeSettings(config: runtime?.config) }
+  var native: NativeSettings { NativeSettings(config: session?.config) }
 
   func openWindow(cascadingFrom previousWindow: NSWindow? = nil) {
     if let window {
       window.makeKeyAndOrderFront(nil)
       return
     }
-    guard let runtime, let terminalView = runtime.createView() else { return }
+    guard let session, let terminalView = session.createView() else { return }
     let window = TerminalWindow(
       contentRect: NSRect(x: 0, y: 0, width: 960, height: 640),
       styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false
     )
-    currentDirectory = runtime.settings.workingDirectory.path
+    currentDirectory = session.settings.workingDirectory.path
     terminalTitle = "Velocitty"
     windowTitleOverride = nil
     hasBell = false
@@ -519,11 +508,11 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     window.colorSpace = native.windowColorspace == "display-p3" ? .displayP3 : .sRGB
     let family = native.titleFontFamily
     let foreground =
-      runtime?.settings.options.contains {
+      session?.settings.options.contains {
         $0.key == "window-titlebar-foreground" && !$0.value.isEmpty
       } == true
     let background =
-      runtime?.settings.options.contains {
+      session?.settings.options.contains {
         $0.key == "window-titlebar-background" && !$0.value.isEmpty
       } == true
     if window.styleMask.contains(.titled) && (!family.isEmpty || foreground || background) {
@@ -544,7 +533,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
       titleLabel = label
       window.titleVisibility = .hidden
     }
-    let directory = currentDirectory ?? runtime?.settings.workingDirectory.path ?? ""
+    let directory = currentDirectory ?? session?.settings.workingDirectory.path ?? ""
     window.subtitle = native.windowSubtitle == "working-directory" ? directory : ""
     window.representedURL =
       native.titlebarProxyIcon == "visible"
@@ -559,7 +548,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
       theme == "dark" || (inferred && dark)
       ? NSAppearance(named: .darkAqua)
       : theme == "light" || (inferred && !dark) ? NSAppearance(named: .aqua) : nil
-    let opacity = opacityOverride ?? native.backgroundOpacity
+    let opacity = native.backgroundOpacity
     window.isOpaque = opacity >= 1
     window.backgroundColor = native.background.withAlphaComponent(opacity)
     let blur = native.backgroundBlur
@@ -581,7 +570,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
   }
 
   func confirmClose() -> Bool {
-    guard let surface = runtime?.view?.surface, velokit_surface_needs_confirm_quit(surface) else {
+    guard let surface = session?.view?.surface, velokit_surface_needs_confirm_quit(surface) else {
       return true
     }
     let alert = NSAlert()
@@ -608,7 +597,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     readonly = false
     updateSecureInput(forceOff: true)
     clearProgress()
-    runtime?.closeView()
+    session?.close()
     window = nil
     chrome = nil
     palette?.close()
@@ -628,7 +617,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
   }
 
   func promptTitle(_ mode: ghostty_action_prompt_title_e) {
-    guard let window, let terminal = runtime?.view else { return }
+    guard let window, let terminal = session?.view else { return }
     let alert = NSAlert()
     alert.messageText = "Terminal Title"
     alert.informativeText = "Enter a title. Leave it empty to clear the override."
@@ -652,7 +641,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
   }
   func resetWindowSize() {
     guard let window else { return }
-    var size = runtime?.view?.initialSize ?? NSSize(width: 960, height: 640)
+    var size = session?.view?.initialSize ?? NSSize(width: 960, height: 640)
     let drag = native.dragHandle
     if drag == "always" || (drag == "auto" && !window.styleMask.contains(.titled)) {
       size.height += 12
@@ -692,7 +681,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     defer { hasResized = true }
     let policy = native.resizeOverlay
     guard policy != "never", policy == "always" || hasResized, window?.inLiveResize == true,
-      let chrome, let surface = runtime?.view?.surface
+      let chrome, let surface = session?.view?.surface
     else { return }
     let size = velokit_surface_size(surface)
     chrome.resizeLabel.stringValue = "\(size.columns) × \(size.rows)"
@@ -707,7 +696,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     if shouldSaveState { window?.saveFrame(usingName: "TerminalWindow") }
   }
   func windowDidChangeOcclusionState(_ notification: Notification) {
-    if let window, let surface = runtime?.view?.surface {
+    if let window, let surface = session?.view?.surface {
       velokit_surface_set_occlusion(surface, window.occlusionState.contains(.visible))
     }
   }
@@ -720,7 +709,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
       palette?.close()
       return
     }
-    guard let terminal = runtime?.view else { return }
+    guard let terminal = session?.view else { return }
     let palette = CommandPalette(terminal: terminal)
     self.palette = palette
     palette.center()
@@ -728,17 +717,10 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     palette.makeFirstResponder(palette.query)
   }
 
-  @objc func findTerminal() { runtime?.view?.performSurfaceAction("start_search") }
-  @objc func findNext() { runtime?.view?.performSurfaceAction("navigate_search:next") }
-  @objc func findPrevious() { runtime?.view?.performSurfaceAction("navigate_search:previous") }
+  @objc func findTerminal() { session?.view?.performSurfaceAction("start_search") }
+  @objc func findNext() { session?.view?.performSurfaceAction("navigate_search:next") }
+  @objc func findPrevious() { session?.view?.performSurfaceAction("navigate_search:previous") }
 
-  func refreshAppearance() {
-    guard let runtime else { return }
-    do {
-      try runtime.updateConfiguration(runtime.settings)
-      applyWindowSettings()
-    } catch { NSLog("Appearance update failed: %@", error.localizedDescription) }
-  }
 
 }
 
@@ -799,7 +781,7 @@ extension TerminalWindowController {
   func commandFinished(_ value: ghostty_action_command_finished_s) {
     let policy = native.notifyOnCommandFinish
     let focused =
-      NSApp.isActive && window?.isKeyWindow == true && window?.firstResponder === runtime?.view
+      NSApp.isActive && window?.isKeyWindow == true && window?.firstResponder === session?.view
     guard policy != "never", policy == "always" || !focused,
       Double(value.duration) / 1_000_000_000 >= native.commandFinishDelay
     else { return }
@@ -889,19 +871,19 @@ extension TerminalWindowController {
   func windowDidBecomeKey(_ notification: Notification) {
     owner?.windowFocused(self)
     updateSecureInput()
-    runtime?.updateFocus()
+    session?.view?.updateFocus()
   }
   func windowDidResignKey(_ notification: Notification) {
     updateSecureInput(forceOff: true)
-    runtime?.updateFocus()
+    session?.view?.updateFocus()
   }
   func windowWillBeginSheet(_ notification: Notification) {
     // The sheet may not yet be attached when AppKit sends this notification.
-    runtime?.view?.updateFocus(forceOff: true)
+    session?.view?.updateFocus(forceOff: true)
   }
   func windowDidEndSheet(_ notification: Notification) {
     // AppKit can send this before clearing attachedSheet and restoring the key window.
-    DispatchQueue.main.async { [weak self] in self?.runtime?.updateFocus() }
+    DispatchQueue.main.async { [weak self] in self?.session?.view?.updateFocus() }
   }
 }
 

@@ -1773,6 +1773,15 @@ pub const CAPI = struct {
         return true;
     }
 
+    /// Apply configuration to one terminal without updating the shared app.
+    export fn velokit_surface_update_config(surface: *Surface, config: *const Config) bool {
+        surface.core_surface.updateConfig(config) catch |err| {
+            log.err("error updating surface config err={}", .{err});
+            return false;
+        };
+        return true;
+    }
+
     /// Update the focused state of the app.
     export fn velokit_app_set_focus(
         app: *App,

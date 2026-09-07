@@ -6,7 +6,8 @@ import VelocittyConfiguration
 
 final class TerminalView: NSView, NSTextInputClient {
   lazy var clipboard = TerminalClipboard(view: self)
-  var surface: ghostty_surface_t?
+  weak var session: TerminalSession?
+  var surface: ghostty_surface_t? { session?.surface }
   var initialSize: NSSize?
   var markedText = NSAttributedString()
   var tracking: NSTrackingArea?
@@ -14,7 +15,7 @@ final class TerminalView: NSView, NSTextInputClient {
   var keyHandled = false
   var linkURL: String?
   var pointer: NSCursor = .iBeam
-  var config: ghostty_config_t?
+  var config: ghostty_config_t? { surface == nil ? nil : session?.config }
 
   override func updateTrackingAreas() {
     if let tracking { removeTrackingArea(tracking) }
@@ -121,38 +122,13 @@ final class TerminalView: NSView, NSTextInputClient {
   }
   override var acceptsFirstResponder: Bool { true }
 
-  init?(app: ghostty_app_t, workingDirectory: URL) {
+  init(session: TerminalSession) {
+    self.session = session
     super.init(frame: .zero)
-
-    var surfaceConfig = velokit_surface_config_new()
-    let viewPointer = Unmanaged.passUnretained(self).toOpaque()
-    surfaceConfig.userdata = viewPointer
-    surfaceConfig.platform_tag = GHOSTTY_PLATFORM_MACOS
-    surfaceConfig.platform = ghostty_platform_u(
-      macos: ghostty_platform_macos_s(nsview: viewPointer))
-    surfaceConfig.scale_factor = Double(NSScreen.main?.backingScaleFactor ?? 2)
-    surfaceConfig.context = GHOSTTY_SURFACE_CONTEXT_WINDOW
-
-    surface = workingDirectory.path.withCString { path in
-      surfaceConfig.working_directory = path
-      return velokit_surface_new(app, &surfaceConfig)
-    }
-    if surface == nil {
-      NSLog("VeloKit failed to create terminal surface")
-      return nil
-    }
-    updateFocus()
   }
 
   required init?(coder: NSCoder) {
     fatalError("init(coder:) is not supported")
-  }
-
-  deinit {
-    clipboard.cancel()
-    if let surface {
-      velokit_surface_free(surface)
-    }
   }
 
   override func becomeFirstResponder() -> Bool {

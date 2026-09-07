@@ -82,7 +82,7 @@ theme = ""
 confirm_close_surface = false
 window_save_state = "never"
 """ + (testAutomaticQuit ? "\nquit_after_last_window_closed = true" : "")).utf8))
-delegate.idleRuntime = try TerminalRuntime(settings: settings)
+delegate.runtime = try TerminalRuntime(settings: settings)
 delegate.installMainMenu()
 delegate.updateMenuShortcuts()
 
@@ -148,7 +148,8 @@ drain()
 let first = delegate.windows[0]
 
 // Exercise the keyboard-event/committed-text bridge, not the paste path.
-let terminal = first.runtime!.view!
+let terminal = first.session!.view!
+let originalEngine = delegate.runtime!.app
 let event = NSEvent.keyEvent(
   with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
   windowNumber: first.window!.windowNumber, context: nil,
@@ -185,13 +186,13 @@ for (index, style) in ["hidden", "native", "transparent", "hidden", "native"].en
   macos_titlebar_style = "\(style)"
   scrollbar = "\(scrollbar)"
   """).utf8))
-  try first.runtime!.updateConfiguration(updated)
+  try first.session!.runtime.updateConfiguration(updated)
   first.chrome!.scrollState = ghostty_action_scrollbar_s(total: 100, offset: 0, len: 10)
   first.applyWindowSettings()
   precondition(first.chrome!.showScroll == (scrollbar == "system"))
   precondition((first.titleAccessory == nil) == (style == "hidden"))
 }
-try first.runtime!.updateConfiguration(settings)
+try first.session!.runtime.updateConfiguration(settings)
 first.applyWindowSettings()
 
 precondition(app.sendAction(new.action!, to: new.target, from: new))
@@ -199,11 +200,141 @@ drain()
 precondition(delegate.windows.count == 2)
 precondition(delegate.validateMenuItem(closeMenuItem))
 let second = delegate.windows[1]
-precondition(first.runtime?.view?.surface != second.runtime?.view?.surface)
-precondition(first.runtime?.context.owner === first)
-precondition(second.runtime?.context.owner === second)
+precondition(first.session?.view?.surface != second.session?.view?.surface)
+precondition(first.session?.windowController === first)
+precondition(second.session?.windowController === second)
 precondition(second.window!.frame.minX > first.window!.frame.minX)
 precondition(second.window!.frame.maxY < first.window!.frame.maxY)
+
+// One engine serves every session, including native all/global surface actions.
+do {
+  let runtime = delegate.runtime!
+  precondition(first.session!.runtime === runtime && second.session!.runtime === runtime)
+  precondition(runtime.context.owner === delegate)
+  let firstSurface = first.session!.surface!
+  let secondSurface = second.session!.surface!
+  let originalCell = velokit_surface_size(firstSurface).cell_height_px
+  func configured(_ opacity: Double) throws -> AppConfiguration {
+    try AppConfiguration.parse(Data("""
+    [terminal]
+    command = "/bin/sh"
+    shell_integration = "none"
+    theme = ""
+    confirm_close_surface = false
+    window_save_state = "never"
+    font_size = 24
+    background_opacity = \(opacity)
+    keybind = ["all:ctrl+shift+a=set_surface_title:Broadcast", "global:ctrl+shift+b=set_surface_title:Global"]
+    """.utf8))
+  }
+  try runtime.updateConfiguration(configured(0.4))
+  drain()
+  precondition(velokit_surface_size(firstSurface).cell_height_px > originalCell)
+  precondition(velokit_surface_size(firstSurface).cell_height_px == velokit_surface_size(secondSurface).cell_height_px)
+  let scoped = try TerminalRuntime.makeConfig(AppConfiguration.parse(Data("""
+  [terminal]
+  theme = ""
+  font_size = 36
+  """.utf8)))
+  precondition(velokit_surface_update_config(firstSurface, scoped))
+  velokit_config_free(scoped)
+  drain()
+  precondition(velokit_surface_size(firstSurface).cell_height_px > velokit_surface_size(secondSurface).cell_height_px,
+    "A surface-only update must leave sibling terminals unchanged")
+  try runtime.updateConfiguration(configured(0.4))
+  drain()
+  first.session!.view!.performSurfaceAction("toggle_background_opacity")
+  drain()
+  precondition(first.native.backgroundOpacity == 1 && second.native.backgroundOpacity == 0.4)
+  precondition(delegate.native.backgroundOpacity == 0.4)
+  delegate.newWindow()
+  drain()
+  let third = delegate.windows.last!
+  precondition(third.session!.runtime === runtime && third.native.backgroundOpacity == 0.4)
+  third.closing = true
+  third.window!.close()
+  drain()
+  precondition(delegate.runtime === runtime && first.session!.surface == firstSurface)
+  try runtime.updateConfiguration(configured(0.6))
+  drain()
+  precondition(first.native.backgroundOpacity == 1 && second.native.backgroundOpacity == 0.6)
+  first.session!.view!.performSurfaceAction("toggle_background_opacity")
+  drain()
+  precondition(first.native.backgroundOpacity == 0.6 && second.native.backgroundOpacity == 0.6)
+  let broadcast = NSEvent.keyEvent(
+    with: .keyDown, location: .zero, modifierFlags: [.control, .shift],
+    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: first.window!.windowNumber,
+    context: nil, characters: "A", charactersIgnoringModifiers: "a", isARepeat: false, keyCode: 0)!
+  first.session!.view!.sendKey(broadcast, action: GHOSTTY_ACTION_PRESS)
+  drain()
+  precondition(first.window!.title == "Broadcast" && second.window!.title == "Broadcast")
+  var global = ghostty_input_key_s()
+  global.action = GHOSTTY_ACTION_PRESS
+  global.keycode = 11 // physical B
+  global.mods = ghostty_input_mods_e(GHOSTTY_MODS_CTRL.rawValue | GHOSTTY_MODS_SHIFT.rawValue)
+  global.unshifted_codepoint = 98
+  precondition(velokit_app_key(runtime.app!, global))
+  drain()
+  precondition(first.window!.title == "Global" && second.window!.title == "Global")
+  precondition(first.session!.surface == firstSurface && second.session!.surface == secondSurface)
+  try runtime.updateConfiguration(settings)
+  drain()
+}
+
+// Independent sessions retain independent sheets, and queued callbacks cannot reach replacements.
+do {
+  let runtime = delegate.runtime!
+  delegate.newWindow()
+  let closing = delegate.windows.last!
+  let session = closing.session!
+  let view = session.view!
+  session.links = TerminalLinks { _ in fatalError("Unexpected external opening") }
+  first.session!.links = TerminalLinks { _ in fatalError("Unexpected external opening") }
+  session.links.open("custom:closing", kind: GHOSTTY_ACTION_OPEN_URL_KIND_OSC8, from: view)
+  first.session!.links.open("custom:surviving", kind: GHOSTTY_ACTION_OPEN_URL_KIND_OSC8, from: first.session!.view)
+  precondition(session.links.confirmation != nil && first.session!.links.confirmation != nil)
+  var target = ghostty_target_s()
+  target.tag = GHOSTTY_TARGET_SURFACE
+  target.target.surface = session.surface
+  var title = ghostty_action_s()
+  title.tag = GHOSTTY_ACTION_SET_TITLE
+  "Stale title".withCString {
+    title.action.set_title.title = $0
+    precondition(runtime.context.handleAction(target: target, action: title))
+  }
+  RuntimeContext.closeSurface(Unmanaged.passUnretained(view).toOpaque(), false)
+  closing.closing = true
+  closing.window!.close()
+  delegate.newWindow()
+  let replacement = delegate.windows.last!
+  drain()
+  precondition(replacement.window != nil && replacement.window!.title != "Stale title")
+  precondition(first.session!.links.confirmation != nil && session.links.confirmation == nil)
+  first.session!.links.cancel()
+  replacement.closing = true
+  replacement.window!.close()
+  drain()
+  precondition(delegate.windows.count == 2)
+}
+
+// A retained session keeps the engine alive; a retained view does not own either resource.
+do {
+  var runtime: TerminalRuntime? = try TerminalRuntime(settings: settings)
+  weak var weakRuntime: TerminalRuntime?
+  weakRuntime = runtime
+  var session: TerminalSession? = runtime!.makeSession()
+  let view = session!.createView()!
+  let surface = session!.surface
+  let context = runtime!.context
+  runtime = nil
+  precondition(weakRuntime != nil && view.surface == surface)
+  precondition(session!.createView() === view, "Repeated presentation must reuse the same terminal")
+  RuntimeContext.wakeup(Unmanaged.passUnretained(context).toOpaque())
+  session = nil
+  precondition(weakRuntime == nil && context.app == nil)
+  precondition(view.surface == nil && view.config == nil)
+  drain()
+}
 
 // Observe focus reports and committed text at the PTY, not a mirrored Swift flag.
 do {
@@ -231,12 +362,15 @@ do {
   confirm_close_surface = false
   window_save_state = "never"
   """.utf8))
-  let runtime = try TerminalRuntime(settings: recordingSettings)
-  let controller = TerminalWindowController(runtime: runtime, owner: delegate)
+  let runtime = delegate.runtime!
+  try runtime.updateConfiguration(recordingSettings)
+  defer { try! runtime.updateConfiguration(settings) }
+  let session = runtime.makeSession()
+  let controller = TerminalWindowController(session: session, owner: delegate)
   delegate.windows.append(controller)
   controller.openWindow(cascadingFrom: second.window)
   let window = controller.window!
-  let terminal = runtime.view!
+  let terminal = session.view!
   func waitUntil(_ message: @autoclosure () -> String, _ condition: () -> Bool) {
     let deadline = Date(timeIntervalSinceNow: 3)
     while !condition() && Date() < deadline {
@@ -289,10 +423,10 @@ do {
   window.makeKeyAndOrderFront(nil)
   waitUntil("Test application did not reactivate") { app.isActive && window.isKeyWindow }
   expect("\u{1b}[I", "App reactivation did not restore terminal focus")
-  runtime.context.links = TerminalLinks { _ in fatalError("Unexpected link opening") }
-  runtime.context.links.open("custom:focus-test", kind: GHOSTTY_ACTION_OPEN_URL_KIND_OSC8, from: terminal)
+  session.links = TerminalLinks { _ in fatalError("Unexpected link opening") }
+  session.links.open("custom:focus-test", kind: GHOSTTY_ACTION_OPEN_URL_KIND_OSC8, from: terminal)
   expect("\u{1b}[O", "Confirmation sheet retained terminal focus")
-  runtime.context.links.cancel()
+  session.links.cancel()
   // AppKit may choose a different key window after programmatic cancellation.
   window.makeKeyAndOrderFront(nil)
   expect("\u{1b}[I", "Refocusing after the sheet did not restore terminal focus")
@@ -325,13 +459,13 @@ do {
   delegate.newWindow()
   drain()
   let controller = delegate.windows.last!
-  let context = controller.runtime!.context
+  let context = controller.session!.runtime.context
   var opened: [URL] = []
-  context.links = TerminalLinks { opened.append($0) }
-  let links = context.links
+  controller.session!.links = TerminalLinks { opened.append($0) }
+  let links = controller.session!.links
   var target = ghostty_target_s()
   target.tag = GHOSTTY_TARGET_SURFACE
-  target.target.surface = controller.runtime!.view!.surface
+  target.target.surface = controller.session!.view!.surface
   func sendLink(_ value: String, kind: ghostty_action_open_url_kind_e = GHOSTTY_ACTION_OPEN_URL_KIND_OSC8) {
     var action = ghostty_action_s()
     action.tag = GHOSTTY_ACTION_OPEN_URL
@@ -394,11 +528,12 @@ do {
 
 // Clipboard ownership: queue order, other sheets, and exactly-once teardown replies.
 do {
-  let runtime = try TerminalRuntime(settings: settings)
-  let controller = TerminalWindowController(runtime: runtime, owner: delegate)
+  let runtime = delegate.runtime!
+  let session = runtime.makeSession()
+  let controller = TerminalWindowController(session: session, owner: delegate)
   delegate.windows.append(controller)
   controller.openWindow(cascadingFrom: second.window)
-  let view = runtime.view!
+  let view = session.view!
   let queue = view.clipboard
   var replies: [(Int, Bool, Bool)] = []
   func enqueue(_ id: Int) {
@@ -424,12 +559,12 @@ do {
   precondition(queue.confirmation == nil)
 
   controller.window!.makeKeyAndOrderFront(nil)
-  runtime.context.links.open("custom:clipboard-test", kind: GHOSTTY_ACTION_OPEN_URL_KIND_OSC8, from: view)
-  precondition(runtime.context.links.confirmation != nil)
+  session.links.open("custom:clipboard-test", kind: GHOSTTY_ACTION_OPEN_URL_KIND_OSC8, from: view)
+  precondition(session.links.confirmation != nil)
   enqueue(3)
   drain()
   precondition(queue.confirmation == nil && replies.count == 2)
-  runtime.context.links.cancel()
+  session.links.cancel()
   drain()
   precondition(queue.confirmation?.messageText == "Clipboard test 3")
   enqueue(4)
@@ -446,11 +581,12 @@ do {
 
 // Cancellation before presentation, including the no-request-state write callback.
 do {
-  let runtime = try TerminalRuntime(settings: settings)
-  let controller = TerminalWindowController(runtime: runtime, owner: delegate)
+  let runtime = delegate.runtime!
+  let session = runtime.makeSession()
+  let controller = TerminalWindowController(session: session, owner: delegate)
   delegate.windows.append(controller)
   controller.openWindow(cascadingFrom: second.window)
-  let view = runtime.view!
+  let view = session.view!
   var denied = 0
   view.clipboard.enqueue(title: "Pending", message: "Test") { allow, _ in
     precondition(!allow && view.surface != nil)
@@ -476,7 +612,8 @@ do {
 
 do {
   let runtime = try TerminalRuntime(settings: settings)
-  let view = runtime.createView()! // Never attached to a window.
+  let session = runtime.makeSession()
+  let view = session.createView()! // Never attached to a window.
   var denied = 0
   view.clipboard.enqueue(title: "Unattached", message: "Test") { allow, _ in
     precondition(!allow && view.surface != nil)
@@ -484,7 +621,7 @@ do {
   }
   drain()
   precondition(denied == 1 && view.clipboard.confirmation == nil)
-  runtime.closeView()
+  session.close()
   precondition(denied == 1)
 }
 
@@ -511,11 +648,14 @@ do {
   clipboard_paste_protection = true
   clipboard_paste_bracketed_safe = false
   """.utf8))
-  let runtime = try TerminalRuntime(settings: recordingSettings)
-  let controller = TerminalWindowController(runtime: runtime, owner: delegate)
+  let runtime = delegate.runtime!
+  try runtime.updateConfiguration(recordingSettings)
+  defer { try! runtime.updateConfiguration(settings) }
+  let session = runtime.makeSession()
+  let controller = TerminalWindowController(session: session, owner: delegate)
   delegate.windows.append(controller)
   controller.openWindow(cascadingFrom: second.window)
-  let view = runtime.view!
+  let view = session.view!
   func waitFor(_ condition: () -> Bool) {
     let deadline = Date(timeIntervalSinceNow: 3)
     while !condition() && Date() < deadline { drain() }
@@ -572,12 +712,12 @@ if testAutomaticQuit {
 // A background terminal's title callback must not change the foreground window.
 var target = ghostty_target_s()
 target.tag = GHOSTTY_TARGET_SURFACE
-target.target.surface = first.runtime!.view!.surface
+target.target.surface = first.session!.view!.surface
 var action = ghostty_action_s()
 action.tag = GHOSTTY_ACTION_SET_TITLE
 "Background terminal".withCString {
   action.action.set_title.title = $0
-  precondition(first.runtime!.context.handleAction(target: target, action: action))
+  precondition(first.session!.runtime.context.handleAction(target: target, action: action))
 }
 drain()
 precondition(first.window?.title == "Background terminal")
@@ -589,18 +729,19 @@ precondition(close.keyEquivalent == "w")
 precondition(app.sendAction(close.action!, to: close.target, from: close))
 drain()
 precondition(delegate.windows.count == 1)
-precondition(first.runtime?.view?.surface != nil)
-precondition(second.runtime?.view == nil)
+precondition(first.session?.view?.surface != nil)
+precondition(second.session?.view == nil)
 first.window?.performClose(nil)
 drain()
 precondition(delegate.windows.isEmpty)
 precondition(terminal.surface == nil && terminal.config == nil)
 precondition(!delegate.validateMenuItem(closeMenuItem))
-precondition(delegate.idleRuntime != nil)
+precondition(delegate.runtime?.app == originalEngine)
 precondition(app.sendAction(new.action!, to: new.target, from: new))
 precondition(app.sendAction(new.action!, to: new.target, from: new))
 drain()
 precondition(delegate.windows.count == 2)
+precondition(delegate.windows.allSatisfy { $0.session?.runtime.app == originalEngine })
 let quit = menuItem("Quit Velocitty")
 precondition(quit.keyEquivalent == "q")
 precondition(quit.action == #selector(NSApplication.terminate(_:)))
