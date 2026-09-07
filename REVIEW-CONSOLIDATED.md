@@ -3,9 +3,8 @@
 Updated 2026-09-06. This is the working list for the cleanup session. Original issue
 IDs are retained; resolved findings and rejected claims are removed from the queue.
 
-Discuss one issue at a time: choose an approach, implement it, validate it, update
-this file, and commit the change as a self-contained chunk. A recommendation below
-is not an approved decision. **Current issue: C12b — awaiting a choice.**
+The user authorized completing the remaining cleanup autonomously, following
+Ghostty's behavior where applicable, with logical commits and a final short report.
 
 Scope: our macOS host, private VeloKit bridge, configuration, and build/test integration.
 Untouched libghostty internals and new mux functionality are outside this cleanup.
@@ -16,7 +15,6 @@ Untouched libghostty internals and new mux functionality are outside this cleanu
 
 **Medium; confirmed mismatches.** Decide each subitem separately:
 
-- **C12b:** `open_config:new_window` opens externally.
 - **C12c:** blur variants and radii produce one native visual treatment.
 - **C12d:** decoration toggles are lost during later appearance/config updates.
 - **C12e:** size-limit handling ignores maximums.
@@ -281,3 +279,10 @@ text/HTML file paths as arbitrary URLs, missing engine child-exit/wait behavior,
 Foundation nested-path handling, and retaining menu shortcuts after explicit unbind.
 Speculative GTK ports, moving TOML to Zig, untouched vendor names, and cosmetic
 Xcode identifiers are outside this cleanup.
+
+## Autonomous cleanup progress
+
+- C12b: both variants use the macOS file association, falling back to the default
+  text editor and then normal OS opening. A missing config is created without
+  overwriting existing content; opening failures are shown. Dedicated editor tests
+  and the configuration-reload GUI test pass. Upstream reference: `97f2ddb06e43ed73948385944cd1b0c19c282807`.

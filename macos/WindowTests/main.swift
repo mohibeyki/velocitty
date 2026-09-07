@@ -74,6 +74,35 @@ do {
   precondition(missing.windowPositionX == Int16.min && missing.commands.isEmpty)
 }
 
+// Editor selection respects file associations, then the system text editor.
+do {
+  let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    .appendingPathComponent("config.toml")
+  defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+  let associated = URL(fileURLWithPath: "/Applications/Associated.app")
+  let fallback = URL(fileURLWithPath: "/Applications/TextEditor.app")
+  var opened: [URL?] = []
+  var editor = ConfigurationEditor()
+  editor.applicationForType = { _ in associated }
+  editor.openFile = { url, app, completion in
+    precondition(url == file)
+    opened.append(app)
+    completion(nil)
+  }
+  editor.open(file) { precondition($0 == nil) }
+  let original = try Data(contentsOf: file)
+  precondition(AppConfiguration.load(from: file).diagnostics.isEmpty)
+  editor.applicationForType = { $0 == "public.plain-text" ? fallback : nil }
+  editor.open(file) { precondition($0 == nil) }
+  editor.applicationForType = { _ in nil }
+  editor.open(file) { precondition($0 == nil) }
+  precondition(opened == [associated, fallback, nil])
+  let unchanged = try Data(contentsOf: file)
+  precondition(unchanged == original)
+  editor.openFile = { _, _, completion in completion(ConfigurationError("Open failed")) }
+  editor.open(file) { precondition($0?.localizedDescription == "Open failed") }
+}
+
 let settings = try AppConfiguration.parse(Data(("""
 [terminal]
 command = "/bin/sh"

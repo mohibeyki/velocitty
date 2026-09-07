@@ -215,16 +215,14 @@ final class RuntimeContext: NSObject {
         guard let source = (NSApp.delegate as? AppDelegate)?.runtime?.settings.source else {
           return
         }
-        if FileManager.default.fileExists(atPath: source.path) {
-          NSWorkspace.shared.open(source)
-        } else {
-          let alert = NSAlert()
-          alert.messageText = "Create a configuration file"
-          alert.informativeText =
-            "Create this TOML file in your text editor, then use Reload Configuration:\n\n"
-            + source.path
-          alert.addButton(withTitle: "OK")
-          if let window = view?.window { alert.beginSheetModal(for: window) }
+        ConfigurationEditor().open(source) { error in
+          guard let error else { return }
+          DispatchQueue.main.async {
+            let alert = NSAlert()
+            alert.messageText = "Could not open configuration"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+          }
         }
       }
 

@@ -20,6 +20,10 @@ and its macOS embedding layer. The retained source originated from:
 - Source archive: https://codeload.github.com/ghostty-org/ghostty/tar.gz/492300cad104195411d12217dd22f1cd05f31376
 - Archive SHA-256: `12ff0ed206e42049433c2afbacfd9656d568241e482e718b930868915e21cb93`
 
+The macOS host also adapts application behavior from upstream revision
+`97f2ddb06e43ed73948385944cd1b0c19c282807` (configuration editor selection and
+subsequent host cleanup). These adaptations are covered by the same MIT notice.
+
 The original MIT notice for the retained source is reproduced below.
 
 ### MIT License — libghostty-derived source
