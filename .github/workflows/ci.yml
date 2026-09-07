@@ -32,14 +32,10 @@ jobs:
       - name: Install Metal toolchain
         run: xcodebuild -downloadComponent MetalToolchain
 
-      - name: Build engine with pinned Zig
-        working-directory: VeloKit
+      - name: Enable the pinned build environment
         run: |
-          velokit_ci_developer_dir="$(xcode-select -p)"
-          nix develop --no-write-lock-file --command env \
-            DEVELOPER_DIR="$velokit_ci_developer_dir" \
-            zig build -Doptimize=ReleaseFast -j2
-          ditto build/VeloKit.xcframework ../macos/VeloKit.xcframework
+          nix profile add --inputs-from ./VeloKit nixpkgs#direnv
+          direnv allow VeloKit
 
       - name: Build app and run Core tests
         run: |

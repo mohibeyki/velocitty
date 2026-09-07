@@ -9,7 +9,7 @@
 /* Begin PBXBuildFile section */
 		A00000000000000000000014 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000015 /* Assets.xcassets */; };
 		A00000000000000000000001 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000002 /* main.swift */; };
-		A00000000000000000000010 /* VeloKit.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A00000000000000000000011 /* VeloKit.xcframework */; };
+		A00000000000000000000010 /* libvelokit.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A00000000000000000000011 /* libvelokit.a */; };
 		A00000000000000000000019 /* VelocittyConfiguration in Frameworks */ = {isa = PBXBuildFile; productRef = A00000000000000000000018 /* VelocittyConfiguration */; };
 		B00000000000000000000002 = {isa = PBXBuildFile; fileRef = B00000000000000000000001; };
 		B00000000000000000000004 = {isa = PBXBuildFile; fileRef = B00000000000000000000003; };
@@ -49,13 +49,13 @@
 		A00000000000000000000015 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A00000000000000000000002 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		A00000000000000000000003 /* Velocitty.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Velocitty.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		A00000000000000000000011 /* VeloKit.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = VeloKit.xcframework; sourceTree = "<group>"; };
+		A00000000000000000000011 /* libvelokit.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; name = libvelokit.a; path = "VeloKit/$(CONFIGURATION)/lib/libvelokit.a"; sourceTree = BUILD_DIR; };
 		B00000000000000000000001 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeContext.swift; sourceTree = "<group>"; };
 		B00000000000000000000003 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalRuntime.swift; sourceTree = "<group>"; };
 		B00000000000000000000005 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalView.swift; sourceTree = "<group>"; };
 		B00000000000000000000007 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
         C00000000000000000000003 = {isa = PBXFileReference; lastKnownFileType = folder; name = "shell-integration"; path = "../VeloKit/src/shell-integration"; sourceTree = SOURCE_ROOT; };
-        C00000000000000000000005 = {isa = PBXFileReference; lastKnownFileType = folder; name = terminfo; path = "../VeloKit/build/terminfo"; sourceTree = SOURCE_ROOT; };
+        C00000000000000000000005 = {isa = PBXFileReference; lastKnownFileType = folder; name = terminfo; path = "VeloKit/$(CONFIGURATION)/share/terminfo"; sourceTree = BUILD_DIR; };
         D00000000000000000000001 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalChrome.swift; sourceTree = "<group>"; };
         D00000000000000000000003 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandPalette.swift; sourceTree = "<group>"; };
         D00000000000000000000005 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalShortcuts.swift; sourceTree = "<group>"; };
@@ -122,7 +122,7 @@
 		A00000000000000000000012 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
-				A00000000000000000000011 /* VeloKit.xcframework */,
+				A00000000000000000000011 /* libvelokit.a */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -135,7 +135,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A00000000000000000000010 /* VeloKit.xcframework in Frameworks */,
+				A00000000000000000000010 /* libvelokit.a in Frameworks */,
 				A00000000000000000000019 /* VelocittyConfiguration in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -157,6 +157,7 @@
 			buildRules = (
 			);
 			dependencies = (
+                D10000000000000000000007,
 			);
 			name = Velocitty;
 			packageProductDependencies = (A00000000000000000000018 /* VelocittyConfiguration */);
@@ -164,8 +165,8 @@
 			productReference = A00000000000000000000003 /* Velocitty.app */;
 			productType = "com.apple.product-type.application";
 		};
-		F0000000000000000000000E = { isa = PBXNativeTarget; buildConfigurationList = F0000000000000000000000D; buildPhases = (F00000000000000000000008, F0000000000000000000000A); buildRules = (); dependencies = (); name = EngineChecks; packageProductDependencies = (); productName = EngineChecks; productReference = F00000000000000000000006; productType = "com.apple.product-type.tool"; };
-		F00000000000000000000023 = { isa = PBXNativeTarget; buildConfigurationList = F00000000000000000000022; buildPhases = (F0000000000000000000001C, F0000000000000000000001F); buildRules = (); dependencies = (); name = WindowChecks; packageProductDependencies = (A00000000000000000000018); productName = WindowChecks; productReference = F0000000000000000000000F; productType = "com.apple.product-type.tool"; };
+		F0000000000000000000000E = { isa = PBXNativeTarget; buildConfigurationList = F0000000000000000000000D; buildPhases = (F00000000000000000000008, F0000000000000000000000A); buildRules = (); dependencies = (D10000000000000000000007); name = EngineChecks; packageProductDependencies = (); productName = EngineChecks; productReference = F00000000000000000000006; productType = "com.apple.product-type.tool"; };
+		F00000000000000000000023 = { isa = PBXNativeTarget; buildConfigurationList = F00000000000000000000022; buildPhases = (F0000000000000000000001C, F0000000000000000000001F); buildRules = (); dependencies = (D10000000000000000000007); name = WindowChecks; packageProductDependencies = (A00000000000000000000018); productName = WindowChecks; productReference = F0000000000000000000000F; productType = "com.apple.product-type.tool"; };
 		F00000000000000000000033 = { isa = PBXNativeTarget; buildConfigurationList = F0000000000000000000002C; buildPhases = (F00000000000000000000028, F00000000000000000000029); buildRules = (); dependencies = (F0000000000000000000002E, F00000000000000000000030, F00000000000000000000032); name = VelocittyTests; packageProductDependencies = (); productName = VelocittyTests; productReference = F00000000000000000000024; productType = "com.apple.product-type.bundle.unit-test"; };
 /* End PBXNativeTarget section */
 
@@ -191,6 +192,7 @@
 			projectRoot = "";
 			targets = (
 				A00000000000000000000007 /* Velocitty */,
+                D10000000000000000000001,
                 F0000000000000000000000E,
                 F00000000000000000000023,
                 F00000000000000000000033,
@@ -240,6 +242,11 @@
 		A0000000000000000000000C /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+                ARCHS = arm64;
+                VELOKIT_BUILD_DIR = "$(BUILD_DIR)/VeloKit/$(CONFIGURATION)";
+                HEADER_SEARCH_PATHS = ("$(inherited)", "$(VELOKIT_BUILD_DIR)/include");
+                LIBRARY_SEARCH_PATHS = ("$(inherited)", "$(VELOKIT_BUILD_DIR)/lib");
+                SWIFT_INCLUDE_PATHS = ("$(inherited)", "$(VELOKIT_BUILD_DIR)/include");
 					CLANG_ENABLE_MODULES = YES;
 					CLANG_ENABLE_OBJC_ARC = YES;
 				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
@@ -297,6 +304,11 @@
 		A0000000000000000000000D /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+                ARCHS = arm64;
+                VELOKIT_BUILD_DIR = "$(BUILD_DIR)/VeloKit/$(CONFIGURATION)";
+                HEADER_SEARCH_PATHS = ("$(inherited)", "$(VELOKIT_BUILD_DIR)/include");
+                LIBRARY_SEARCH_PATHS = ("$(inherited)", "$(VELOKIT_BUILD_DIR)/lib");
+                SWIFT_INCLUDE_PATHS = ("$(inherited)", "$(VELOKIT_BUILD_DIR)/include");
 				CLANG_ENABLE_MODULES = YES;
 				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
 				CLANG_WARN_BOOL_CONVERSION = YES;
@@ -392,6 +404,8 @@
 		F00000000000000000000021 = { isa = XCBuildConfiguration; buildSettings = { ARCHS = arm64; CODE_SIGN_IDENTITY = "-"; CODE_SIGN_STYLE = Manual; PRODUCT_NAME = "$(TARGET_NAME)"; OTHER_LDFLAGS = ("$(inherited)", "-framework", AppKit); GCC_PREPROCESSOR_DEFINITIONS = ("$(inherited)"); OTHER_CFLAGS = ("$(inherited)", "-UNDEBUG"); SWIFT_OPTIMIZATION_LEVEL = "-Onone";  }; name = Release; };
 		F0000000000000000000002A = { isa = XCBuildConfiguration; buildSettings = { ARCHS = arm64; CODE_SIGN_IDENTITY = "-"; CODE_SIGN_STYLE = Manual; PRODUCT_NAME = "$(TARGET_NAME)"; GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = app.velocitty.tests; SWIFT_VERSION = 5.0; GCC_PREPROCESSOR_DEFINITIONS = ("$(inherited)"); OTHER_CFLAGS = ("$(inherited)", "-UNDEBUG"); SWIFT_OPTIMIZATION_LEVEL = "-Onone";  }; name = Debug; };
 		F0000000000000000000002B = { isa = XCBuildConfiguration; buildSettings = { ARCHS = arm64; CODE_SIGN_IDENTITY = "-"; CODE_SIGN_STYLE = Manual; PRODUCT_NAME = "$(TARGET_NAME)"; GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = app.velocitty.tests; SWIFT_VERSION = 5.0; GCC_PREPROCESSOR_DEFINITIONS = ("$(inherited)"); OTHER_CFLAGS = ("$(inherited)", "-UNDEBUG"); SWIFT_OPTIMIZATION_LEVEL = "-Onone";  }; name = Release; };
+        D10000000000000000000004 = {isa = XCBuildConfiguration; buildSettings = {ENABLE_USER_SCRIPT_SANDBOXING = NO; }; name = Debug; };
+        D10000000000000000000005 = {isa = XCBuildConfiguration; buildSettings = {ENABLE_USER_SCRIPT_SANDBOXING = NO; }; name = Release; };
 /* End XCBuildConfiguration section */
 
 /* Begin XCLocalSwiftPackageReference section */
@@ -424,17 +438,26 @@
 		F0000000000000000000000D = { isa = XCConfigurationList; buildConfigurations = (F0000000000000000000000B, F0000000000000000000000C); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
 		F00000000000000000000022 = { isa = XCConfigurationList; buildConfigurations = (F00000000000000000000020, F00000000000000000000021); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
 		F0000000000000000000002C = { isa = XCConfigurationList; buildConfigurations = (F0000000000000000000002A, F0000000000000000000002B); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+        D10000000000000000000003 = {isa = XCConfigurationList; buildConfigurations = (D10000000000000000000004, D10000000000000000000005); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 /* End XCConfigurationList section */
 /* Begin PBXContainerItemProxy section */
 		F0000000000000000000002D = { isa = PBXContainerItemProxy; containerPortal = A00000000000000000000009; proxyType = 1; remoteGlobalIDString = A00000000000000000000007; remoteInfo = Velocitty; };
 		F0000000000000000000002F = { isa = PBXContainerItemProxy; containerPortal = A00000000000000000000009; proxyType = 1; remoteGlobalIDString = F0000000000000000000000E; remoteInfo = EngineChecks; };
 		F00000000000000000000031 = { isa = PBXContainerItemProxy; containerPortal = A00000000000000000000009; proxyType = 1; remoteGlobalIDString = F00000000000000000000023; remoteInfo = WindowChecks; };
+        D10000000000000000000006 = {isa = PBXContainerItemProxy; containerPortal = A00000000000000000000009; proxyType = 1; remoteGlobalIDString = D10000000000000000000001; remoteInfo = VeloKitEngine; };
 /* End PBXContainerItemProxy section */
 /* Begin PBXTargetDependency section */
 		F0000000000000000000002E = { isa = PBXTargetDependency; target = A00000000000000000000007; targetProxy = F0000000000000000000002D; };
 		F00000000000000000000030 = { isa = PBXTargetDependency; target = F0000000000000000000000E; targetProxy = F0000000000000000000002F; };
 		F00000000000000000000032 = { isa = PBXTargetDependency; target = F00000000000000000000023; targetProxy = F00000000000000000000031; };
+        D10000000000000000000007 = {isa = PBXTargetDependency; target = D10000000000000000000001; targetProxy = D10000000000000000000006; };
 /* End PBXTargetDependency section */
+/* Begin PBXAggregateTarget section */
+        D10000000000000000000001 /* VeloKitEngine */ = {isa = PBXAggregateTarget; buildConfigurationList = D10000000000000000000003; buildPhases = (D10000000000000000000002); dependencies = (); name = VeloKitEngine; productName = VeloKitEngine; };
+/* End PBXAggregateTarget section */
+/* Begin PBXShellScriptBuildPhase section */
+        D10000000000000000000002 = {isa = PBXShellScriptBuildPhase; alwaysOutOfDate = 1; buildActionMask = 2147483647; files = (); inputPaths = (); name = "Build VeloKit"; outputPaths = ("$(VELOKIT_BUILD_DIR)/lib/libvelokit.a", "$(VELOKIT_BUILD_DIR)/include/velokit.h", "$(VELOKIT_BUILD_DIR)/include/module.modulemap", "$(VELOKIT_BUILD_DIR)/share/terminfo"); runOnlyForDeploymentPostprocessing = 0; shellPath = /bin/sh; shellScript = "set -eu\n# Xcode launched from Finder does not inherit an interactive shell's PATH.\nexport PATH=\"$PATH:/opt/homebrew/bin:/usr/local/bin:/run/current-system/sw/bin:$HOME/.nix-profile/bin:/etc/profiles/per-user/$USER/bin\"\nif ! command -v direnv >/dev/null 2>&1; then\n    echo \"error: direnv is required to build VeloKit. Install direnv and Nix, then run direnv allow VeloKit from the repo root.\" >&2\n    exit 1\nfi\ncd \"$SRCROOT/../VeloKit\"\nexec direnv exec . zig build -Doptimize=ReleaseFast --prefix \"$VELOKIT_BUILD_DIR\"\n"; };
+/* End PBXShellScriptBuildPhase section */
 	};
 	rootObject = A00000000000000000000009 /* Project object */;
 }

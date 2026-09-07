@@ -10,7 +10,6 @@ step: *std.Build.Step,
 
 /// The final static library file
 output: std.Build.LazyPath,
-dsym: ?std.Build.LazyPath,
 
 pub fn initStatic(
     b: *std.Build,
@@ -60,8 +59,5 @@ pub fn initStatic(
     return .{
         .step = override.step orelse combined.step,
         .output = override.output,
-
-        // Static libraries cannot have dSYMs because they aren't linked.
-        .dsym = null,
     };
 }

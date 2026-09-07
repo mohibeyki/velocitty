@@ -18,26 +18,24 @@ and Nix with flakes and direnv. Install Metal if needed:
 xcodebuild -downloadComponent MetalToolchain
 ```
 
-Build VeloKit with the pinned Zig toolchain, then the app:
+Allow the pinned build environment once, then build from the repo root:
 
 ```sh
-cd VeloKit
-direnv allow
-zig build -Doptimize=ReleaseFast
-ditto build/VeloKit.xcframework ../macos/VeloKit.xcframework
-cd ../macos
-xcodebuild -project Velocitty.xcodeproj -scheme Velocitty \
+direnv allow VeloKit
+xcodebuild -project macos/Velocitty.xcodeproj -scheme Velocitty \
   -configuration Debug -destination 'platform=macOS,arch=arm64' \
-  -derivedDataPath build build
-open build/Build/Products/Debug/Velocitty.app
+  -derivedDataPath macos/build build
+open macos/build/Build/Products/Debug/Velocitty.app
 ```
 
-Rebuild and copy VeloKit whenever its source changes. The generated framework
-is ignored by Git. `macos/` contains the app; `VeloKit/` contains the engine.
+You can also open the project in Xcode and run the Velocitty scheme. Every build
+checks VeloKit through direnv and Zig; unchanged work uses Zig's cache. The private
+library, headers, and terminfo are generated in DerivedData. No manual engine build
+or copying is needed. `macos/` contains the app; `VeloKit/` contains the engine.
 
 ## Tests
 
-After building VeloKit, run configuration and native bridge tests from the repo root:
+Run configuration and native bridge tests from the repo root:
 
 ```sh
 swift test --package-path macos

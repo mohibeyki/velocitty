@@ -5,24 +5,12 @@ IDs are retained; resolved findings and rejected claims are removed from the que
 
 Discuss one issue at a time: choose an approach, implement it, validate it, update
 this file, and commit the change as a self-contained chunk. A recommendation below
-is not an approved decision. **Current issue: C10 — awaiting a choice.**
+is not an approved decision. **Current issue: C11 — awaiting a choice.**
 
 Scope: our macOS host, private VeloKit bridge, configuration, and build/test integration.
 Untouched libghostty internals and new mux functionality are outside this cleanup.
 
 ## Remaining issues
-
-### C10. Engine artifact freshness
-
-**Before mux; confirmed gap.** Xcode consumes a manually copied, ignored XCFramework
-without checking whether it matches engine source. Terminfo is generated separately.
-
-**Choose:** an engine build dependency or a freshness/resource check using Zig/Xcode.
-Avoid adding a bespoke development-tool wrapper. A successful stale build is not
-validation of current engine source.
-
-Code: [Xcode project](macos/Velocitty.xcodeproj/project.pbxproj),
-[build.zig](VeloKit/build.zig).
 
 ### C11. Consistent configuration reload
 
@@ -158,6 +146,7 @@ Code: [THIRD_PARTY_NOTICES.md](VeloKit/THIRD_PARTY_NOTICES.md),
 | C07 | Own clipboard confirmations per terminal, queue sheets, and resolve pending requests exactly once before native surface teardown. |
 | C08 | Share one engine and configuration across the app; sessions own surfaces and backing views, with callbacks routed to their current window. |
 | C09 | Build regression executables as Xcode targets; run them through XCTest Core/GUI plans and add CI for configuration, native bridge, and app builds. |
+| C10 | Build the private static engine, headers, and terminfo as an Xcode dependency through direnv and Zig; remove manual XCFramework packaging/copying. |
 | C11, controls | Refresh scrollbar visibility/layout on reload; remove unreachable scrollbar policy branch. |
 | C15, delivery | Report file-delivery outcomes, including startup failure/cancellation. |
 | C18, diagnostics | Attribute native setting errors to their included source file. |
@@ -244,7 +233,24 @@ callbacks and real PTY input; C07 adds clipboard queue and cancellation coverage
   Validation: Core and both GUI tests passed through xcodebuild test; the CI engine
   build command passed locally, and actionlint accepted the workflow. Configuration
   tests passed earlier in this cleanup. The GitHub workflow has not run remotely;
-  its first run awaits a push. Engine freshness during local builds remains C10.
+  its first run awaits a push. Automatic local engine builds are handled by C10.
+
+- **C10 — automatic engine build dependency.** Approved option 1.
+  Velocitty, EngineChecks, and WindowChecks depend on a shared VeloKitEngine target.
+  It invokes direnv and the pinned Zig environment on each build, allowing Zig to
+  check source/toolchain changes and reuse cached work. The private static archive,
+  module headers, and terminfo install beneath DerivedData, separately by configuration.
+  Xcode tracks their outputs before compiling, linking, and copying resources.
+  XCFramework packaging and manual copying are removed; CI uses the same Xcode path.
+  Standard rsync keeps generated terminfo exact, including removal of obsolete entries.
+  README documents one-time direnv authorization and ordinary Xcode builds/tests.
+  Validation: Core tests pass from fresh DerivedData with old framework copies absent;
+  both GUI tests and a Release archive pass. A temporary native compile error rejected
+  the build despite an existing library, and was then reverted. Restricted-PATH builds
+  find direnv, repeated identical builds preserve artifact mtimes, stale terminfo entries
+  disappear from generated output and the app bundle, and Clean removes generated outputs.
+  Core tests pass again after Clean. Workflow syntax passes actionlint; remote CI still
+  awaits a push.
 
 ## Review conclusions retained
 
