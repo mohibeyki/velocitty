@@ -126,6 +126,7 @@ final class TerminalView: NSView, NSTextInputClient {
   init(session: TerminalSession) {
     self.session = session
     super.init(frame: .zero)
+    registerForDraggedTypes([.fileURL, .string])
   }
 
   required init?(coder: NSCoder) {
@@ -365,5 +366,36 @@ final class TerminalView: NSView, NSTextInputClient {
       keyHandled = true
       sendKey(event, action: GHOSTTY_ACTION_PRESS)
     }
+  }
+}
+
+// MARK: Drag and drop
+extension TerminalView {
+  static func droppedText(from pasteboard: NSPasteboard) -> String? {
+    let strings = (pasteboard.pasteboardItems ?? []).compactMap { item -> String? in
+      if let value = item.propertyList(forType: .fileURL),
+        let url = NSURL(pasteboardPropertyList: value, ofType: .fileURL) as URL?, url.isFileURL {
+        // ShellInput appends a separator; join pasteboard items ourselves here.
+        return String(ShellInput.paths([url.path]).dropLast())
+      }
+      return item.string(forType: .string)
+    }
+    return strings.isEmpty ? nil : strings.joined(separator: " ")
+  }
+  override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+    guard surface != nil, session?.windowController?.readonly != true,
+      Self.droppedText(from: sender.draggingPasteboard) != nil else { return [] }
+    return .copy
+  }
+  override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+    insertDrop(from: sender.draggingPasteboard)
+  }
+  @discardableResult
+  func insertDrop(from pasteboard: NSPasteboard) -> Bool {
+    guard let surface, session?.windowController?.readonly != true,
+      let text = Self.droppedText(from: pasteboard), !text.contains("\0") else { return false }
+    window?.makeFirstResponder(self)
+    text.withCString { velokit_surface_text(surface, $0, UInt(text.utf8.count)) }
+    return true
   }
 }

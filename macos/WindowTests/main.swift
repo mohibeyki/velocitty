@@ -479,6 +479,21 @@ do {
   secondProgress.clear()
 }
 
+do {
+  let pasteboard = NSPasteboard.withUniqueName()
+  defer { pasteboard.releaseGlobally() }
+  let file = NSPasteboardItem()
+  file.setString(URL(fileURLWithPath: "/tmp/a'b $(echo x).txt").absoluteString, forType: .fileURL)
+  file.setString("ignored file label", forType: .string)
+  let text = NSPasteboardItem()
+  text.setString("plain text", forType: .string)
+  pasteboard.writeObjects([file, text])
+  precondition(TerminalView.droppedText(from: pasteboard)
+    == String(ShellInput.paths(["/tmp/a'b $(echo x).txt"]).dropLast()) + " plain text")
+  pasteboard.clearContents()
+  precondition(TerminalView.droppedText(from: pasteboard) == nil)
+}
+
 if CommandLine.arguments.contains("--configuration-only") {
   delegate.terminating = true
   for controller in delegate.windows {
