@@ -9,6 +9,39 @@ Velocitty provides independent terminal windows with shell integration, search,
 copy/paste, clickable links, and file-based configuration. Tabs, panes, and
 persistent multiplexing are still ahead.
 
+## Roadmap
+
+Planned in the order below. Velocitty owns namespaces, tabs, pane layouts, and
+rendering; herdr integration comes after those interfaces are established.
+
+- [x] **Terminal foundation:** native AppKit windows, interactive user shells,
+  shell integration, search, copy/paste, clickable links, and file drops.
+- [x] **Configuration and appearance:** TOML settings, default-config export,
+  reload support, bundled themes, and automatic light/dark appearance.
+- [x] **Basic window controls:** create and close windows, quit confirmation,
+  window restoration with fresh shells, and a searchable command palette.
+- [ ] **Tabs:** create, close, rename, reorder, and switch tabs within a window;
+  retain each terminal's state when switching and add menu/keyboard navigation.
+- [ ] **Panes:** split tabs horizontally or vertically, resize dividers, move
+  focus, and close individual panes. Route input, terminal resizing, and commands
+  to the correct pane.
+- [ ] **Namespaces:** create, rename, and switch named groups of tabs and sessions.
+  Keep session identity separate from where it is displayed, so terminals from
+  different namespaces can appear side by side in the same window.
+- [ ] **Workspace restoration:** save namespace organization, tab order, pane
+  layouts, and the active selection. Initially reopen fresh shells in saved
+  directories; preserving running processes belongs to the next milestone.
+- [ ] **Local herdr integration:** connect individual sessions to VeloKit for
+  input, output, and resizing while retaining Velocitty's own navigation and UI.
+  Start with one session, then support independent streams across tabs and panes.
+- [ ] **Persistent running sessions:** detach when Velocitty quits and reconnect
+  to the same processes on relaunch. Handle connection loss, recover terminal
+  contents, and distinguish closing a view from terminating its session.
+- [ ] **Agent status:** surface working, waiting, and completed states on the
+  corresponding sessions and make it easy to jump to agents needing attention.
+- [ ] **Remote sessions:** bring sessions on other machines into the same
+  namespace/tab/pane interface, with reconnect behavior and clear host identity.
+
 ## Build and run
 
 Requires an Apple Silicon Mac, macOS 13+, full Xcode with the Metal toolchain,
@@ -80,6 +113,8 @@ append/reset rules; an empty array resets that setting.
 The default theme follows macOS appearance using Rosé Pine and Rosé Pine Dawn.
 Eleven iTerm2 themes are bundled across Rosé Pine, Tokyo Night, and Catppuccin.
 The shell starts in `~/workspace`, falling back to `~` if it does not exist.
+Window restoration follows macOS preferences and starts fresh shells in saved
+directories; it does not keep processes running after the app quits.
 
 ## License
 
