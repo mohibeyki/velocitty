@@ -182,15 +182,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     fullscreenPresentation.update(nil)
     for controller in windows {
       controller.clearProgress()
-      controller.session?.close()
+      for tab in controller.tabs { tab.close() }
     }
   }
+
+  @objc func newTab() { if let activeWindow { activeWindow.newTab() } else { newWindow() } }
+  @objc func closeTab() { activeWindow?.closeTab() }
+  @objc func nextTab() { activeWindow?.cycleTab(1) }
+  @objc func previousTab() { activeWindow?.cycleTab(-1) }
+  @objc func renameTab() { activeWindow?.renameTab() }
+  @objc func moveTabLeft() { activeWindow?.moveTab(-1) }
+  @objc func moveTabRight() { activeWindow?.moveTab(1) }
 
   @objc func closeWindow() { activeWindow?.window?.performClose(nil) }
 
   func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
     switch menuItem.action {
-    case #selector(closeWindow), #selector(showCommands), #selector(findTerminal),
+    case #selector(closeTab), #selector(nextTab), #selector(previousTab), #selector(renameTab),
+      #selector(moveTabLeft), #selector(moveTabRight), #selector(closeWindow), #selector(showCommands), #selector(findTerminal),
       #selector(findNext), #selector(findPrevious):
       return activeWindow?.session?.view?.surface != nil
     default:
@@ -243,6 +252,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   func configurationDidChange() {
     updateRestorationPolicy()
     for controller in windows {
+      for tab in controller.tabs { tab.chrome?.refreshVisibility() }
       controller.applyWindowSettings()
       controller.updateSecureInput()
     }
@@ -364,6 +374,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     terminalMenu.addItem(
       withTitle: "New Window", action: #selector(newWindow), keyEquivalent: "n"
     ).target = self
+    terminalMenu.addItem(withTitle: "New Tab", action: #selector(newTab), keyEquivalent: "t").target = self
+    terminalMenu.addItem(withTitle: "Close Tab", action: #selector(closeTab), keyEquivalent: "w").target = self
+    terminalMenu.addItem(withTitle: "Rename Tab…", action: #selector(renameTab), keyEquivalent: "").target = self
+    terminalMenu.addItem(withTitle: "Next Tab", action: #selector(nextTab), keyEquivalent: "").target = self
+    terminalMenu.addItem(withTitle: "Previous Tab", action: #selector(previousTab), keyEquivalent: "").target = self
+    terminalMenu.addItem(withTitle: "Move Tab Left", action: #selector(moveTabLeft), keyEquivalent: "").target = self
+    terminalMenu.addItem(withTitle: "Move Tab Right", action: #selector(moveTabRight), keyEquivalent: "").target = self
     terminalMenu.addItem(.separator())
     terminalMenu.addItem(
       withTitle: "Close Window", action: #selector(closeWindow), keyEquivalent: "w"
@@ -420,7 +437,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
       "Find…": "start_search", "Find Next": "navigate_search:next",
       "Find Previous": "navigate_search:previous",
       "Command Palette…": "toggle_command_palette", "Reload Configuration": "reload_config",
-      "Close Window": "close_surface", "Quit Velocitty": "quit",
+      "Close Window": "close_window", "Quit Velocitty": "quit",
+      "New Tab": "new_tab", "Close Tab": "close_surface", "Rename Tab…": "prompt_tab_title",
+      "Next Tab": "next_tab", "Previous Tab": "previous_tab",
+      "Move Tab Left": "move_tab:-1", "Move Tab Right": "move_tab:1",
     ]
     func update(_ menu: NSMenu) {
       for item in menu.items {
@@ -470,6 +490,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
 
   init(session: TerminalSession, owner: AppDelegate) {
     self.session = session
+    self.tabs = [session]
     self.owner = owner
     super.init()
     session.windowController = self
@@ -477,6 +498,8 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
 
   var window: NSWindow?
   private(set) var session: TerminalSession?
+  private(set) var tabs: [TerminalSession]
+  private var pendingTabClosures: [TerminalSession] = []
   var closing = false
   var resizeTimer: Timer?
   var hasResized = false
@@ -485,18 +508,39 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
   var fullscreenMode: String?
   var titleAccessory: NSTitlebarAccessoryViewController?
   var titleLabel: NSTextField?
-  var currentDirectory: String?
+  var currentDirectory: String? {
+    get { session?.currentDirectory }
+    set { session?.currentDirectory = newValue }
+  }
   var palette: CommandPalette?
-  var passwordInput = false
-  var manualSecureInput = false
+  var passwordInput: Bool {
+    get { session?.passwordInput ?? false }
+    set { session?.passwordInput = newValue }
+  }
+  var manualSecureInput: Bool {
+    get { session?.manualSecureInput ?? false }
+    set { session?.manualSecureInput = newValue }
+  }
   var secureInputWanted = false
   var secureInputEnabled: Bool { secureInputWanted && owner?.secureInputOwner.enabled == true }
   var bellSound: NSSound?
-  var terminalTitle = "Velocitty"
+  var terminalTitle: String {
+    get { session?.terminalTitle ?? "Velocitty" }
+    set { session?.terminalTitle = newValue }
+  }
   var windowTitleOverride: String?
-  var hasBell = false
-  var readonly = false
-  var chrome: TerminalChrome?
+  var hasBell: Bool {
+    get { session?.hasBell ?? false }
+    set { session?.hasBell = newValue }
+  }
+  var readonly: Bool {
+    get { session?.readonly ?? false }
+    set { session?.readonly = newValue }
+  }
+  var chrome: TerminalChrome? {
+    get { session?.chrome }
+    set { session?.chrome = newValue }
+  }
   var native: NativeSettings { NativeSettings(config: session?.config) }
 
   func openWindow(cascadingFrom previousWindow: NSWindow? = nil, restoring: Bool = false) {
@@ -521,6 +565,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     window.restorationClass = TerminalWindowRestoration.self
     let chrome = TerminalChrome(terminalView)
     self.chrome = chrome
+    refreshTabBars()
     window.contentView = chrome
     self.window = window
     applyWindowSettings()
@@ -568,7 +613,8 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
 
   func applyWindowSettings() {
     guard let window else { return }
-    window.isRestorable = shouldSaveState && session?.hasCustomCommand != true
+    // Until workspace restoration lands, do not silently restore only one tab.
+    window.isRestorable = shouldSaveState && tabs.count == 1 && session?.hasCustomCommand != true
     window.invalidateRestorableState()
     chrome?.refreshVisibility()
     if !native.progressStyle { clearProgress() }
@@ -638,15 +684,19 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     guard let window, let chrome else { return }
     WindowAppearance.apply(to: window, terminal: chrome, native: native,
       forceOpaque: session?.opacityOverride != nil)
+    if let color = session?.backgroundColor {
+      window.backgroundColor = color.withAlphaComponent(window.backgroundColor.alphaComponent)
+    }
   }
 
 
-  func confirmClose() -> Bool {
-    guard let surface = session?.view?.surface, velokit_surface_needs_confirm_quit(surface) else {
+  func confirmClose(of target: TerminalSession? = nil) -> Bool {
+    guard let target else { return tabs.allSatisfy { confirmClose(of: $0) } }
+    guard let surface = target.surface, velokit_surface_needs_confirm_quit(surface) else {
       return true
     }
     let alert = NSAlert()
-    alert.messageText = "Close this terminal?"
+    alert.messageText = "Close \(target.displayTitle)?"
     alert.informativeText = "A process is still running. Closing the terminal will end it."
     alert.addButton(withTitle: "Cancel")
     alert.addButton(withTitle: "Close Terminal")
@@ -661,7 +711,9 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     readonly = false
     updateSecureInput(forceOff: true)
     clearProgress()
-    session?.close()
+    for tab in tabs { tab.close() }
+    tabs.removeAll()
+    pendingTabClosures.removeAll()
     window = nil
     chrome = nil
     palette?.close()
@@ -676,7 +728,8 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
 
   func setTitle(_ title: String) {
     terminalTitle = title
-    let displayed = (hasBell && native.bellFeatures & 8 != 0 ? "● " : "") + (windowTitleOverride ?? title)
+    refreshTabBars()
+    let displayed = (hasBell && native.bellFeatures & 8 != 0 ? "● " : "") + (windowTitleOverride ?? session?.displayTitle ?? title)
     window?.title = displayed
     titleLabel?.stringValue = displayed
     window?.invalidateRestorableState()
@@ -709,6 +762,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
   func resetWindowSize() {
     guard let window else { return }
     var size = session?.view?.initialSize ?? NSSize(width: 960, height: 640)
+    size.height += 30
     let drag = native.dragHandle
     if drag == "always" || (drag == "auto" && !window.styleMask.contains(.titled)) {
       size.height += 12
@@ -798,7 +852,9 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
 }
 
 extension TerminalWindowController {
-  func ringBell() {
+  func ringBell(from source: TerminalSession? = nil) {
+    guard let tab = source ?? session else { return }
+    let native = NativeSettings(config: tab.config)
     let features = native.bellFeatures
     if features & 1 != 0 { NSSound.beep() }
     if features & 2 != 0 {
@@ -808,12 +864,11 @@ extension TerminalWindowController {
       bellSound?.volume = Float(native.bellAudioVolume)
       bellSound?.play()
     }
-    if (!NSApp.isActive || window?.isKeyWindow != true) && features & 4 != 0 {
+    if (!NSApp.isActive || window?.isKeyWindow != true || session !== tab) && features & 4 != 0 {
       NSApp.requestUserAttention(.informationalRequest)
     }
-    hasBell = true
-    setTitle(terminalTitle)
-    refreshBell()
+    tab.hasBell = true
+    tabMetadataChanged(tab)
   }
 
   func clearBell() {
@@ -855,15 +910,17 @@ extension TerminalWindowController {
     }
   }
 
-  func commandFinished(_ value: ghostty_action_command_finished_s) {
+  func commandFinished(_ value: ghostty_action_command_finished_s, from source: TerminalSession? = nil) {
+    guard let tab = source ?? session else { return }
+    let native = NativeSettings(config: tab.config)
     let policy = native.notifyOnCommandFinish
     let focused =
-      NSApp.isActive && window?.isKeyWindow == true && window?.firstResponder === session?.view
+      NSApp.isActive && window?.isKeyWindow == true && window?.firstResponder === tab.view
     guard policy != "never", policy == "always" || !focused,
       Double(value.duration) / 1_000_000_000 >= native.commandFinishDelay
     else { return }
     let actions = native.commandFinishActions
-    if actions & 1 != 0 { ringBell() }
+    if actions & 1 != 0 { ringBell(from: tab) }
     if actions & 2 != 0 {
       notify(
         title: "Command finished",
@@ -882,13 +939,14 @@ extension TerminalWindowController {
 }
 
 extension TerminalWindowController {
-  func secureInput(_ mode: ghostty_action_secure_input_e) {
+  func secureInput(_ mode: ghostty_action_secure_input_e, from source: TerminalSession? = nil) {
+    guard let tab = source ?? session else { return }
     if mode == GHOSTTY_SECURE_INPUT_TOGGLE {
-      manualSecureInput.toggle()
+      tab.manualSecureInput.toggle()
     } else {
-      passwordInput = mode == GHOSTTY_SECURE_INPUT_ON
+      tab.passwordInput = mode == GHOSTTY_SECURE_INPUT_ON
     }
-    updateSecureInput()
+    if session === tab { updateSecureInput() }
   }
   func updateSecureInput(forceOff: Bool = false) {
     secureInputWanted = !forceOff && NSApp.isActive && window?.isKeyWindow == true
@@ -920,11 +978,172 @@ extension TerminalWindowController {
   }
   func windowDidEndSheet(_ notification: Notification) {
     // AppKit can send this before clearing attachedSheet and restoring the key window.
-    DispatchQueue.main.async { [weak self] in self?.session?.view?.updateFocus() }
+    DispatchQueue.main.async { [weak self] in
+      guard let self else { return }
+      self.session?.view?.updateFocus()
+      let pending = self.pendingTabClosures
+      self.pendingTabClosures.removeAll()
+      for tab in pending { self.closeTab(tab) }
+    }
   }
 }
 
 final class TerminalWindow: NSWindow {
   override var canBecomeKey: Bool { true }
   override var canBecomeMain: Bool { true }
+}
+
+extension TerminalWindowController {
+  func newTab() {
+    guard let window, window.attachedSheet == nil, !closing, let runtime = session?.runtime else { return }
+    let tab = runtime.makeSession()
+    tab.surfaceContext = GHOSTTY_SURFACE_CONTEXT_TAB
+    if native.tabInheritsDirectory, let directory = currentDirectory {
+      var isDirectory: ObjCBool = false
+      if FileManager.default.fileExists(atPath: directory, isDirectory: &isDirectory), isDirectory.boolValue,
+        FileManager.default.isExecutableFile(atPath: directory) {
+        tab.initialDirectory = URL(fileURLWithPath: directory, isDirectory: true)
+      }
+    }
+    tab.windowController = self
+    guard let view = tab.createView() else {
+      tab.close()
+      owner?.configurationAlert(ConfigurationError("Could not create a terminal tab.")).runModal()
+      return
+    }
+    tab.currentDirectory = (tab.initialDirectory ?? tab.settings.workingDirectory).path
+    tab.chrome = TerminalChrome(view)
+    if native.newTabPosition == "current", let index = tabs.firstIndex(where: { $0 === session }) {
+      tabs.insert(tab, at: index + 1)
+    } else { tabs.append(tab) }
+    selectTab(tab)
+  }
+
+  func selectTab(_ tab: TerminalSession) {
+    guard tabs.contains(where: { $0 === tab }), tab.surface != nil,
+      let window, window.attachedSheet == nil, !closing else { return }
+    if session !== tab {
+      palette?.close()
+      updateSecureInput(forceOff: true)
+      session?.view?.updateFocus(forceOff: true)
+      if let surface = session?.surface { velokit_surface_set_occlusion(surface, false) }
+      chrome?.removeFromSuperview()
+      session = tab
+      tab.chrome?.frame = window.contentLayoutRect
+      applyWindowSettings()
+      setTitle(tab.terminalTitle)
+      applySizeLimit(for: tab)
+      if let surface = tab.surface {
+        velokit_surface_set_occlusion(surface, window.occlusionState.contains(.visible))
+        if native.windowStepResize {
+          let size = velokit_surface_size(surface)
+          window.contentResizeIncrements = NSSize(width: max(1, CGFloat(size.cell_width_px) / window.backingScaleFactor),
+            height: max(1, CGFloat(size.cell_height_px) / window.backingScaleFactor))
+        } else { window.contentResizeIncrements = NSSize(width: 1, height: 1) }
+      }
+    }
+    refreshTabBars()
+    window.makeFirstResponder(tab.view)
+    tab.view?.updateFocus()
+    updateSecureInput()
+    owner?.updateMenuShortcuts()
+  }
+
+  func cycleTab(_ step: Int, from source: TerminalSession? = nil) {
+    guard !tabs.isEmpty, let selected = source ?? session,
+      let index = tabs.firstIndex(where: { $0 === selected }) else { return }
+    selectTab(tabs[(index + step % tabs.count + tabs.count) % tabs.count])
+  }
+
+  func moveTab(_ amount: Int, from source: TerminalSession? = nil) {
+    guard let tab = source ?? session, let index = tabs.firstIndex(where: { $0 === tab }),
+      window?.attachedSheet == nil, !closing else { return }
+    let destination = max(0, min(tabs.count - 1, index + max(-tabs.count, min(tabs.count, amount))))
+    tabs.remove(at: index)
+    tabs.insert(tab, at: destination)
+    refreshTabBars()
+  }
+
+  func requestTabClose(_ tab: TerminalSession) {
+    guard tabs.contains(where: { $0 === tab }), !closing else { return }
+    if window?.attachedSheet != nil {
+      if !pendingTabClosures.contains(where: { $0 === tab }) { pendingTabClosures.append(tab) }
+    } else { closeTab(tab) }
+  }
+
+  func closeTab(_ source: TerminalSession? = nil, confirm: Bool = true) {
+    guard let tab = source ?? session, let index = tabs.firstIndex(where: { $0 === tab }),
+      window?.attachedSheet == nil, !closing, (!confirm || confirmClose(of: tab)) else { return }
+    if tabs.count == 1 {
+      closing = true
+      window?.close()
+      return
+    }
+    let active = session === tab
+    if active {
+      let next = tabs[index == tabs.count - 1 ? index - 1 : index + 1]
+      selectTab(next)
+    }
+    tabs.removeAll { $0 === tab }
+    tab.close()
+    refreshTabBars()
+    applyWindowSettings()
+  }
+
+  func closeTabs(_ mode: ghostty_action_close_tab_mode_e, from source: TerminalSession? = nil) {
+    guard let tab = source ?? session, let index = tabs.firstIndex(where: { $0 === tab }),
+      window?.attachedSheet == nil, !closing else { return }
+    let targets: [TerminalSession]
+    switch mode {
+    case GHOSTTY_ACTION_CLOSE_TAB_MODE_OTHER: targets = tabs.filter { $0 !== tab }
+    case GHOSTTY_ACTION_CLOSE_TAB_MODE_RIGHT: targets = Array(tabs.dropFirst(index + 1))
+    default: targets = [tab]
+    }
+    guard targets.allSatisfy({ confirmClose(of: $0) }) else { return }
+    for target in targets { closeTab(target, confirm: false) }
+  }
+
+  func renameTab(_ source: TerminalSession? = nil) {
+    guard let tab = source ?? session, tabs.contains(where: { $0 === tab }),
+      let window, window.attachedSheet == nil else { return }
+    let alert = NSAlert()
+    alert.messageText = "Rename Tab"
+    alert.informativeText = "Leave the name empty to follow the terminal title."
+    let field = NSTextField(string: tab.tabTitle ?? tab.terminalTitle)
+    field.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+    alert.accessoryView = field
+    alert.addButton(withTitle: "Rename")
+    alert.addButton(withTitle: "Cancel")
+    alert.beginSheetModal(for: window) { [weak self, weak tab] response in
+      guard response == .alertFirstButtonReturn, let self, let tab, tab.surface != nil else { return }
+      tab.tabTitle = field.stringValue.isEmpty ? nil : field.stringValue
+      self.tabMetadataChanged(tab)
+    }
+    window.attachedSheet?.makeFirstResponder(field)
+  }
+
+  func tabMetadataChanged(_ tab: TerminalSession) {
+    if session === tab {
+      setTitle(tab.terminalTitle)
+      if let directory = tab.currentDirectory { setDirectory(directory) }
+      refreshBell()
+      updateSecureInput()
+    } else { refreshTabBars() }
+  }
+
+  func refreshTabBars() {
+    for tab in tabs { tab.chrome?.refreshTabs() }
+  }
+
+  func applySizeLimit(for tab: TerminalSession) {
+    guard session === tab, let window, let limit = tab.sizeLimit else { return }
+    let scale = window.backingScaleFactor
+    window.contentMinSize = NSSize(width: CGFloat(limit.min_width) / scale,
+      height: CGFloat(limit.min_height) / scale + 30)
+    window.contentMaxSize = NSSize(
+      width: limit.max_width == 0 ? CGFloat.greatestFiniteMagnitude
+        : max(window.contentMinSize.width, CGFloat(limit.max_width) / scale),
+      height: limit.max_height == 0 ? CGFloat.greatestFiniteMagnitude
+        : max(window.contentMinSize.height, CGFloat(limit.max_height) / scale + 30))
+  }
 }

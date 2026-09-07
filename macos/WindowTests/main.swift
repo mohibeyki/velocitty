@@ -434,7 +434,7 @@ do {
   drain()
   let scale = first.window!.backingScaleFactor
   precondition(first.window!.contentMaxSize.width == 1600 / scale)
-  precondition(first.window!.contentMinSize.height == 100 / scale)
+  precondition(first.window!.contentMinSize.height == 100 / scale + 30)
   action.action.size_limit.max_width = 0
   action.action.size_limit.max_height = 0
   precondition(runtime.context.handleAction(target: target, action: action))
@@ -640,6 +640,143 @@ do {
   controller.window?.close()
   quitter.runtime = nil
   runtime.context.owner = delegate
+}
+
+// Tabs retain independent PTYs and route background callbacks to their source.
+do {
+  let runtime = delegate.runtime!
+  let tabSettings = try AppConfiguration.parse(Data("""
+  [terminal]
+  command = "/bin/sh"
+  shell_integration = "none"
+  confirm_close_surface = false
+  window_save_state = "never"
+  theme = ""
+  """.utf8))
+  try runtime.updateConfiguration(tabSettings)
+  delegate.newWindow()
+  let controller = delegate.windows.last!
+  let a = controller.session!
+  let aSurface = a.surface!
+  func action(_ tab: TerminalSession, _ value: String) {
+    precondition(value.withCString { velokit_surface_binding_action(tab.surface!, $0, UInt(value.utf8.count)) })
+    drain()
+  }
+  action(a, "new_tab")
+  let b = controller.session!
+  precondition(controller.tabs.count == 2 && b !== a && a.surface == aSurface)
+  precondition(a.view!.window == nil && !a.view!.terminalFocused && b.view!.window === controller.window)
+  action(b, "new_tab")
+  let c = controller.session!
+  precondition(controller.tabs.count == 3)
+  action(c, "previous_tab")
+  precondition(controller.session === b)
+  action(b, "next_tab")
+  precondition(controller.session === c)
+  action(c, "next_tab")
+  precondition(controller.session === a)
+  action(a, "goto_tab:2")
+  precondition(controller.session === b)
+  action(b, "move_tab:-1")
+  precondition(controller.tabs[0] === b && controller.session === b)
+  action(b, "set_tab_title:My task")
+  precondition(b.tabTitle == "My task" && controller.window!.title == "My task")
+  action(b, "last_tab")
+  precondition(controller.session === c)
+
+  let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  func send(_ tab: TerminalSession, _ value: String) {
+    value.withCString { velokit_surface_text(tab.surface!, $0, UInt(value.utf8.count)) }
+  }
+  func awaitFile(_ name: String) -> String {
+    let url = directory.appendingPathComponent(name)
+    let deadline = Date(timeIntervalSinceNow: 5)
+    while !FileManager.default.fileExists(atPath: url.path) && Date() < deadline { drain() }
+    return try! String(contentsOf: url, encoding: .utf8)
+  }
+  let prefix = "cd " + ShellInput.paths([directory.path]) + "; "
+  send(a, prefix + "TAB_VALUE=kept; echo $$ > a.pid; printf '\\033]0;Background A\\007'\n")
+  let firstPID = awaitFile("a.pid")
+  drain()
+  precondition(a.terminalTitle == "Background A" && controller.window!.title != "Background A")
+  controller.selectTab(a)
+  precondition(controller.window!.title == "Background A" && a.surface == aSurface)
+  send(a, "printf %s \"$TAB_VALUE\" > state; echo $$ > again.pid\n")
+  precondition(awaitFile("state") == "kept" && awaitFile("again.pid") == firstPID)
+  controller.selectTab(b)
+  send(b, prefix + "echo $$ > b.pid\n")
+  precondition(awaitFile("b.pid") != firstPID)
+  controller.chrome?.startSearch("kept")
+  controller.selectTab(a)
+  precondition(controller.chrome?.searching == false)
+  controller.selectTab(b)
+  precondition(controller.chrome?.searching == true)
+  controller.chrome?.hideSearch()
+  controller.secureInput(GHOSTTY_SECURE_INPUT_ON, from: a)
+  precondition(a.passwordInput && !b.passwordInput && !controller.secureInputWanted)
+  controller.ringBell(from: a)
+  precondition(a.hasBell && !b.hasBell)
+  controller.window!.makeKeyAndOrderFront(nil)
+  app.activate(ignoringOtherApps: true)
+  drain()
+  controller.selectTab(a)
+  drain()
+  precondition(!a.hasBell, "Selecting a tab must clear its bell once focused")
+  controller.selectTab(b)
+  // Defer an exiting background shell while another tab owns a sheet.
+  let blockingSheet = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 80),
+    styleMask: [.titled], backing: .buffered, defer: false)
+  controller.window!.beginSheet(blockingSheet)
+  send(a, "exit\n")
+  drain()
+  precondition(a.surface != nil && controller.tabs.count == 3)
+  controller.window!.endSheet(blockingSheet)
+  blockingSheet.orderOut(nil)
+  let exitDeadline = Date(timeIntervalSinceNow: 5)
+  while controller.tabs.contains(where: { $0 === a }) && Date() < exitDeadline { drain() }
+  precondition(a.surface == nil && controller.tabs.count == 2 && controller.session === b)
+  action(b, "close_tab")
+  precondition(b.surface == nil && controller.tabs.count == 1 && controller.session === c)
+  action(c, "new_tab")
+  let d = controller.session!
+  action(d, "new_tab")
+  let e = controller.session!
+  action(d, "close_tab:right")
+  precondition(e.surface == nil && controller.tabs.count == 2)
+  action(d, "close_tab:other")
+  precondition(c.surface == nil && controller.tabs.count == 1 && controller.session === d)
+  action(d, "new_tab")
+  let f = controller.session!
+  let confirmSettings = try AppConfiguration.parse(Data("""
+  [terminal]
+  command = "/bin/sh"
+  shell_integration = "none"
+  confirm_close_surface = true
+  theme = ""
+  """.utf8))
+  try runtime.updateConfiguration(confirmSettings)
+  drain()
+  precondition(velokit_surface_needs_confirm_quit(d.surface!) && velokit_surface_needs_confirm_quit(f.surface!))
+  var confirmations = 0
+  let cancelSecond = Timer(timeInterval: 0.05, repeats: true) { timer in
+    guard app.modalWindow != nil else { return }
+    confirmations += 1
+    app.stopModal(withCode: confirmations == 1 ? .alertSecondButtonReturn : .alertFirstButtonReturn)
+    if confirmations == 2 { timer.invalidate() }
+  }
+  RunLoop.main.add(cancelSecond, forMode: .modalPanel)
+  controller.window!.performClose(nil)
+  cancelSecond.invalidate()
+  precondition(confirmations == 2 && controller.tabs.count == 2 && d.surface != nil && f.surface != nil)
+  try runtime.updateConfiguration(tabSettings)
+  drain()
+  controller.window!.performClose(nil)
+  drain()
+  precondition(d.surface == nil && f.surface == nil && controller.window == nil)
+  try runtime.updateConfiguration(settings)
+  drain()
 }
 
 if CommandLine.arguments.contains("--configuration-only") {

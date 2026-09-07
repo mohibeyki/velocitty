@@ -70,7 +70,8 @@ final class RuntimeContext: NSObject {
         return true
       }
       perform { view, owner in
-        owner?.setTitle(title)
+        view?.session?.terminalTitle = title
+        if let tab = view?.session { owner?.tabMetadataChanged(tab) }
       }
 
     case GHOSTTY_ACTION_SET_WINDOW_TITLE:
@@ -83,15 +84,24 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_PROMPT_TITLE:
       let mode = action.action.prompt_title
-      guard mode != GHOSTTY_PROMPT_TITLE_TAB else { return false }
-      perform { view, owner in owner?.promptTitle(mode) }
+      perform { view, owner in
+        if mode == GHOSTTY_PROMPT_TITLE_TAB { owner?.renameTab(view?.session) }
+        else { owner?.promptTitle(mode) }
+      }
+
+    case GHOSTTY_ACTION_SET_TAB_TITLE:
+      let title = action.action.set_tab_title.title.map { String(cString: $0) } ?? ""
+      perform { view, owner in
+        view?.session?.tabTitle = title.isEmpty ? nil : title
+        if let tab = view?.session { owner?.tabMetadataChanged(tab) }
+      }
 
     case GHOSTTY_ACTION_READONLY:
       let readonly = action.action.readonly == GHOSTTY_READONLY_ON
       perform { view, owner in
         let delegate = owner
-        delegate?.readonly = readonly
-        delegate?.updateSecureInput()
+        view?.session?.readonly = readonly
+        if delegate?.session === view?.session { delegate?.updateSecureInput() }
       }
 
     case GHOSTTY_ACTION_QUIT_TIMER:
@@ -120,15 +130,9 @@ final class RuntimeContext: NSObject {
     case GHOSTTY_ACTION_SIZE_LIMIT:
       let limit = action.action.size_limit
       perform { view, owner in
-        guard let window = view?.window else { return }
-        let scale = window.backingScaleFactor
-        window.contentMinSize = NSSize(
-          width: CGFloat(limit.min_width) / scale, height: CGFloat(limit.min_height) / scale)
-        window.contentMaxSize = NSSize(
-          width: limit.max_width == 0 ? CGFloat.greatestFiniteMagnitude
-            : max(window.contentMinSize.width, CGFloat(limit.max_width) / scale),
-          height: limit.max_height == 0 ? CGFloat.greatestFiniteMagnitude
-            : max(window.contentMinSize.height, CGFloat(limit.max_height) / scale))
+        guard let tab = view?.session else { return }
+        tab.sizeLimit = limit
+        owner?.applySizeLimit(for: tab)
       }
 
     case GHOSTTY_ACTION_CELL_SIZE:
@@ -146,17 +150,18 @@ final class RuntimeContext: NSObject {
       let color = action.action.color_change
       if color.kind == GHOSTTY_ACTION_COLOR_KIND_BACKGROUND {
         perform { view, owner in
-          guard let window = view?.window else { return }
-          let alpha = window.backgroundColor.alphaComponent
-          window.backgroundColor = NSColor(
-            srgbRed: Double(color.r) / 255, green: Double(color.g) / 255,
-            blue: Double(color.b) / 255, alpha: alpha)
+          view?.session?.backgroundColor = NSColor(srgbRed: Double(color.r) / 255,
+            green: Double(color.g) / 255, blue: Double(color.b) / 255, alpha: 1)
+          if owner?.session === view?.session { owner?.applyBackground() }
         }
       }
 
     case GHOSTTY_ACTION_PWD:
       let path = action.action.pwd.pwd.map { String(cString: $0) } ?? ""
-      perform { view, owner in owner?.setDirectory(path) }
+      perform { view, owner in
+        view?.session?.currentDirectory = path
+        if let tab = view?.session { owner?.tabMetadataChanged(tab) }
+      }
 
     case GHOSTTY_ACTION_RESET_WINDOW_SIZE:
       perform { view, owner in owner?.resetWindowSize() }
@@ -167,19 +172,46 @@ final class RuntimeContext: NSObject {
     case GHOSTTY_ACTION_TOGGLE_BACKGROUND_OPACITY:
       perform { view, owner in
         guard let delegate = owner else { return }
-        do { try delegate.session?.toggleOpacity() }
+        do { try view?.session?.toggleOpacity() }
         catch { NSLog("Opacity update failed: %@", error.localizedDescription) }
-        delegate.applyWindowSettings()
+        if delegate.session === view?.session { delegate.applyWindowSettings() }
       }
 
     case GHOSTTY_ACTION_TOGGLE_COMMAND_PALETTE:
       perform { view, owner in owner?.showCommands() }
 
+    case GHOSTTY_ACTION_NEW_TAB:
+      perform { [weak self] _, owner in
+        if let owner { owner.newTab() } else { self?.owner?.newWindow() }
+      }
+
+    case GHOSTTY_ACTION_GOTO_TAB:
+      let direction = action.action.goto_tab
+      perform { view, owner in
+        guard let owner else { return }
+        switch direction {
+        case GHOSTTY_GOTO_TAB_PREVIOUS: owner.cycleTab(-1, from: view?.session)
+        case GHOSTTY_GOTO_TAB_NEXT: owner.cycleTab(1, from: view?.session)
+        case GHOSTTY_GOTO_TAB_LAST:
+          if let last = owner.tabs.last { owner.selectTab(last) }
+        default:
+          let index = Int(direction.rawValue) - 1
+          if owner.tabs.indices.contains(index) { owner.selectTab(owner.tabs[index]) }
+        }
+      }
+
+    case GHOSTTY_ACTION_MOVE_TAB:
+      let amount = action.action.move_tab.amount
+      perform { view, owner in owner?.moveTab(amount, from: view?.session) }
+
     case GHOSTTY_ACTION_NEW_WINDOW:
       perform { view, owner in (NSApp.delegate as? AppDelegate)?.newWindow() }
 
     case GHOSTTY_ACTION_PRESENT_TERMINAL:
-      perform { view, owner in owner?.openWindow() ?? (NSApp.delegate as? AppDelegate)?.openWindow() }
+      perform { view, owner in
+        if let tab = view?.session { owner?.selectTab(tab) }
+        owner?.openWindow() ?? (NSApp.delegate as? AppDelegate)?.openWindow()
+      }
 
     case GHOSTTY_ACTION_TOGGLE_MAXIMIZE:
       perform { view, owner in view?.window?.zoom(nil) }
@@ -233,10 +265,10 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_SECURE_INPUT:
       let mode = action.action.secure_input
-      perform { view, owner in owner?.secureInput(mode) }
+      perform { view, owner in owner?.secureInput(mode, from: view?.session) }
 
     case GHOSTTY_ACTION_RING_BELL:
-      perform { view, owner in owner?.ringBell() }
+      perform { view, owner in owner?.ringBell(from: view?.session) }
 
     case GHOSTTY_ACTION_DESKTOP_NOTIFICATION:
       let notification = action.action.desktop_notification
@@ -246,23 +278,26 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_COMMAND_FINISHED:
       let value = action.action.command_finished
-      perform { view, owner in owner?.commandFinished(value) }
+      perform { view, owner in owner?.commandFinished(value, from: view?.session) }
 
     case GHOSTTY_ACTION_PROGRESS_REPORT:
       let value = action.action.progress_report
-      perform { view, owner in owner?.showProgress(value) }
+      perform { view, _ in
+        if NativeSettings(config: view?.config).progressStyle { view?.session?.chrome?.progress.update(value) }
+        else { view?.session?.chrome?.progress.clear() }
+      }
 
     case GHOSTTY_ACTION_START_SEARCH:
       let needle = action.action.start_search.needle.map { String(cString: $0) }
-      perform { view, owner in owner?.chrome?.startSearch(needle) }
+      perform { view, owner in view?.session?.chrome?.startSearch(needle) }
 
     case GHOSTTY_ACTION_END_SEARCH:
-      perform { view, owner in owner?.chrome?.hideSearch() }
+      perform { view, owner in view?.session?.chrome?.hideSearch() }
 
     case GHOSTTY_ACTION_SEARCH_TOTAL:
       let total = action.action.search_total.total
       perform { view, owner in
-        let chrome = owner?.chrome
+        let chrome = view?.session?.chrome
         chrome?.total = total
         chrome?.updateCount()
       }
@@ -270,7 +305,7 @@ final class RuntimeContext: NSObject {
     case GHOSTTY_ACTION_SEARCH_SELECTED:
       let selected = action.action.search_selected.selected
       perform { view, owner in
-        let chrome = owner?.chrome
+        let chrome = view?.session?.chrome
         chrome?.selected = selected
         chrome?.updateCount()
       }
@@ -280,7 +315,7 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_SCROLLBAR:
       let state = action.action.scrollbar
-      perform { view, owner in owner?.chrome?.updateScrollbar(state) }
+      perform { view, owner in view?.session?.chrome?.updateScrollbar(state) }
 
     case GHOSTTY_ACTION_OPEN_URL:
       let link = action.action.open_url
@@ -312,15 +347,21 @@ final class RuntimeContext: NSObject {
           shape == GHOSTTY_MOUSE_SHAPE_POINTER
           ? .pointingHand : shape == GHOSTTY_MOUSE_SHAPE_TEXT ? .iBeam : .arrow
         view?.pointer = cursor
-        cursor.set()
+        if view?.window?.isKeyWindow == true { cursor.set() }
       }
 
     case GHOSTTY_ACTION_MOUSE_VISIBILITY:
       let hidden = action.action.mouse_visibility == GHOSTTY_MOUSE_HIDDEN
-      perform { view, owner in NSCursor.setHiddenUntilMouseMoves(hidden) }
+      perform { view, owner in
+        if view?.window?.isKeyWindow == true { NSCursor.setHiddenUntilMouseMoves(hidden) }
+      }
 
-    case GHOSTTY_ACTION_CLOSE_WINDOW, GHOSTTY_ACTION_CLOSE_TAB:
-      perform { view, owner in view?.window?.performClose(nil) }
+    case GHOSTTY_ACTION_CLOSE_WINDOW:
+      perform { _, owner in owner?.window?.performClose(nil) }
+
+    case GHOSTTY_ACTION_CLOSE_TAB:
+      let mode = action.action.close_tab_mode
+      perform { view, owner in owner?.closeTabs(mode, from: view?.session) }
 
     case GHOSTTY_ACTION_QUIT:
       perform { view, owner in
@@ -489,7 +530,7 @@ final class RuntimeContext: NSObject {
     guard let view = RuntimeContext.fromSurfaceUserdata(userdata) else { return }
     DispatchQueue.main.async { [weak view] in
       guard let view, view.surface != nil else { return }
-      view.session?.windowController?.window?.performClose(nil)
+      if let tab = view.session { tab.windowController?.requestTabClose(tab) }
     }
   }
 }

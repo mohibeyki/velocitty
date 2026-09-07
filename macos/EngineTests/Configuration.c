@@ -149,19 +149,19 @@ int main(int argc, char **argv) {
 
     assert(velokit_action_supported("copy_to_clipboard"));
     assert(velokit_action_supported("open_config:new_window"));
-    assert(!velokit_action_supported("new_tab"));
+    assert(velokit_action_supported("new_tab"));
     assert(!velokit_action_supported("toggle_window_decorations"));
-    rejects("keybind", "ctrl+t=new_tab");
-    rejects("keybind", "mode/performable:ctrl+t=new_tab");
+    accepts("keybind", "ctrl+t=new_tab");
+    accepts("keybind", "mode/performable:ctrl+t=new_tab");
     rejects("keybind", "chain=new_split:right");
-    rejects("command-palette-entry", "title:Unsupported,action:new_tab");
+    accepts("command-palette-entry", "title:New Tab,action:new_tab");
     accepts("keybind", "ctrl+==increase_font_size:1");
     accepts("keybind", "mode/ctrl+c=copy_to_clipboard");
     ghostty_config_t supported_config = velokit_config_new();
     ghostty_input_trigger_s unsupported_trigger;
-    assert(!velokit_config_trigger(supported_config, "new_tab", &unsupported_trigger));
+    assert(velokit_config_trigger(supported_config, "new_tab", &unsupported_trigger));
     assert(velokit_config_set(supported_config, "keybind", ""));
-    assert(!velokit_config_trigger(supported_config, "new_tab", &unsupported_trigger));
+    assert(velokit_config_trigger(supported_config, "new_tab", &unsupported_trigger));
     velokit_config_free(supported_config);
 
     // Repeated values and a failed parse must remain attached to their own

@@ -15,6 +15,19 @@ final class TerminalSession {
   private(set) var opacityOverride: Double?
   private var closed = false
   var initialDirectory: URL?
+  var surfaceContext = GHOSTTY_SURFACE_CONTEXT_WINDOW
+  var chrome: TerminalChrome?
+  var terminalTitle = "Velocitty"
+  var tabTitle: String?
+  var currentDirectory: String?
+  var passwordInput = false
+  var manualSecureInput = false
+  var hasBell = false
+  var readonly = false
+  var sizeLimit: ghostty_action_size_limit_s?
+  var backgroundColor: NSColor?
+  var displayTitle: String { tabTitle ?? terminalTitle }
+
   var links = TerminalLinks()
 
   var settings: AppConfiguration { runtime.settings }
@@ -38,7 +51,7 @@ final class TerminalSession {
     options.platform_tag = GHOSTTY_PLATFORM_MACOS
     options.platform = ghostty_platform_u(macos: ghostty_platform_macos_s(nsview: pointer))
     options.scale_factor = Double(NSScreen.main?.backingScaleFactor ?? 2)
-    options.context = GHOSTTY_SURFACE_CONTEXT_WINDOW
+    options.context = surfaceContext
     surface = (initialDirectory ?? settings.workingDirectory).path.withCString {
       options.working_directory = $0
       return velokit_surface_new(app, &options)
@@ -97,6 +110,8 @@ final class TerminalSession {
 
   func close() {
     guard !closed else { return }
+    chrome?.progress.clear()
+    chrome?.fadeTimer?.invalidate()
     view?.stopAccessibility()
     view?.clipboard.cancel()
     links.cancel()
@@ -105,6 +120,7 @@ final class TerminalSession {
     closed = true
     windowController = nil
     if let previous { velokit_surface_free(previous) }
+    chrome = nil
     view = nil
     if let appliedConfig { velokit_config_free(appliedConfig) }
     appliedConfig = nil

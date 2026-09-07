@@ -160,6 +160,8 @@ public enum TerminalSettings {
     "window-vsync",
     "window-width",
     "working-directory",
+    "tab-inherit-working-directory",
+    "window-new-tab-position",
   ]
 
   public static let repeatable: Set<String> = [
@@ -251,13 +253,11 @@ public enum TerminalSettings {
     "split-divider-color": "Deferred until tabs and panes are implemented.",
     "split-inherit-working-directory": "Deferred until tabs and panes are implemented.",
     "split-preserve-zoom": "Deferred until tabs and panes are implemented.",
-    "tab-inherit-working-directory": "Deferred until tabs and panes are implemented.",
     "undo-timeout": "Deferred until terminal session restoration is implemented.",
     "unfocused-split-fill": "Deferred until tabs and panes are implemented.",
     "unfocused-split-opacity": "Deferred until tabs and panes are implemented.",
     "window-inherit-font-size": "Deferred until tabs and panes are implemented.",
     "window-inherit-working-directory": "Deferred until tabs and panes are implemented.",
-    "window-new-tab-position": "Deferred until tabs and panes are implemented.",
     "window-show-tab-bar": "Deferred until tabs and panes are implemented.",
     "x11-instance-name":
       "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",

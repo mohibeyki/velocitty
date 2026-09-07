@@ -7,6 +7,10 @@ import VelocittyConfiguration
 // Search and scrolling are native controls; the engine owns matches and viewport state.
 final class TerminalChrome: NSView, NSSearchFieldDelegate {
   let progress = TerminalProgress()
+  let tabScroll = NSScrollView()
+  let tabButtons = NSStackView()
+  let addTab = NSButton(title: "+", target: nil, action: nil)
+  let closeTab = NSButton(title: "×", target: nil, action: nil)
   let terminal: TerminalView
   let search = NSSearchField()
   let dragHandle = TerminalDragHandle()
@@ -31,6 +35,21 @@ final class TerminalChrome: NSView, NSSearchFieldDelegate {
     for view in [search, count, previous, next, close, scroller, secure, resizeLabel, dragHandle, progress] {
       addSubview(view)
     }
+    tabScroll.documentView = tabButtons
+    tabScroll.drawsBackground = false
+    tabScroll.hasHorizontalScroller = true
+    tabScroll.autohidesScrollers = true
+    tabButtons.orientation = .horizontal
+    tabButtons.spacing = 4
+    addSubview(tabScroll)
+    addSubview(addTab)
+    addSubview(closeTab)
+    addTab.target = self
+    addTab.action = #selector(createTab)
+    addTab.toolTip = "New Tab"
+    closeTab.target = self
+    closeTab.action = #selector(closeActiveTab)
+    closeTab.toolTip = "Close Tab"
     resizeLabel.isHidden = true
     resizeLabel.font = .monospacedDigitSystemFont(ofSize: 16, weight: .medium)
     resizeLabel.alignment = .center
@@ -65,9 +84,13 @@ final class TerminalChrome: NSView, NSSearchFieldDelegate {
       policy == "always" || (policy == "auto" && window?.styleMask.contains(.titled) == false)
     dragHandle.isHidden = !dragging
     dragHandle.frame = NSRect(x: 0, y: bounds.height - 12, width: bounds.width, height: 12)
-    let height: CGFloat = (searching ? 38 : 0) + (dragging ? 12 : 0)
+    let tabTop = bounds.height - (dragging ? 12 : 0)
+    tabScroll.frame = NSRect(x: 4, y: tabTop - 30, width: max(0, bounds.width - 72), height: 30)
+    addTab.frame = NSRect(x: bounds.width - 66, y: tabTop - 28, width: 30, height: 26)
+    closeTab.frame = NSRect(x: bounds.width - 34, y: tabTop - 28, width: 30, height: 26)
+    let height: CGFloat = 30 + (searching ? 38 : 0) + (dragging ? 12 : 0)
     let width: CGFloat = showScroll && scroller.scrollerStyle == .legacy ? 14 : 0
-    let searchTop = bounds.height - (dragging ? 12 : 0)
+    let searchTop = tabTop - 30
     let position = NativeSettings(config: terminal.config).resizeOverlayPosition
     let overlayX: CGFloat =
       position.hasSuffix("left")
@@ -89,6 +112,33 @@ final class TerminalChrome: NSView, NSSearchFieldDelegate {
     next.frame = NSRect(x: bounds.width - 101, y: searchTop - 32, width: 32, height: 26)
     close.frame = NSRect(x: bounds.width - 67, y: searchTop - 32, width: 60, height: 26)
   }
+  func refreshTabs() {
+    for view in tabButtons.arrangedSubviews { tabButtons.removeArrangedSubview(view); view.removeFromSuperview() }
+    guard let controller = terminal.session?.windowController else { return }
+    var contentWidth: CGFloat = 0
+    for (index, tab) in controller.tabs.enumerated() {
+      let button = NSButton(title: (tab.hasBell ? "● " : "") + tab.displayTitle, target: self, action: #selector(activateTab(_:)))
+      button.tag = index
+      button.setButtonType(.pushOnPushOff)
+      button.bezelStyle = .rounded
+      button.state = controller.session === tab ? .on : .off
+      button.lineBreakMode = .byTruncatingTail
+      button.toolTip = tab.displayTitle
+      let width = min(180, max(90, button.intrinsicContentSize.width))
+      contentWidth += width + (index == 0 ? 0 : 4)
+      button.widthAnchor.constraint(equalToConstant: width).isActive = true
+      tabButtons.addArrangedSubview(button)
+    }
+    tabButtons.frame = NSRect(origin: .zero, size: NSSize(width: contentWidth, height: 30))
+    needsLayout = true
+  }
+  @objc private func activateTab(_ sender: NSButton) {
+    guard let controller = terminal.session?.windowController, controller.tabs.indices.contains(sender.tag) else { return }
+    controller.selectTab(controller.tabs[sender.tag])
+  }
+  @objc private func createTab() { terminal.session?.windowController?.newTab() }
+  @objc private func closeActiveTab() { terminal.session?.windowController?.closeTab() }
+
   func refreshVisibility() {
     for view in [search, count, previous, next, close] { view.isHidden = !searching }
     let policy = NativeSettings(config: terminal.config).scrollbar

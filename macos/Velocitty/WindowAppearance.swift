@@ -37,6 +37,12 @@ enum WindowAppearance {
         terminal.frame = effect.bounds
         terminal.autoresizingMask = [.width, .height]
       }
+      if effect.contentView !== terminal {
+        terminal.removeFromSuperview()
+        effect.contentView = terminal
+        terminal.frame = effect.bounds
+        terminal.autoresizingMask = [.width, .height]
+      }
       effect.style = native.backgroundBlur == -2 ? .clear : .regular
       effect.tintColor = native.background.withAlphaComponent(opacity)
       effect.cornerRadius = window.styleMask.contains(.titled) ? 10 : 0

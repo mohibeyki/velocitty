@@ -392,7 +392,7 @@ extension TerminalView {
     return strings.isEmpty ? nil : strings.joined(separator: " ")
   }
   override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-    guard surface != nil, session?.windowController?.readonly != true,
+    guard surface != nil, session?.readonly != true,
       Self.droppedText(from: sender.draggingPasteboard) != nil else { return [] }
     return .copy
   }
@@ -401,7 +401,7 @@ extension TerminalView {
   }
   @discardableResult
   func insertDrop(from pasteboard: NSPasteboard) -> Bool {
-    guard let surface, session?.windowController?.readonly != true,
+    guard let surface, session?.readonly != true,
       let text = Self.droppedText(from: pasteboard), !text.contains("\0") else { return false }
     window?.makeFirstResponder(self)
     text.withCString { velokit_surface_text(surface, $0, UInt(text.utf8.count)) }

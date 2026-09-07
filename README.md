@@ -5,9 +5,9 @@ Velocitty is a native macOS terminal built with Swift and AppKit, powered by
 terminal engine.
 
 The goal is to manage terminal and agent sessions in a single window. Today,
-Velocitty provides independent terminal windows with shell integration, search,
-copy/paste, clickable links, and file-based configuration. Tabs, panes, and
-persistent multiplexing are still ahead.
+Velocitty provides tabbed terminal windows with shell integration, search,
+copy/paste, clickable links, and file-based configuration. Panes, namespaces,
+and persistent multiplexing are still ahead.
 
 ## Roadmap
 
@@ -20,7 +20,7 @@ rendering; herdr integration comes after those interfaces are established.
   reload support, bundled themes, and automatic light/dark appearance.
 - [x] **Basic window controls:** create and close windows, quit confirmation,
   window restoration with fresh shells, and a searchable command palette.
-- [ ] **Tabs:** create, close, rename, reorder, and switch tabs within a window;
+- [x] **Tabs:** create, close, rename, reorder, and switch tabs within a window;
   retain each terminal's state when switching and add menu/keyboard navigation.
 - [ ] **Panes:** split tabs horizontally or vertically, resize dividers, move
   focus, and close individual panes. Route input, terminal resizing, and commands
@@ -65,6 +65,22 @@ You can also open the project in Xcode and run the Velocitty scheme. Every build
 checks VeloKit through direnv and Zig; unchanged work uses Zig's cache. The private
 library, headers, and terminfo are generated in DerivedData. No manual engine build
 or copying is needed. `macos/` contains the app; `VeloKit/` contains the engine.
+
+## Tabs
+
+Use **Terminal → New Tab** (⌘T), **Close Tab** (⌘W), and the tab strip to manage
+terminals in a window. Control-Tab / Control-Shift-Tab switch tabs; ⌘1–⌘8 select
+by position and ⌘9 selects the last tab. Rename and reorder tabs from the Terminal
+menu or command palette. Shortcuts follow the configured keybindings.
+
+Each tab keeps its own running shell, terminal output, and search state while
+hidden. New tabs inherit the current directory by default. Closing a tab ends
+its shell; closing the last tab closes the window. Closing a window or quitting
+checks every tab for processes that need confirmation.
+
+Tab layouts and names are not saved across launches yet. Window restoration
+currently applies to single-tab windows; multi-tab workspace restoration is a
+later milestone.
 
 ## Tests
 
