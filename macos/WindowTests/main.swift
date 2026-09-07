@@ -433,7 +433,7 @@ do {
   precondition(runtime.context.handleAction(target: target, action: action))
   drain()
   let scale = first.window!.backingScaleFactor
-  precondition(first.window!.contentMaxSize.width == 1600 / scale)
+  precondition(first.window!.contentMaxSize.width == 1600 / scale + TerminalChrome.sidebarWidth)
   precondition(first.window!.contentMinSize.height == 100 / scale + 30)
   action.action.size_limit.max_width = 0
   action.action.size_limit.max_height = 0
@@ -777,6 +777,35 @@ do {
   precondition(d.surface == nil && f.surface == nil && controller.window == nil)
   try runtime.updateConfiguration(settings)
   drain()
+}
+
+// Namespace switching preserves sessions and scopes tab actions to their owner.
+do {
+  delegate.newWindow()
+  let controller = delegate.windows.last!
+  let first = controller.activeNamespace
+  let a = controller.session!
+  controller.newTab()
+  let b = controller.session!
+  controller.newNamespace()
+  let second = controller.activeNamespace
+  let c = controller.session!
+  second.name = "Agents"
+  second.subtitle = "Local tasks"
+  controller.refreshTabBars()
+  precondition(controller.namespaces.count == 2 && controller.tabs.count == 1)
+  controller.selectNamespace(at: 0)
+  precondition(controller.session === b && controller.tabs.count == 2)
+  controller.selectNamespace(at: 1)
+  precondition(controller.session === c && a.surface != nil && b.surface != nil)
+  controller.closeTab(b, confirm: false)
+  precondition(controller.session === c && first.selected === a && first.tabs.count == 1)
+  controller.closeTab(c, confirm: false)
+  precondition(controller.namespaces.count == 1 && controller.session === a)
+  controller.closing = true
+  controller.window?.close()
+  drain()
+  precondition(a.surface == nil)
 }
 
 if CommandLine.arguments.contains("--configuration-only") {

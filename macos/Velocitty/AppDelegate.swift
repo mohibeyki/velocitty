@@ -182,9 +182,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     fullscreenPresentation.update(nil)
     for controller in windows {
       controller.clearProgress()
-      for tab in controller.tabs { tab.close() }
+      for tab in controller.allTabs { tab.close() }
     }
   }
+
+  @objc func newNamespace() { activeWindow?.newNamespace() }
+  @objc func editNamespace() { activeWindow?.editNamespace() }
+  @objc func closeNamespace() { activeWindow?.closeNamespace() }
+  @objc func selectNamespace(_ sender: NSMenuItem) { activeWindow?.selectNamespace(at: sender.tag) }
 
   @objc func newTab() { if let activeWindow { activeWindow.newTab() } else { newWindow() } }
   @objc func closeTab() { activeWindow?.closeTab() }
@@ -198,7 +203,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
   func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
     switch menuItem.action {
-    case #selector(closeTab), #selector(nextTab), #selector(previousTab), #selector(renameTab),
+    case #selector(newNamespace), #selector(editNamespace), #selector(closeNamespace), #selector(selectNamespace(_:)), #selector(closeTab), #selector(nextTab), #selector(previousTab), #selector(renameTab),
       #selector(moveTabLeft), #selector(moveTabRight), #selector(closeWindow), #selector(showCommands), #selector(findTerminal),
       #selector(findNext), #selector(findPrevious):
       return activeWindow?.session?.view?.surface != nil
@@ -252,7 +257,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   func configurationDidChange() {
     updateRestorationPolicy()
     for controller in windows {
-      for tab in controller.tabs { tab.chrome?.refreshVisibility() }
+      for tab in controller.allTabs { tab.chrome?.refreshVisibility() }
       controller.applyWindowSettings()
       controller.updateSecureInput()
     }
@@ -386,6 +391,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
       withTitle: "Close Window", action: #selector(closeWindow), keyEquivalent: "w"
     ).target = self
 
+    let namespaceMenu = NSMenu(title: "Namespace")
+    let namespaceMenuItem = NSMenuItem()
+    namespaceMenuItem.submenu = namespaceMenu
+    mainMenu.addItem(namespaceMenuItem)
+    namespaceMenu.addItem(withTitle: "New Namespace", action: #selector(newNamespace), keyEquivalent: "").target = self
+    namespaceMenu.addItem(withTitle: "Edit Name and Subtitle…", action: #selector(editNamespace), keyEquivalent: "").target = self
+    namespaceMenu.addItem(withTitle: "Close Namespace", action: #selector(closeNamespace), keyEquivalent: "").target = self
+    namespaceMenu.addItem(.separator())
+    for number in 1...9 {
+      let item = namespaceMenu.addItem(withTitle: "Namespace \(number)", action: #selector(selectNamespace(_:)), keyEquivalent: String(number))
+      item.target = self
+      item.tag = number - 1
+      item.keyEquivalentModifierMask = [.control]
+    }
+
     let editMenu = NSMenu(title: "Edit")
     let editMenuItem = NSMenuItem()
     editMenuItem.submenu = editMenu
@@ -485,12 +505,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   }
 }
 
+final class TerminalNamespace {
+  var name: String
+  var subtitle = ""
+  var tabs: [TerminalSession]
+  var selected: TerminalSession
+
+  init(name: String, session: TerminalSession) {
+    self.name = name
+    self.tabs = [session]
+    self.selected = session
+  }
+}
+
 final class TerminalWindowController: NSObject, NSWindowDelegate {
   weak var owner: AppDelegate?
 
   init(session: TerminalSession, owner: AppDelegate) {
     self.session = session
-    self.tabs = [session]
+    let namespace = TerminalNamespace(name: "Default", session: session)
+    self.namespaces = [namespace]
+    self.activeNamespace = namespace
     self.owner = owner
     super.init()
     session.windowController = self
@@ -498,7 +533,16 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
 
   var window: NSWindow?
   private(set) var session: TerminalSession?
-  private(set) var tabs: [TerminalSession]
+  private(set) var namespaces: [TerminalNamespace]
+  private(set) var activeNamespace: TerminalNamespace
+  private(set) var tabs: [TerminalSession] {
+    get { activeNamespace.tabs }
+    set { activeNamespace.tabs = newValue }
+  }
+  var allTabs: [TerminalSession] { namespaces.flatMap(\.tabs) }
+  func namespace(for tab: TerminalSession) -> TerminalNamespace? {
+    namespaces.first { $0.tabs.contains { $0 === tab } }
+  }
   private var pendingTabClosures: [TerminalSession] = []
   var closing = false
   var resizeTimer: Timer?
@@ -614,7 +658,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
   func applyWindowSettings() {
     guard let window else { return }
     // Until workspace restoration lands, do not silently restore only one tab.
-    window.isRestorable = shouldSaveState && tabs.count == 1 && session?.hasCustomCommand != true
+    window.isRestorable = shouldSaveState && namespaces.count == 1 && allTabs.count == 1 && session?.hasCustomCommand != true
     window.invalidateRestorableState()
     chrome?.refreshVisibility()
     if !native.progressStyle { clearProgress() }
@@ -691,7 +735,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
 
 
   func confirmClose(of target: TerminalSession? = nil) -> Bool {
-    guard let target else { return tabs.allSatisfy { confirmClose(of: $0) } }
+    guard let target else { return allTabs.allSatisfy { confirmClose(of: $0) } }
     guard let surface = target.surface, velokit_surface_needs_confirm_quit(surface) else {
       return true
     }
@@ -711,8 +755,9 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     readonly = false
     updateSecureInput(forceOff: true)
     clearProgress()
-    for tab in tabs { tab.close() }
-    tabs.removeAll()
+    for tab in allTabs { tab.close() }
+    for namespace in namespaces { namespace.tabs.removeAll() }
+    namespaces.removeAll()
     pendingTabClosures.removeAll()
     window = nil
     chrome = nil
@@ -762,6 +807,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
   func resetWindowSize() {
     guard let window else { return }
     var size = session?.view?.initialSize ?? NSSize(width: 960, height: 640)
+    size.width += TerminalChrome.sidebarWidth
     size.height += 30
     let drag = native.dragHandle
     if drag == "always" || (drag == "auto" && !window.styleMask.contains(.titled)) {
@@ -994,7 +1040,7 @@ final class TerminalWindow: NSWindow {
 }
 
 extension TerminalWindowController {
-  func newTab() {
+  func newTab(inNewNamespace: Bool = false) {
     guard let window, window.attachedSheet == nil, !closing, let runtime = session?.runtime else { return }
     let tab = runtime.makeSession()
     tab.surfaceContext = GHOSTTY_SURFACE_CONTEXT_TAB
@@ -1013,14 +1059,16 @@ extension TerminalWindowController {
     }
     tab.currentDirectory = (tab.initialDirectory ?? tab.settings.workingDirectory).path
     tab.chrome = TerminalChrome(view)
-    if native.newTabPosition == "current", let index = tabs.firstIndex(where: { $0 === session }) {
+    if inNewNamespace {
+      namespaces.append(TerminalNamespace(name: "Namespace \(namespaces.count + 1)", session: tab))
+    } else if native.newTabPosition == "current", let index = tabs.firstIndex(where: { $0 === session }) {
       tabs.insert(tab, at: index + 1)
     } else { tabs.append(tab) }
     selectTab(tab)
   }
 
   func selectTab(_ tab: TerminalSession) {
-    guard tabs.contains(where: { $0 === tab }), tab.surface != nil,
+    guard let namespace = namespace(for: tab), tab.surface != nil,
       let window, window.attachedSheet == nil, !closing else { return }
     if session !== tab {
       palette?.close()
@@ -1028,6 +1076,8 @@ extension TerminalWindowController {
       session?.view?.updateFocus(forceOff: true)
       if let surface = session?.surface { velokit_surface_set_occlusion(surface, false) }
       chrome?.removeFromSuperview()
+      activeNamespace = namespace
+      namespace.selected = tab
       session = tab
       tab.chrome?.frame = window.contentLayoutRect
       applyWindowSettings()
@@ -1050,49 +1100,60 @@ extension TerminalWindowController {
   }
 
   func cycleTab(_ step: Int, from source: TerminalSession? = nil) {
-    guard !tabs.isEmpty, let selected = source ?? session,
+    guard let selected = source ?? session, let namespace = namespace(for: selected) else { return }
+    let tabs = namespace.tabs
+    guard !tabs.isEmpty,
       let index = tabs.firstIndex(where: { $0 === selected }) else { return }
     selectTab(tabs[(index + step % tabs.count + tabs.count) % tabs.count])
   }
 
   func moveTab(_ amount: Int, from source: TerminalSession? = nil) {
-    guard let tab = source ?? session, let index = tabs.firstIndex(where: { $0 === tab }),
+    guard let tab = source ?? session, let namespace = namespace(for: tab),
+      let index = namespace.tabs.firstIndex(where: { $0 === tab }),
       window?.attachedSheet == nil, !closing else { return }
+    let tabs = namespace.tabs
     let destination = max(0, min(tabs.count - 1, index + max(-tabs.count, min(tabs.count, amount))))
-    tabs.remove(at: index)
-    tabs.insert(tab, at: destination)
+    namespace.tabs.remove(at: index)
+    namespace.tabs.insert(tab, at: destination)
     refreshTabBars()
   }
 
   func requestTabClose(_ tab: TerminalSession) {
-    guard tabs.contains(where: { $0 === tab }), !closing else { return }
+    guard namespace(for: tab) != nil, !closing else { return }
     if window?.attachedSheet != nil {
       if !pendingTabClosures.contains(where: { $0 === tab }) { pendingTabClosures.append(tab) }
     } else { closeTab(tab) }
   }
 
   func closeTab(_ source: TerminalSession? = nil, confirm: Bool = true) {
-    guard let tab = source ?? session, let index = tabs.firstIndex(where: { $0 === tab }),
+    guard let tab = source ?? session, let namespace = namespace(for: tab),
+      let index = namespace.tabs.firstIndex(where: { $0 === tab }),
       window?.attachedSheet == nil, !closing, (!confirm || confirmClose(of: tab)) else { return }
-    if tabs.count == 1 {
+    let tabs = namespace.tabs
+    if allTabs.count == 1 {
       closing = true
       window?.close()
       return
     }
     let active = session === tab
     if active {
-      let next = tabs[index == tabs.count - 1 ? index - 1 : index + 1]
+      let next = tabs.count > 1 ? tabs[index == tabs.count - 1 ? index - 1 : index + 1]
+        : namespaces.first { $0 !== namespace }!.selected
       selectTab(next)
     }
-    tabs.removeAll { $0 === tab }
+    namespace.tabs.removeAll { $0 === tab }
+    if namespace.tabs.isEmpty { namespaces.removeAll { $0 === namespace } }
+    else if namespace.selected === tab { namespace.selected = namespace.tabs[min(index, namespace.tabs.count - 1)] }
     tab.close()
     refreshTabBars()
     applyWindowSettings()
   }
 
   func closeTabs(_ mode: ghostty_action_close_tab_mode_e, from source: TerminalSession? = nil) {
-    guard let tab = source ?? session, let index = tabs.firstIndex(where: { $0 === tab }),
+    guard let tab = source ?? session, let namespace = namespace(for: tab),
+      let index = namespace.tabs.firstIndex(where: { $0 === tab }),
       window?.attachedSheet == nil, !closing else { return }
+    let tabs = namespace.tabs
     let targets: [TerminalSession]
     switch mode {
     case GHOSTTY_ACTION_CLOSE_TAB_MODE_OTHER: targets = tabs.filter { $0 !== tab }
@@ -1104,7 +1165,7 @@ extension TerminalWindowController {
   }
 
   func renameTab(_ source: TerminalSession? = nil) {
-    guard let tab = source ?? session, tabs.contains(where: { $0 === tab }),
+    guard let tab = source ?? session, namespace(for: tab) != nil,
       let window, window.attachedSheet == nil else { return }
     let alert = NSAlert()
     alert.messageText = "Rename Tab"
@@ -1132,18 +1193,64 @@ extension TerminalWindowController {
   }
 
   func refreshTabBars() {
-    for tab in tabs { tab.chrome?.refreshTabs() }
+    for tab in allTabs { tab.chrome?.refreshTabs() }
   }
 
   func applySizeLimit(for tab: TerminalSession) {
     guard session === tab, let window, let limit = tab.sizeLimit else { return }
     let scale = window.backingScaleFactor
-    window.contentMinSize = NSSize(width: CGFloat(limit.min_width) / scale,
+    window.contentMinSize = NSSize(width: CGFloat(limit.min_width) / scale + TerminalChrome.sidebarWidth,
       height: CGFloat(limit.min_height) / scale + 30)
     window.contentMaxSize = NSSize(
       width: limit.max_width == 0 ? CGFloat.greatestFiniteMagnitude
-        : max(window.contentMinSize.width, CGFloat(limit.max_width) / scale),
+        : max(window.contentMinSize.width, CGFloat(limit.max_width) / scale + TerminalChrome.sidebarWidth),
       height: limit.max_height == 0 ? CGFloat.greatestFiniteMagnitude
         : max(window.contentMinSize.height, CGFloat(limit.max_height) / scale + 30))
+  }
+}
+
+
+extension TerminalWindowController {
+  func newNamespace() { newTab(inNewNamespace: true) }
+
+  func selectNamespace(at index: Int) {
+    guard namespaces.indices.contains(index) else { return }
+    selectTab(namespaces[index].selected)
+  }
+
+  func closeNamespace() {
+    guard window?.attachedSheet == nil, !closing else { return }
+    let targets = activeNamespace.tabs
+    guard targets.allSatisfy({ confirmClose(of: $0) }) else { return }
+    for tab in targets { closeTab(tab, confirm: false) }
+  }
+
+  func editNamespace() {
+    guard let window, window.attachedSheet == nil, !closing else { return }
+    let namespace = activeNamespace
+    let alert = NSAlert()
+    alert.messageText = "Edit Namespace"
+    let fields = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 100))
+    let name = NSTextField(string: namespace.name)
+    let subtitle = NSTextField(string: namespace.subtitle)
+    for (title, field, y) in [("Name", name, CGFloat(76)), ("Subtitle", subtitle, CGFloat(26))] {
+      let label = NSTextField(labelWithString: title)
+      label.frame = NSRect(x: 0, y: y, width: 320, height: 20)
+      field.frame = NSRect(x: 0, y: y - 24, width: 320, height: 24)
+      fields.addSubview(label)
+      fields.addSubview(field)
+    }
+    alert.accessoryView = fields
+    alert.addButton(withTitle: "Save")
+    alert.addButton(withTitle: "Cancel")
+    alert.beginSheetModal(for: window) { [weak self] response in
+      guard response == .alertFirstButtonReturn, let self,
+        self.namespaces.contains(where: { $0 === namespace }) else { return }
+      let value = name.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+      if !value.isEmpty { namespace.name = value }
+      namespace.subtitle = subtitle.stringValue
+      self.refreshTabBars()
+    }
+    window.attachedSheet?.makeFirstResponder(name)
   }
 }

@@ -6,6 +6,12 @@ import VelocittyConfiguration
 
 // Search and scrolling are native controls; the engine owns matches and viewport state.
 final class TerminalChrome: NSView, NSSearchFieldDelegate {
+  static let sidebarWidth: CGFloat = 180
+  let namespaceScroll = NSScrollView()
+  let namespaceList = NamespaceListView()
+  let addNamespace = NSButton(title: "+", target: nil, action: nil)
+  let editNamespace = NSButton(title: "Edit…", target: nil, action: nil)
+  let closeNamespace = NSButton(title: "×", target: nil, action: nil)
   let progress = TerminalProgress()
   let tabScroll = NSScrollView()
   let tabButtons = NSStackView()
@@ -73,48 +79,73 @@ final class TerminalChrome: NSView, NSSearchFieldDelegate {
     scroller.scrollerStyle = NSScroller.preferredScrollerStyle
     scroller.controlSize = .small
     scroller.isContinuous = true
+    namespaceScroll.documentView = namespaceList
+    namespaceScroll.hasVerticalScroller = true
+    namespaceScroll.autohidesScrollers = true
+    namespaceScroll.drawsBackground = false
+    addSubview(namespaceScroll)
+    for (button, action, tip) in [
+      (addNamespace, #selector(createNamespace), "New Namespace"),
+      (editNamespace, #selector(editActiveNamespace), "Edit Namespace Name and Subtitle"),
+      (closeNamespace, #selector(closeActiveNamespace), "Close Namespace")
+    ] {
+      button.target = self
+      button.action = action
+      button.toolTip = tip
+      addSubview(button)
+    }
     refreshVisibility()
   }
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
   override func layout() {
     super.layout()
+    let contentWidth = max(0, bounds.width - Self.sidebarWidth)
     let policy = NativeSettings(config: terminal.config).dragHandle
     let dragging =
       policy == "always" || (policy == "auto" && window?.styleMask.contains(.titled) == false)
     dragHandle.isHidden = !dragging
-    dragHandle.frame = NSRect(x: 0, y: bounds.height - 12, width: bounds.width, height: 12)
+    dragHandle.frame = NSRect(x: 0, y: bounds.height - 12, width: contentWidth, height: 12)
     let tabTop = bounds.height - (dragging ? 12 : 0)
-    tabScroll.frame = NSRect(x: 4, y: tabTop - 30, width: max(0, bounds.width - 72), height: 30)
-    addTab.frame = NSRect(x: bounds.width - 66, y: tabTop - 28, width: 30, height: 26)
-    closeTab.frame = NSRect(x: bounds.width - 34, y: tabTop - 28, width: 30, height: 26)
+    tabScroll.frame = NSRect(x: 4, y: tabTop - 30, width: max(0, contentWidth - 72), height: 30)
+    addTab.frame = NSRect(x: contentWidth - 66, y: tabTop - 28, width: 30, height: 26)
+    closeTab.frame = NSRect(x: contentWidth - 34, y: tabTop - 28, width: 30, height: 26)
     let height: CGFloat = 30 + (searching ? 38 : 0) + (dragging ? 12 : 0)
     let width: CGFloat = showScroll && scroller.scrollerStyle == .legacy ? 14 : 0
     let searchTop = tabTop - 30
     let position = NativeSettings(config: terminal.config).resizeOverlayPosition
     let overlayX: CGFloat =
       position.hasSuffix("left")
-      ? 12 : position.hasSuffix("right") ? bounds.width - 152 : (bounds.width - 140) / 2
+      ? 12 : position.hasSuffix("right") ? contentWidth - 152 : (contentWidth - 140) / 2
     let overlayY: CGFloat =
       position.hasPrefix("top")
       ? bounds.height - height - 44
       : position.hasPrefix("bottom") ? 12 : (bounds.height - height - 32) / 2
     resizeLabel.frame = NSRect(x: overlayX, y: overlayY, width: 140, height: 32)
-    secure.frame = NSRect(x: max(8, bounds.width - 210), y: 5, width: 205, height: 18)
-    terminal.frame = NSRect(x: 0, y: 0, width: bounds.width - width, height: bounds.height - height)
+    secure.frame = NSRect(x: max(8, contentWidth - 210), y: 5, width: 205, height: 18)
+    terminal.frame = NSRect(x: 0, y: 0, width: contentWidth - width, height: bounds.height - height)
     progress.frame = NSRect(x: 0, y: terminal.frame.maxY - 2, width: terminal.frame.width, height: 2)
     scroller.frame = NSRect(
-      x: bounds.width - 14, y: 0, width: 14, height: bounds.height - height)
+      x: contentWidth - 14, y: 0, width: 14, height: bounds.height - height)
     search.frame = NSRect(
-      x: 8, y: searchTop - 31, width: max(80, bounds.width - 270), height: 24)
-    count.frame = NSRect(x: bounds.width - 250, y: searchTop - 28, width: 115, height: 20)
-    previous.frame = NSRect(x: bounds.width - 135, y: searchTop - 32, width: 32, height: 26)
-    next.frame = NSRect(x: bounds.width - 101, y: searchTop - 32, width: 32, height: 26)
-    close.frame = NSRect(x: bounds.width - 67, y: searchTop - 32, width: 60, height: 26)
+      x: 8, y: searchTop - 31, width: max(80, contentWidth - 270), height: 24)
+    count.frame = NSRect(x: contentWidth - 250, y: searchTop - 28, width: 115, height: 20)
+    previous.frame = NSRect(x: contentWidth - 135, y: searchTop - 32, width: 32, height: 26)
+    next.frame = NSRect(x: contentWidth - 101, y: searchTop - 32, width: 32, height: 26)
+    close.frame = NSRect(x: contentWidth - 67, y: searchTop - 32, width: 60, height: 26)
+    for view in subviews where view !== namespaceScroll && view !== addNamespace
+      && view !== editNamespace && view !== closeNamespace {
+      view.frame.origin.x += Self.sidebarWidth
+    }
+    namespaceScroll.frame = NSRect(x: 0, y: 34, width: Self.sidebarWidth, height: max(0, bounds.height - 34))
+    addNamespace.frame = NSRect(x: 4, y: 4, width: 30, height: 26)
+    editNamespace.frame = NSRect(x: 38, y: 4, width: 100, height: 26)
+    closeNamespace.frame = NSRect(x: 142, y: 4, width: 30, height: 26)
   }
   func refreshTabs() {
     for view in tabButtons.arrangedSubviews { tabButtons.removeArrangedSubview(view); view.removeFromSuperview() }
     guard let controller = terminal.session?.windowController else { return }
+    refreshNamespaces(controller)
     var contentWidth: CGFloat = 0
     for (index, tab) in controller.tabs.enumerated() {
       let button = NSButton(title: (tab.hasBell ? "● " : "") + tab.displayTitle, target: self, action: #selector(activateTab(_:)))
@@ -132,6 +163,38 @@ final class TerminalChrome: NSView, NSSearchFieldDelegate {
     tabButtons.frame = NSRect(origin: .zero, size: NSSize(width: contentWidth, height: 30))
     needsLayout = true
   }
+  private func refreshNamespaces(_ controller: TerminalWindowController) {
+    for view in namespaceList.subviews { view.removeFromSuperview() }
+    for (index, namespace) in controller.namespaces.enumerated() {
+      let button = NSButton(title: namespace.name, target: self, action: #selector(activateNamespace(_:)))
+      button.tag = index
+      button.setButtonType(.pushOnPushOff)
+      button.bezelStyle = .regularSquare
+      button.state = controller.activeNamespace === namespace ? .on : .off
+      button.alignment = .left
+      button.lineBreakMode = .byTruncatingTail
+      let title = NSMutableAttributedString(string: namespace.name, attributes: [
+        .font: NSFont.systemFont(ofSize: 13, weight: .medium), .foregroundColor: NSColor.labelColor])
+      if !namespace.subtitle.isEmpty {
+        title.append(NSAttributedString(string: "\n" + namespace.subtitle, attributes: [
+          .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]))
+      }
+      button.attributedTitle = title
+      button.cell?.wraps = true
+      button.toolTip = namespace.name + (namespace.subtitle.isEmpty ? "" : "\n" + namespace.subtitle)
+      button.frame = NSRect(x: 6, y: 6 + CGFloat(index) * 56, width: Self.sidebarWidth - 20, height: 50)
+      namespaceList.addSubview(button)
+    }
+    namespaceList.frame = NSRect(x: 0, y: 0, width: Self.sidebarWidth - 14,
+      height: CGFloat(controller.namespaces.count) * 56 + 12)
+  }
+  @objc private func activateNamespace(_ sender: NSButton) {
+    terminal.session?.windowController?.selectNamespace(at: sender.tag)
+  }
+  @objc private func createNamespace() { terminal.session?.windowController?.newNamespace() }
+  @objc private func editActiveNamespace() { terminal.session?.windowController?.editNamespace() }
+  @objc private func closeActiveNamespace() { terminal.session?.windowController?.closeNamespace() }
+
   @objc private func activateTab(_ sender: NSButton) {
     guard let controller = terminal.session?.windowController, controller.tabs.indices.contains(sender.tag) else { return }
     controller.selectTab(controller.tabs[sender.tag])
@@ -239,4 +302,8 @@ final class TerminalDragHandle: NSView {
       yRadius: 1.5
     ).fill()
   }
+}
+
+final class NamespaceListView: NSView {
+  override var isFlipped: Bool { true }
 }

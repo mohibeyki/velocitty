@@ -6,7 +6,7 @@ terminal engine.
 
 The goal is to manage terminal and agent sessions in a single window. Today,
 Velocitty provides tabbed terminal windows with shell integration, search,
-copy/paste, clickable links, and file-based configuration. Panes, namespaces,
+copy/paste, clickable links, and file-based configuration. Panes
 and persistent multiplexing are still ahead.
 
 ## Roadmap
@@ -25,9 +25,9 @@ rendering; herdr integration comes after those interfaces are established.
 - [ ] **Panes:** split tabs horizontally or vertically, resize dividers, move
   focus, and close individual panes. Route input, terminal resizing, and commands
   to the correct pane.
-- [ ] **Namespaces:** create, rename, and switch named groups of tabs and sessions.
-  Keep session identity separate from where it is displayed, so terminals from
-  different namespaces can appear side by side in the same window.
+- [x] **Namespaces:** named groups with optional subtitles in a left sidebar;
+  each owns its tabs and remembers its selected tab. Showing terminals from
+  different namespaces side by side waits for panes.
 - [ ] **Workspace restoration:** save namespace organization, tab order, pane
   layouts, and the active selection. Initially reopen fresh shells in saved
   directories; preserving running processes belongs to the next milestone.
@@ -69,18 +69,27 @@ or copying is needed. `macos/` contains the app; `VeloKit/` contains the engine.
 ## Tabs
 
 Use **Terminal → New Tab** (⌘T), **Close Tab** (⌘W), and the tab strip to manage
-terminals in a window. Control-Tab / Control-Shift-Tab switch tabs; ⌘1–⌘8 select
-by position and ⌘9 selects the last tab. Rename and reorder tabs from the Terminal
+terminals in a window. Control-Tab / Control-Shift-Tab switch tabs; ⌘1–⌘9 select
+by position within the current namespace. Rename and reorder tabs from the Terminal
 menu or command palette. Shortcuts follow the configured keybindings.
 
 Each tab keeps its own running shell, terminal output, and search state while
 hidden. New tabs inherit the current directory by default. Closing a tab ends
-its shell; closing the last tab closes the window. Closing a window or quitting
+its shell; closing the last tab removes its namespace. The final namespace closes
+the window. Closing a window or quitting
 checks every tab for processes that need confirmation.
 
 Tab layouts and names are not saved across launches yet. Window restoration
-currently applies to single-tab windows; multi-tab workspace restoration is a
+currently applies to windows with one namespace and one tab; multi-tab workspace restoration is a
 later milestone.
+
+## Namespaces
+
+Use the left sidebar or **Namespace** menu to create, select, edit, and close
+namespaces. Each has a customizable name and an optional subtitle. Ctrl-1–Ctrl-9
+select namespaces by position; switching returns to that namespace's selected
+tab, with its shells still running. Closing a namespace checks all its tabs
+before ending them. Names and layouts are not saved across launches yet.
 
 ## Tests
 

@@ -7025,7 +7025,7 @@ pub const Keybinds = struct {
                     .key = .{ .unicode = '9' },
                     .mods = mods,
                 },
-                .{ .last_tab = {} },
+                .{ .goto_tab = 9 },
                 .{
                     // See comment above with the numeric goto_tab
                     .performable = !builtin.target.os.tag.isDarwin(),

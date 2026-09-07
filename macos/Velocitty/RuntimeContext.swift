@@ -188,15 +188,16 @@ final class RuntimeContext: NSObject {
     case GHOSTTY_ACTION_GOTO_TAB:
       let direction = action.action.goto_tab
       perform { view, owner in
-        guard let owner else { return }
+        guard let owner, let source = view?.session ?? owner.session,
+          let namespace = owner.namespace(for: source) else { return }
         switch direction {
         case GHOSTTY_GOTO_TAB_PREVIOUS: owner.cycleTab(-1, from: view?.session)
         case GHOSTTY_GOTO_TAB_NEXT: owner.cycleTab(1, from: view?.session)
         case GHOSTTY_GOTO_TAB_LAST:
-          if let last = owner.tabs.last { owner.selectTab(last) }
+          if let last = namespace.tabs.last { owner.selectTab(last) }
         default:
           let index = Int(direction.rawValue) - 1
-          if owner.tabs.indices.contains(index) { owner.selectTab(owner.tabs[index]) }
+          if namespace.tabs.indices.contains(index) { owner.selectTab(namespace.tabs[index]) }
         }
       }
 
