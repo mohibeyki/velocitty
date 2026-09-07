@@ -6,6 +6,7 @@ import VeloKit
 struct NativeSettings {
   let config: ghostty_config_t?
 
+  var confirmClose: String { string("confirm-close-surface", "true") }
   var tabInheritsDirectory: Bool { bool("tab-inherit-working-directory", true) }
   var newTabPosition: String { string("window-new-tab-position", "current") }
   var initialWindow: Bool { bool("initial-window", true) }

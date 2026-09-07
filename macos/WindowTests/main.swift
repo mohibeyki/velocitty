@@ -433,8 +433,8 @@ do {
   precondition(runtime.context.handleAction(target: target, action: action))
   drain()
   let scale = first.window!.backingScaleFactor
-  precondition(first.window!.contentMaxSize.width == 1600 / scale + TerminalChrome.sidebarWidth)
-  precondition(first.window!.contentMinSize.height == 100 / scale + 30)
+  precondition(first.window!.contentMaxSize.width == 1600 / scale)
+  precondition(first.window!.contentMinSize.height == 100 / scale)
   action.action.size_limit.max_width = 0
   action.action.size_limit.max_height = 0
   precondition(runtime.context.handleAction(target: target, action: action))
@@ -642,170 +642,95 @@ do {
   runtime.context.owner = delegate
 }
 
-// Tabs retain independent PTYs and route background callbacks to their source.
+// Missing herdr leaves a plain terminal and rejects local multiplexing.
 do {
-  let runtime = delegate.runtime!
-  let tabSettings = try AppConfiguration.parse(Data("""
+  delegate.newLocalWindow()
+  let controller = delegate.windows.last!
+  precondition(controller.chrome?.muxEnabled == false)
+  controller.newTab()
+  precondition(controller.tabs.count == 1 && controller.namespaces.count == 1)
+  if let sheet = controller.window?.attachedSheet {
+    controller.window?.endSheet(sheet)
+    sheet.orderOut(nil)
+  }
+  controller.closing = true
+  controller.window?.close()
+}
+
+// A real isolated server verifies streaming, namespace ownership, and detach/reattach.
+if let executable = HerdrClient.discover() {
+  let client = HerdrClient(executable: executable, sessionName: "velocitty-test-" + UUID().uuidString.lowercased())
+  defer {
+    _ = try? client.run(["server", "stop"])
+    _ = try? client.run(["session", "delete", client.sessionName])
+    delegate.herdr = nil
+  }
+  let muxSettings = try AppConfiguration.parse(Data("""
   [terminal]
-  command = "/bin/sh"
-  shell_integration = "none"
   confirm_close_surface = false
-  window_save_state = "never"
   theme = ""
   """.utf8))
-  try runtime.updateConfiguration(tabSettings)
+  try delegate.runtime!.updateConfiguration(muxSettings)
+  defer { try? delegate.runtime?.updateConfiguration(settings) }
+  delegate.herdr = client
+  func waitMux(_ controller: TerminalWindowController? = nil) {
+    let deadline = Date(timeIntervalSinceNow: 10)
+    while (delegate.muxOpening || controller?.muxBusy == true) && Date() < deadline { drain() }
+    precondition(!delegate.muxOpening && controller?.muxBusy != true)
+  }
   delegate.newWindow()
+  waitMux()
   let controller = delegate.windows.last!
   let a = controller.session!
-  let aSurface = a.surface!
-  func action(_ tab: TerminalSession, _ value: String) {
-    precondition(value.withCString { velokit_surface_binding_action(tab.surface!, $0, UInt(value.utf8.count)) })
-    drain()
-  }
-  action(a, "new_tab")
+  precondition(a.herdrTerminal != nil && controller.chrome!.muxEnabled)
+  controller.newTab()
+  waitMux(controller)
   let b = controller.session!
-  precondition(controller.tabs.count == 2 && b !== a && a.surface == aSurface)
-  precondition(a.view!.window == nil && !a.view!.terminalFocused && b.view!.window === controller.window)
-  action(b, "new_tab")
+  precondition(a !== b && controller.tabs.count == 2)
+  controller.newNamespace()
+  waitMux(controller)
   let c = controller.session!
-  precondition(controller.tabs.count == 3)
-  action(c, "previous_tab")
+  precondition(controller.namespaces.count == 2 && controller.tabs.count == 1)
+  controller.selectNamespace(at: 0)
   precondition(controller.session === b)
-  action(b, "next_tab")
-  precondition(controller.session === c)
-  action(c, "next_tab")
-  precondition(controller.session === a)
-  action(a, "goto_tab:2")
-  precondition(controller.session === b)
-  action(b, "move_tab:-1")
-  precondition(controller.tabs[0] === b && controller.session === b)
-  action(b, "set_tab_title:My task")
-  precondition(b.tabTitle == "My task" && controller.window!.title == "My task")
-  action(b, "last_tab")
-  precondition(controller.session === c)
-
+  controller.selectTab(a)
   let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
   try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
   defer { try? FileManager.default.removeItem(at: directory) }
-  func send(_ tab: TerminalSession, _ value: String) {
-    value.withCString { velokit_surface_text(tab.surface!, $0, UInt(value.utf8.count)) }
-  }
-  func awaitFile(_ name: String) -> String {
-    let url = directory.appendingPathComponent(name)
-    let deadline = Date(timeIntervalSinceNow: 5)
-    while !FileManager.default.fileExists(atPath: url.path) && Date() < deadline { drain() }
-    return try! String(contentsOf: url, encoding: .utf8)
-  }
-  let prefix = "cd " + ShellInput.paths([directory.path]) + "; "
-  send(a, prefix + "TAB_VALUE=kept; echo $$ > a.pid; printf '\\033]0;Background A\\007'\n")
-  let firstPID = awaitFile("a.pid")
+  let marker = directory.appendingPathComponent("streamed")
+  drain(); drain()
+  let command = "printf VELOCITTY_HERDR_STREAM; printf ok > " + HerdrClient.quote(marker.path) + "\n"
+  command.withCString { velokit_surface_text(a.surface!, $0, UInt(command.utf8.count)) }
+  let deadline = Date(timeIntervalSinceNow: 8)
+  while !FileManager.default.fileExists(atPath: marker.path) && Date() < deadline { drain() }
+  precondition(FileManager.default.fileExists(atPath: marker.path), "Input must reach the herdr shell")
   drain()
-  precondition(a.terminalTitle == "Background A" && controller.window!.title != "Background A")
-  controller.selectTab(a)
-  precondition(controller.window!.title == "Background A" && a.surface == aSurface)
-  send(a, "printf %s \"$TAB_VALUE\" > state; echo $$ > again.pid\n")
-  precondition(awaitFile("state") == "kept" && awaitFile("again.pid") == firstPID)
-  controller.selectTab(b)
-  send(b, prefix + "echo $$ > b.pid\n")
-  precondition(awaitFile("b.pid") != firstPID)
-  controller.chrome?.startSearch("kept")
-  controller.selectTab(a)
-  precondition(controller.chrome?.searching == false)
-  controller.selectTab(b)
-  precondition(controller.chrome?.searching == true)
-  controller.chrome?.hideSearch()
-  controller.secureInput(GHOSTTY_SECURE_INPUT_ON, from: a)
-  precondition(a.passwordInput && !b.passwordInput && !controller.secureInputWanted)
-  controller.ringBell(from: a)
-  precondition(a.hasBell && !b.hasBell)
-  controller.window!.makeKeyAndOrderFront(nil)
-  app.activate(ignoringOtherApps: true)
+  precondition((a.view!.accessibilityValue() as? String)?.contains("VELOCITTY_HERDR_STREAM") == true)
+  let ids = Set(controller.allTabs.compactMap { $0.herdrTerminal?.pane.terminal_id })
+  let workspace = controller.activeNamespace.herdrID!
+  try client.rename(workspace: workspace, name: "Agents", subtitle: "Local tasks")
+  controller.window?.performClose(nil)
   drain()
-  controller.selectTab(a)
-  drain()
-  precondition(!a.hasBell, "Selecting a tab must clear its bell once focused")
-  controller.selectTab(b)
-  // Defer an exiting background shell while another tab owns a sheet.
-  let blockingSheet = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 80),
-    styleMask: [.titled], backing: .buffered, defer: false)
-  controller.window!.beginSheet(blockingSheet)
-  send(a, "exit\n")
-  drain()
-  precondition(a.surface != nil && controller.tabs.count == 3)
-  controller.window!.endSheet(blockingSheet)
-  blockingSheet.orderOut(nil)
-  let exitDeadline = Date(timeIntervalSinceNow: 5)
-  while controller.tabs.contains(where: { $0 === a }) && Date() < exitDeadline { drain() }
-  precondition(a.surface == nil && controller.tabs.count == 2 && controller.session === b)
-  action(b, "close_tab")
-  precondition(b.surface == nil && controller.tabs.count == 1 && controller.session === c)
-  action(c, "new_tab")
-  let d = controller.session!
-  action(d, "new_tab")
-  let e = controller.session!
-  action(d, "close_tab:right")
-  precondition(e.surface == nil && controller.tabs.count == 2)
-  action(d, "close_tab:other")
-  precondition(c.surface == nil && controller.tabs.count == 1 && controller.session === d)
-  action(d, "new_tab")
-  let f = controller.session!
-  let confirmSettings = try AppConfiguration.parse(Data("""
-  [terminal]
-  command = "/bin/sh"
-  shell_integration = "none"
-  confirm_close_surface = true
-  theme = ""
-  """.utf8))
-  try runtime.updateConfiguration(confirmSettings)
-  drain()
-  precondition(velokit_surface_needs_confirm_quit(d.surface!) && velokit_surface_needs_confirm_quit(f.surface!))
-  var confirmations = 0
-  let cancelSecond = Timer(timeInterval: 0.05, repeats: true) { timer in
-    guard app.modalWindow != nil else { return }
-    confirmations += 1
-    app.stopModal(withCode: confirmations == 1 ? .alertSecondButtonReturn : .alertFirstButtonReturn)
-    if confirmations == 2 { timer.invalidate() }
-  }
-  RunLoop.main.add(cancelSecond, forMode: .modalPanel)
-  controller.window!.performClose(nil)
-  cancelSecond.invalidate()
-  precondition(confirmations == 2 && controller.tabs.count == 2 && d.surface != nil && f.surface != nil)
-  try runtime.updateConfiguration(tabSettings)
-  drain()
-  controller.window!.performClose(nil)
-  drain()
-  precondition(d.surface == nil && f.surface == nil && controller.window == nil)
-  try runtime.updateConfiguration(settings)
-  drain()
-}
-
-// Namespace switching preserves sessions and scopes tab actions to their owner.
-do {
+  precondition(a.surface == nil && b.surface == nil && c.surface == nil)
+  let detached = try client.snapshot()
+  precondition(Set(detached.panes.map(\.terminal_id)) == ids)
   delegate.newWindow()
-  let controller = delegate.windows.last!
-  let first = controller.activeNamespace
-  let a = controller.session!
-  controller.newTab()
-  let b = controller.session!
-  controller.newNamespace()
-  let second = controller.activeNamespace
-  let c = controller.session!
-  second.name = "Agents"
-  second.subtitle = "Local tasks"
-  controller.refreshTabBars()
-  precondition(controller.namespaces.count == 2 && controller.tabs.count == 1)
-  controller.selectNamespace(at: 0)
-  precondition(controller.session === b && controller.tabs.count == 2)
-  controller.selectNamespace(at: 1)
-  precondition(controller.session === c && a.surface != nil && b.surface != nil)
-  controller.closeTab(b, confirm: false)
-  precondition(controller.session === c && first.selected === a && first.tabs.count == 1)
-  controller.closeTab(c, confirm: false)
-  precondition(controller.namespaces.count == 1 && controller.session === a)
-  controller.closing = true
-  controller.window?.close()
+  waitMux()
+  let restored = delegate.windows.last!
+  precondition(Set(restored.allTabs.compactMap { $0.herdrTerminal?.pane.terminal_id }) == ids)
+  precondition(restored.namespaces.contains { $0.name == "Agents" && $0.subtitle == "Local tasks" })
+  restored.selectNamespace(at: 1)
+  let exiting = restored.session!
+  drain(); drain()
+  "exit\n".withCString { velokit_surface_text(exiting.surface!, $0, 5) }
+  let exitDeadline = Date(timeIntervalSinceNow: 8)
+  while exiting.surface != nil && Date() < exitDeadline { drain() }
+  precondition(exiting.surface == nil && restored.namespaces.count == 1,
+    "A herdr shell exit must close its tab without another keypress")
+  let remaining = try client.snapshot()
+  precondition(remaining.workspaces.count == 1 && remaining.panes.count == 2)
+  restored.window?.performClose(nil)
   drain()
-  precondition(a.surface == nil)
 }
 
 if CommandLine.arguments.contains("--configuration-only") {
@@ -1356,10 +1281,16 @@ print("Window lifecycle tests passed.")
 func runRestorationCheck() -> Never {
   let application = NSApplication.shared
   application.setActivationPolicy(.regular)
-  let owner = AppDelegate()
+  let owner = AppDelegate(discoverHerdr: { nil })
   application.delegate = owner
   let saving = ProcessInfo.processInfo.environment["VELOKIT_TEST_RESTORATION"] == "write"
   DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+    for controller in owner.windows {
+      if let sheet = controller.window?.attachedSheet {
+        controller.window?.endSheet(sheet)
+        sheet.orderOut(nil)
+      }
+    }
     if saving {
       owner.newWindow()
       precondition(owner.windows.count == 2)

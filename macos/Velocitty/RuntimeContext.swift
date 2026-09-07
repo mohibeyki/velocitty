@@ -50,6 +50,14 @@ final class RuntimeContext: NSObject {
       }
     }
     switch action.tag {
+    case GHOSTTY_ACTION_SHOW_CHILD_EXITED:
+      // A successful herdr detach/terminal exit needs no extra keypress.
+      // Leave failed attachments visible so their error can still be read.
+      guard view?.session?.herdrTerminal != nil, action.action.child_exited.exit_code == 0 else { return false }
+      perform { view, owner in
+        if let tab = view?.session { owner?.requestTabClose(tab) }
+      }
+
     case GHOSTTY_ACTION_CONFIG_CHANGE:
       guard let config = action.action.config_change.config else { return false }
       // Copy before returning; dispatching this borrowed pointer would outlive it.

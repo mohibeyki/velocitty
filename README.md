@@ -7,12 +7,12 @@ terminal engine.
 The goal is to manage terminal and agent sessions in a single window. Today,
 Velocitty provides tabbed terminal windows with shell integration, search,
 copy/paste, clickable links, and file-based configuration. Panes
-and persistent multiplexing are still ahead.
+are still ahead. Local multiplexing uses herdr.
 
 ## Roadmap
 
 Planned in the order below. Velocitty owns namespaces, tabs, pane layouts, and
-rendering; herdr integration comes after those interfaces are established.
+rendering; herdr owns the running terminal sessions.
 
 - [x] **Terminal foundation:** native AppKit windows, interactive user shells,
   shell integration, search, copy/paste, clickable links, and file drops.
@@ -22,21 +22,20 @@ rendering; herdr integration comes after those interfaces are established.
   window restoration with fresh shells, and a searchable command palette.
 - [x] **Tabs:** create, close, rename, reorder, and switch tabs within a window;
   retain each terminal's state when switching and add menu/keyboard navigation.
-- [ ] **Panes:** split tabs horizontally or vertically, resize dividers, move
-  focus, and close individual panes. Route input, terminal resizing, and commands
-  to the correct pane.
 - [x] **Namespaces:** named groups with optional subtitles in a left sidebar;
   each owns its tabs and remembers its selected tab. Showing terminals from
   different namespaces side by side waits for panes.
+- [x] **Local herdr MVP:** attach individual terminals to VeloKit for input,
+  output, and resizing. Reconnect to the dedicated local session on launch;
+  require herdr for tabs and namespaces.
+- [ ] **Panes:** split tabs horizontally or vertically, resize dividers, move
+  focus, and close individual panes. Route input, terminal resizing, and commands
+  to the correct pane.
 - [ ] **Workspace restoration:** save namespace organization, tab order, pane
-  layouts, and the active selection. Initially reopen fresh shells in saved
-  directories; preserving running processes belongs to the next milestone.
-- [ ] **Local herdr integration:** connect individual sessions to VeloKit for
-  input, output, and resizing while retaining Velocitty's own navigation and UI.
-  Start with one session, then support independent streams across tabs and panes.
-- [ ] **Persistent running sessions:** detach when Velocitty quits and reconnect
-  to the same processes on relaunch. Handle connection loss, recover terminal
-  contents, and distinguish closing a view from terminating its session.
+  layouts, window placement, and active selection. Herdr already retains the
+  running terminals; complete presentation restoration remains ahead.
+- [ ] **Connection recovery:** reconnect automatically after transport failures
+  and synchronize changes made by other herdr clients.
 - [ ] **Agent status:** surface working, waiting, and completed states on the
   corresponding sessions and make it easy to jump to agents needing attention.
 - [ ] **Remote sessions:** bring sessions on other machines into the same
@@ -73,15 +72,15 @@ terminals in a window. Control-Tab / Control-Shift-Tab switch tabs; ⌘1–⌘9 
 by position within the current namespace. Rename and reorder tabs from the Terminal
 menu or command palette. Shortcuts follow the configured keybindings.
 
-Each tab keeps its own running shell, terminal output, and search state while
+Each tab attaches directly to a herdr terminal and keeps its view state while
 hidden. New tabs inherit the current directory by default. Closing a tab ends
 its shell; closing the last tab removes its namespace. The final namespace closes
-the window. Closing a window or quitting
-checks every tab for processes that need confirmation.
+the window. Closing a window or quitting detaches its views and leaves the herdr
+terminals running. Exiting a shell closes its tab automatically.
 
-Tab layouts and names are not saved across launches yet. Window restoration
-currently applies to windows with one namespace and one tab; multi-tab workspace restoration is a
-later milestone.
+Herdr retains namespaces, names, subtitles, and terminals. Relaunching attaches
+them in one window. Local tab reordering, window layout, and view state are not
+restored yet.
 
 ## Namespaces
 
@@ -89,7 +88,23 @@ Use the left sidebar or **Namespace** menu to create, select, edit, and close
 namespaces. Each has a customizable name and an optional subtitle. Ctrl-1–Ctrl-9
 select namespaces by position; switching returns to that namespace's selected
 tab, with its shells still running. Closing a namespace checks all its tabs
-before ending them. Names and layouts are not saved across launches yet.
+before ending them.
+
+## Multiplexing
+
+Install **herdr 0.8.2 or newer** to enable tabs and namespaces. Velocitty finds it
+on `PATH` or in common Homebrew, Nix, Cargo, and user-local installation paths.
+Without it, Velocitty warns and provides standalone terminal windows.
+
+Velocitty starts or reconnects to a dedicated local herdr session named
+`velocitty`. Each view runs `herdr terminal attach` for one terminal, so input,
+output, and resizing use herdr's existing client. Closing a window or quitting
+detaches; **Close Tab** and **Close Namespace** end the corresponding terminals.
+Herdr owns shell configuration and process lifetime. Windows opened with
+Velocitty's `command` or `initial_command` setting remain standalone.
+
+This MVP supports one terminal per tab. Split layouts, automatic reconnection,
+and live synchronization of changes made outside Velocitty are deferred.
 
 ## Tests
 
@@ -138,8 +153,8 @@ append/reset rules; an empty array resets that setting.
 The default theme follows macOS appearance using Rosé Pine and Rosé Pine Dawn.
 Eleven iTerm2 themes are bundled across Rosé Pine, Tokyo Night, and Catppuccin.
 The shell starts in `~/workspace`, falling back to `~` if it does not exist.
-Window restoration follows macOS preferences and starts fresh shells in saved
-directories; it does not keep processes running after the app quits.
+Standalone window restoration follows macOS preferences and starts fresh shells
+in saved directories. Herdr-backed windows reconnect to their running terminals.
 
 ## License
 

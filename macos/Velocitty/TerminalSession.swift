@@ -14,6 +14,7 @@ final class TerminalSession {
   private var appliedConfig: ghostty_config_t?
   private(set) var opacityOverride: Double?
   private var closed = false
+  var herdrTerminal: HerdrClient.Terminal?
   var initialDirectory: URL?
   var surfaceContext = GHOSTTY_SURFACE_CONTEXT_WINDOW
   var chrome: TerminalChrome?
@@ -54,6 +55,13 @@ final class TerminalSession {
     options.context = surfaceContext
     surface = (initialDirectory ?? settings.workingDirectory).path.withCString {
       options.working_directory = $0
+      if let command = herdrTerminal?.command {
+        return command.withCString {
+          options.command = $0
+          options.wait_after_command = true
+          return velokit_surface_new(app, &options)
+        }
+      }
       return velokit_surface_new(app, &options)
     }
     guard surface != nil else {

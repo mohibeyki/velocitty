@@ -7,6 +7,9 @@ import VelocittyConfiguration
 // Search and scrolling are native controls; the engine owns matches and viewport state.
 final class TerminalChrome: NSView, NSSearchFieldDelegate {
   static let sidebarWidth: CGFloat = 180
+  var muxEnabled: Bool { terminal.session?.herdrTerminal != nil }
+  var sidebarInset: CGFloat { muxEnabled ? Self.sidebarWidth : 0 }
+  var tabHeight: CGFloat { muxEnabled ? 30 : 0 }
   let namespaceScroll = NSScrollView()
   let namespaceList = NamespaceListView()
   let addNamespace = NSButton(title: "+", target: nil, action: nil)
@@ -100,7 +103,10 @@ final class TerminalChrome: NSView, NSSearchFieldDelegate {
 
   override func layout() {
     super.layout()
-    let contentWidth = max(0, bounds.width - Self.sidebarWidth)
+    let contentWidth = max(0, bounds.width - sidebarInset)
+    for view in [namespaceScroll, addNamespace, editNamespace, closeNamespace, tabScroll, addTab, closeTab] {
+      view.isHidden = !muxEnabled
+    }
     let policy = NativeSettings(config: terminal.config).dragHandle
     let dragging =
       policy == "always" || (policy == "auto" && window?.styleMask.contains(.titled) == false)
@@ -110,9 +116,9 @@ final class TerminalChrome: NSView, NSSearchFieldDelegate {
     tabScroll.frame = NSRect(x: 4, y: tabTop - 30, width: max(0, contentWidth - 72), height: 30)
     addTab.frame = NSRect(x: contentWidth - 66, y: tabTop - 28, width: 30, height: 26)
     closeTab.frame = NSRect(x: contentWidth - 34, y: tabTop - 28, width: 30, height: 26)
-    let height: CGFloat = 30 + (searching ? 38 : 0) + (dragging ? 12 : 0)
+    let height: CGFloat = tabHeight + (searching ? 38 : 0) + (dragging ? 12 : 0)
     let width: CGFloat = showScroll && scroller.scrollerStyle == .legacy ? 14 : 0
-    let searchTop = tabTop - 30
+    let searchTop = tabTop - tabHeight
     let position = NativeSettings(config: terminal.config).resizeOverlayPosition
     let overlayX: CGFloat =
       position.hasSuffix("left")
@@ -135,7 +141,7 @@ final class TerminalChrome: NSView, NSSearchFieldDelegate {
     close.frame = NSRect(x: contentWidth - 67, y: searchTop - 32, width: 60, height: 26)
     for view in subviews where view !== namespaceScroll && view !== addNamespace
       && view !== editNamespace && view !== closeNamespace {
-      view.frame.origin.x += Self.sidebarWidth
+      view.frame.origin.x += sidebarInset
     }
     namespaceScroll.frame = NSRect(x: 0, y: 34, width: Self.sidebarWidth, height: max(0, bounds.height - 34))
     addNamespace.frame = NSRect(x: 4, y: 4, width: 30, height: 26)
