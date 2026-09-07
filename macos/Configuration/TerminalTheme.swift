@@ -56,7 +56,7 @@ public enum TerminalTheme {
     let custom: URL
     if name.hasPrefix("/") || name.hasPrefix("~/") {
       custom = AppConfiguration.assetURL(
-        name, relativeTo: source, home: FileManager.default.homeDirectoryForCurrentUser)
+        name, relativeTo: source, home: config.home)
     } else {
       guard !name.contains("/") else {
         throw ConfigurationError("A theme name cannot contain a path separator.")

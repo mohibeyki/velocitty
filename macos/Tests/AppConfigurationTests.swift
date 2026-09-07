@@ -63,7 +63,7 @@ final class AppConfigurationTests: XCTestCase {
     XCTAssertEqual(try AppConfiguration.parse(Data(), home: home, source: source), defaults)
   }
 
-  func testIncludesPrecedenceAndCycles() throws {
+  func testIncludesNativeOrderAndCycles() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -73,7 +73,7 @@ final class AppConfigurationTests: XCTestCase {
     try Data("[terminal]\nconfig_file = ['colors.toml', '?absent.toml']\nfont_size = 14".utf8)
       .write(to: parent)
     let config = AppConfiguration.load(from: parent)
-    XCTAssertEqual(config.options.first { $0.key == "font-size" }?.value, "14")
+    XCTAssertEqual(config.options.filter { $0.key == "font-size" }.map(\.value), ["14", "18"])
     XCTAssertEqual(config.options.first { $0.key == "foreground" }?.source, child)
     XCTAssertFalse(config.options.contains { $0.key == "config-file" })
     try Data("[terminal]\nconfig_file = 'config.toml'".utf8).write(to: child)
@@ -83,6 +83,65 @@ final class AppConfigurationTests: XCTestCase {
     try Data("[terminal]\nconfig_file = 'absent.toml'".utf8).write(to: parent)
     XCTAssertTrue(
       AppConfiguration.load(from: parent).diagnostics.contains { $0.contains("absent.toml") })
+  }
+
+  func testIncludeQueueAndRepeatableValues() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("config.toml")
+    try Data("[terminal]\nconfig_file=['a.toml','b.toml']\nfont_family=['Menlo']".utf8).write(to: file)
+    try Data("[terminal]\nconfig_file='c.toml'\nfont_family=['Monaco']".utf8).write(to: root.appendingPathComponent("a.toml"))
+    try Data("[terminal]\nfont_family=[]".utf8).write(to: root.appendingPathComponent("b.toml"))
+    try Data("[terminal]\nfont_family=['Courier']".utf8).write(to: root.appendingPathComponent("c.toml"))
+    let config = AppConfiguration.load(from: file)
+    XCTAssertTrue(config.diagnostics.isEmpty)
+    XCTAssertEqual(config.options.map(\.value), ["Menlo", "Monaco", "", "Courier"])
+  }
+
+  func testIncludeResets() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    func write(_ name: String, _ body: String) throws {
+      try Data(("[terminal]\n" + body).utf8).write(to: root.appendingPathComponent(name))
+    }
+    try write("a.toml", "font_size=12")
+    try write("b.toml", "font_size=18")
+    try write("config.toml", "config_file=['a.toml','','b.toml','?']")
+    var loaded = AppConfiguration.load(from: root.appendingPathComponent("config.toml"))
+    XCTAssertTrue(loaded.diagnostics.isEmpty)
+    XCTAssertEqual(loaded.options.map(\.value), ["18"])
+    // A nested reset ends the pending queue but retains settings already applied.
+    try write("config.toml", "config_file=['a.toml','b.toml']")
+    try write("a.toml", "config_file=[]\nfont_size=12")
+    loaded = AppConfiguration.load(from: root.appendingPathComponent("config.toml"))
+    XCTAssertTrue(loaded.diagnostics.isEmpty)
+    XCTAssertEqual(loaded.options.map(\.value), ["12"])
+    // Like the native loader, a nested reset does not rewind the queue cursor.
+    try write("a.toml", "config_file=['','missing.toml','b.toml']\nfont_size=12")
+    loaded = AppConfiguration.load(from: root.appendingPathComponent("config.toml"))
+    XCTAssertTrue(loaded.diagnostics.isEmpty)
+    XCTAssertEqual(loaded.options.map(\.value), ["12", "18"])
+  }
+
+  func testPortableDefaultsAndInjectedThemeHome() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let color: [String: Any] = ["Red Component": 0.0, "Green Component": 0.0,
+      "Blue Component": 0.0, "Color Space": "sRGB"]
+    try PropertyListSerialization.data(fromPropertyList: ["Background Color": color,
+      "Foreground Color": color], format: .xml, options: 0)
+      .write(to: root.appendingPathComponent("home.itermcolors"))
+    let config = try AppConfiguration.parse(Data("[terminal]\ntheme='~/home.itermcolors'".utf8), home: root)
+    var diagnostics: [String] = []
+    let colors = try TerminalTheme.options(for: config, dark: true) { diagnostics.append($0) }
+    XCTAssertTrue(diagnostics.isEmpty)
+    XCTAssertEqual(colors.first { $0.key == "background" }?.value, "#000000")
+    let template = try ConfigurationTemplate.render { "\($0) = \n" }
+    XCTAssertTrue(template.contains("# working_directory = \"\""))
+    XCTAssertFalse(template.contains(FileManager.default.homeDirectoryForCurrentUser.path))
   }
 
   func testBundledThemesAndAppearance() throws {

@@ -73,7 +73,9 @@ You can use that file as your configuration and uncomment the settings you want
 to change. Choose **Velocitty → Reload Configuration** (**⌘⇧,**) after editing;
 process settings apply to the next terminal. Invalid values are reported and skipped,
 leaving defaults or earlier valid values. Unreadable or malformed files are reported
-and contribute defaults; valid settings from other included files still load.
+and contribute defaults; valid settings from other included files still load. Includes
+load after the main file, in queue order. Repeatable settings follow the engine’s
+append/reset rules; an empty array resets that setting.
 
 The default theme follows macOS appearance using Rosé Pine and Rosé Pine Dawn.
 Eleven iTerm2 themes are bundled across Rosé Pine, Tokyo Night, and Catppuccin.

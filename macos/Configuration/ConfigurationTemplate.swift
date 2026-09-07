@@ -17,7 +17,7 @@ public enum ConfigurationTemplate {
       let values: [String]
       switch key {
       case "theme": values = [TerminalTheme.defaultSelection]
-      case "working-directory": values = [AppConfiguration.defaults().workingDirectory.path]
+      case "working-directory": values = [""]
       case "config-file": values = []
       default:
         let entry = try engineEntry(key)

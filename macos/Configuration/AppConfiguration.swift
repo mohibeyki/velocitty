@@ -15,6 +15,7 @@ public struct AppConfiguration: Equatable, Sendable {
   public var diagnostics: [String] = []
   // Relative asset paths are resolved against the TOML file, not the shell.
   public let source: URL
+  public let home: URL
 
   public static func fileURL(
     environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -35,61 +36,60 @@ public struct AppConfiguration: Equatable, Sendable {
   ) -> Self {
     let workspace = home.appendingPathComponent("workspace", isDirectory: true)
     return Self(
-      workingDirectory: isDirectory(workspace) ? workspace : home, options: [], source: source)
+      workingDirectory: isDirectory(workspace) ? workspace : home, options: [], source: source, home: home)
   }
 
   public static func load(
     from url: URL = fileURL(),
     home: URL = FileManager.default.homeDirectoryForCurrentUser
   ) -> Self {
-    loadFile(url, home: home, stack: [], optional: true)
-  }
-
-  private static func loadFile(_ url: URL, home: URL, stack: [URL], optional: Bool) -> Self {
-    do { return try readFile(url, home: home, stack: stack, optional: optional) } catch {
-      var config = defaults(home: home, source: url)
-      config.diagnostics = [error.localizedDescription]
-      return config
-    }
-  }
-
-  private static func readFile(_ url: URL, home: URL, stack: [URL], optional: Bool) throws -> Self {
-    let canonical = url.standardizedFileURL.resolvingSymlinksInPath()
-    guard !stack.contains(canonical), stack.count < 64 else {
-      throw ConfigurationError(
-        "Configuration include cycle or excessive depth: \((stack + [canonical]).map(\.path).joined(separator: " → "))"
-      )
-    }
-    let data: Data
-    do { data = try Data(contentsOf: url) } catch let error as CocoaError
-      where error.code == .fileReadNoSuchFile && optional
-    {
-      return defaults(home: home, source: url)
-    } catch { throw ConfigurationError("\(url.path): \(error.localizedDescription)") }
-    let own = try parse(data, home: home, source: url)
-    var merged: [TerminalOption] = []
-    var diagnostics = own.diagnostics
-    for option in own.options where option.key == "config-file" && !option.value.isEmpty {
-      let isOptional = option.value.hasPrefix("?")
-      let path = isOptional ? String(option.value.dropFirst()) : option.value
-      let child = assetURL(path, relativeTo: url, home: home)
-      let included = loadFile(
-        child, home: home, stack: stack + [canonical], optional: isOptional)
-      diagnostics += included.diagnostics
-      let keys = Set(included.options.map(\.key))
-      merged.removeAll { keys.contains($0.key) }
-      merged += included.options
-    }
-    let ownValues = own.options.filter { $0.key != "config-file" }
-    let keys = Set(ownValues.map(\.key))
-    merged.removeAll { keys.contains($0.key) }
-    merged += ownValues
-    let directory =
-      merged.last { $0.key == "working-directory" }.map {
-        URL(fileURLWithPath: $0.value, isDirectory: true)
+    // Match the native loader: apply this file, then includes in queue order.
+    // Nested includes join the end of the queue; a file is loaded only once.
+    var pending: [(URL, Bool, Int)] = []
+    var loaded: Set<URL> = []
+    var options: [TerminalOption] = []
+    var diagnostics: [String] = []
+    var index = -1
+    while index < pending.count {
+      let (file, optional, depth) = index < 0 ? (url, true, 0) : pending[index]
+      defer { index += 1 }
+      let canonical = file.standardizedFileURL.resolvingSymlinksInPath()
+      guard loaded.insert(canonical).inserted, depth < 64 else {
+        diagnostics.append("\(file.path): Configuration include cycle or excessive depth.")
+        continue
       }
+      do {
+        let data: Data
+        do { data = try Data(contentsOf: file) }
+        catch let error as CocoaError where error.code == .fileReadNoSuchFile && optional { continue }
+        let own = try parse(data, home: home, source: file)
+        diagnostics += own.diagnostics
+        for option in own.options {
+          if option.key == "config-file" {
+            guard !option.value.isEmpty else {
+              // The native loader mutates the include list without rewinding its cursor.
+              pending.removeAll()
+              continue
+            }
+            let optional = option.value.hasPrefix("?")
+            let path = optional ? String(option.value.dropFirst()) : option.value
+            guard !path.isEmpty else { continue }
+            pending.append((assetURL(path, relativeTo: file, home: home), optional, depth + 1))
+          } else {
+            // Preserve repeated entries and resets for each setting's native parser.
+            options.append(option)
+          }
+        }
+      } catch {
+        let detail = error.localizedDescription
+        diagnostics.append(detail.hasPrefix(file.path) ? detail : "\(file.path): \(detail)")
+      }
+    }
+    let directory = options.last { $0.key == "working-directory" }
+      .map { URL(fileURLWithPath: $0.value, isDirectory: true) }
       ?? defaults(home: home).workingDirectory
-    return Self(workingDirectory: directory, options: merged, diagnostics: diagnostics, source: url)
+    return Self(workingDirectory: directory, options: options, diagnostics: diagnostics,
+      source: url, home: home)
   }
 
   static func assetURL(_ path: String, relativeTo source: URL, home: URL) -> URL {
@@ -189,7 +189,7 @@ public struct AppConfiguration: Equatable, Sendable {
       }
       return Self(
         workingDirectory: directory.standardizedFileURL, options: options,
-        diagnostics: diagnostics, source: source)
+        diagnostics: diagnostics, source: source, home: home)
     } catch let error as DecodingError {
       let detail: String
       switch error {
