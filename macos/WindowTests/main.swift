@@ -494,6 +494,61 @@ do {
   precondition(TerminalView.droppedText(from: pasteboard) == nil)
 }
 
+// AppKit restores each window's own metadata; ordinary new windows still cascade.
+do {
+  let runtime = delegate.runtime!
+  let positioned = try AppConfiguration.parse(Data("""
+  [terminal]
+  theme = ""
+  command = "/bin/sh"
+  shell_integration = "none"
+  confirm_close_surface = false
+  window_save_state = "always"
+  window_position_x = 80
+  window_position_y = 70
+  """.utf8))
+  try runtime.updateConfiguration(positioned)
+  delegate.newWindow()
+  let placed = delegate.windows.last!
+  drain()
+  let visible = placed.window!.screen!.visibleFrame
+  precondition(abs(placed.window!.frame.minX - visible.minX - 80) < 1)
+  precondition(abs(placed.window!.frame.maxY - visible.maxY + 70) < 1)
+  precondition(!placed.window!.isRestorable, "Custom commands must not be replayed by restoration")
+  let savedTitle = first.windowTitleOverride
+  first.windowTitleOverride = "First restored terminal"
+  second.windowTitleOverride = "Second restored terminal"
+  for original in [first, second] {
+    let coder = NSKeyedArchiver(requiringSecureCoding: true)
+    original.window(original.window!, willEncodeRestorableState: coder)
+    coder.finishEncoding()
+    let decoder = try NSKeyedUnarchiver(forReadingFrom: coder.encodedData)
+    decoder.requiresSecureCoding = true
+    decoder.decodingFailurePolicy = .setErrorAndReturn
+    var restored: NSWindow?
+    TerminalWindowRestoration.restoreWindow(withIdentifier: TerminalWindowRestoration.identifier,
+      state: decoder) { window, error in
+        precondition(error == nil)
+        restored = window
+      }
+    guard let restored, let controller = delegate.windows.first(where: { $0.window === restored }) else {
+      fatalError("Window metadata did not restore")
+    }
+    precondition(restored.title == original.windowTitleOverride)
+    precondition(controller.currentDirectory == original.currentDirectory)
+    controller.closing = true
+    restored.close()
+  }
+  first.windowTitleOverride = savedTitle
+  second.windowTitleOverride = nil
+  first.setTitle(first.terminalTitle)
+  second.setTitle(second.terminalTitle)
+  placed.closing = true
+  placed.window?.close()
+  try runtime.updateConfiguration(settings)
+  drain()
+}
+
 if CommandLine.arguments.contains("--configuration-only") {
   delegate.terminating = true
   for controller in delegate.windows {

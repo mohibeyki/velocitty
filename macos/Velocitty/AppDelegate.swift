@@ -31,6 +31,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   }
   var native: NativeSettings { NativeSettings(config: runtime?.config) }
 
+  func applicationWillFinishLaunching(_ notification: Notification) {
+    do {
+      runtime = try TerminalRuntime(settings: AppConfiguration.load())
+      updateRestorationPolicy()
+    } catch { NSLog("Could not prepare window restoration: %@", error.localizedDescription) }
+  }
+
   func applicationDidFinishLaunching(_ notification: Notification) {
     // Load the bundled artwork directly so the running Dock tile doesn't
     // depend on Launch Services resolving an icon for a development build.
@@ -56,7 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     let runtime: TerminalRuntime
     do {
-      runtime = try TerminalRuntime(settings: AppConfiguration.load())
+      runtime = try self.runtime ?? TerminalRuntime(settings: AppConfiguration.load())
     } catch {
       configurationAlert(error).runModal()
       if !pendingFiles.isEmpty { NSApp.reply(toOpenOrPrint: .failure) }
@@ -68,7 +75,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     shortcuts = GlobalShortcuts(owner: self)
     shortcuts?.reload()
     updateMenuShortcuts()
-    if native.initialWindow { newWindow() }
+    updateRestorationPolicy()
+    if native.initialWindow && windows.isEmpty { newWindow() }
     if !pendingFiles.isEmpty {
       NSApp.reply(toOpenOrPrint: insertFiles(pendingFiles) ? .success : .failure)
       pendingFiles.removeAll()
@@ -216,7 +224,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     } catch { NSLog("Appearance update failed: %@", error.localizedDescription) }
   }
 
+  func updateRestorationPolicy() {
+    switch native.windowSaveState {
+    case "always": UserDefaults.standard.set(true, forKey: "NSQuitAlwaysKeepsWindows")
+    case "never": UserDefaults.standard.set(false, forKey: "NSQuitAlwaysKeepsWindows")
+    default: UserDefaults.standard.removeObject(forKey: "NSQuitAlwaysKeepsWindows")
+    }
+  }
+
+  func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
+
   func configurationDidChange() {
+    updateRestorationPolicy()
     for controller in windows {
       controller.applyWindowSettings()
       controller.updateSecureInput()
@@ -270,9 +289,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
   func updateFullscreenPresentation() {
     let controller = NSApp.isActive ? windows.first { $0.window?.isKeyWindow == true && !$0.closing } : nil
-    let mode = controller?.native.nonNativeFullscreen
+    let mode = controller?.fullscreenMode
     fullscreenPresentation.update(controller?.normalFrame != nil
-      ? (mode == "visible-menu" || controller?.native.fullscreen == "non-native-visible-menu"
+      ? (mode == "visible-menu"
         ? [.autoHideDock] : [.autoHideDock, .autoHideMenuBar]) : nil)
   }
 
@@ -457,6 +476,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
   var hasResized = false
   var normalFrame: NSRect?
   var normalStyle: NSWindow.StyleMask?
+  var fullscreenMode: String?
   var titleAccessory: NSTitlebarAccessoryViewController?
   var titleLabel: NSTextField?
   var currentDirectory: String?
@@ -473,7 +493,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
   var chrome: TerminalChrome?
   var native: NativeSettings { NativeSettings(config: session?.config) }
 
-  func openWindow(cascadingFrom previousWindow: NSWindow? = nil) {
+  func openWindow(cascadingFrom previousWindow: NSWindow? = nil, restoring: Bool = false) {
     if let window {
       window.makeKeyAndOrderFront(nil)
       return
@@ -483,7 +503,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
       contentRect: NSRect(x: 0, y: 0, width: 960, height: 640),
       styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false
     )
-    currentDirectory = session.settings.workingDirectory.path
+    currentDirectory = (session.initialDirectory ?? session.settings.workingDirectory).path
     terminalTitle = "Velocitty"
     windowTitleOverride = nil
     hasBell = false
@@ -491,6 +511,8 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     window.isReleasedWhenClosed = false
     window.tabbingMode = .disallowed
     window.delegate = self
+    window.identifier = TerminalWindowRestoration.identifier
+    window.restorationClass = TerminalWindowRestoration.self
     let chrome = TerminalChrome(terminalView)
     self.chrome = chrome
     window.contentView = chrome
@@ -507,27 +529,25 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
       }
     }
     window.center()
-    if shouldSaveState { _ = window.setFrameUsingName("TerminalWindow") }
     let x = native.windowPositionX
     let y = native.windowPositionY
-    if x != Int16.min || y != Int16.min, let screen = window.screen {
+    let fixedPosition = x != Int16.min && y != Int16.min
+    if !restoring, fixedPosition, let screen = window.screen {
       let frame = screen.visibleFrame
       window.setFrameOrigin(
         NSPoint(
           x: x == Int16.min ? window.frame.minX : frame.minX + CGFloat(x),
           y: y == Int16.min ? window.frame.minY : frame.maxY - window.frame.height - CGFloat(y)))
     }
-    if let previousWindow {
+    if !restoring, !fixedPosition, let previousWindow {
       // AppKit keeps the cascade on screen when it reaches a display edge.
       _ = window.cascadeTopLeft(from: NSPoint(
         x: previousWindow.frame.minX + 24, y: previousWindow.frame.maxY - 24))
     }
     window.makeKeyAndOrderFront(nil)
     window.makeFirstResponder(terminalView)
-    if native.maximize { window.zoom(nil) }
-    if native.fullscreen != "false"
-      || (shouldSaveState && UserDefaults.standard.bool(forKey: "TerminalFullscreen"))
-    {
+    if !restoring && native.maximize { window.zoom(nil) }
+    if !restoring && native.fullscreen != "false" {
       toggleFullscreen()
     }
     NSApp.activate(ignoringOtherApps: true)
@@ -542,6 +562,8 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
 
   func applyWindowSettings() {
     guard let window else { return }
+    window.isRestorable = shouldSaveState && session?.hasCustomCommand != true
+    window.invalidateRestorableState()
     chrome?.refreshVisibility()
     if !native.progressStyle { clearProgress() }
     // Detach before changing styles; borderless windows have no titlebar controller.
@@ -628,14 +650,6 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
   func windowShouldClose(_ sender: NSWindow) -> Bool { closing || confirmClose() }
 
   func windowWillClose(_ notification: Notification) {
-    if shouldSaveState {
-      if window?.styleMask.contains(.fullScreen) != true && normalFrame == nil {
-        window?.saveFrame(usingName: "TerminalWindow")
-      }
-      UserDefaults.standard.set(
-        (window?.styleMask.contains(.fullScreen) == true || normalFrame != nil),
-        forKey: "TerminalFullscreen")
-    }
     passwordInput = false
     manualSecureInput = false
     readonly = false
@@ -648,6 +662,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     palette = nil
     normalFrame = nil
     normalStyle = nil
+    fullscreenMode = nil
     owner?.updateFullscreenPresentation()
     resizeTimer?.invalidate()
     owner?.windowClosed(self)
@@ -658,6 +673,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     let displayed = (hasBell && native.bellFeatures & 8 != 0 ? "● " : "") + (windowTitleOverride ?? title)
     window?.title = displayed
     titleLabel?.stringValue = displayed
+    window?.invalidateRestorableState()
   }
 
   func promptTitle(_ mode: ghostty_action_prompt_title_e) {
@@ -679,6 +695,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
   }
   func setDirectory(_ path: String) {
     currentDirectory = path
+    window?.invalidateRestorableState()
     if native.windowSubtitle == "working-directory" { window?.subtitle = path }
     window?.representedURL =
       native.titlebarProxyIcon == "visible" ? URL(fileURLWithPath: path) : nil
@@ -694,15 +711,17 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     window.setContentSize(size)
   }
 
-  func toggleFullscreen() {
+  func toggleFullscreen(modeOverride: String? = nil) {
     guard let window else { return }
-    let mode = native.fullscreen == "non-native-visible-menu" ? "visible-menu"
-      : native.fullscreen == "non-native-padded-notch" ? "padded-notch" : native.nonNativeFullscreen
+    let mode = modeOverride ?? (native.fullscreen == "non-native-visible-menu" ? "visible-menu"
+      : native.fullscreen == "non-native-padded-notch" ? "padded-notch" : native.nonNativeFullscreen)
     if let frame = normalFrame {
       window.styleMask = normalStyle ?? [.titled, .closable, .miniaturizable, .resizable]
       window.setFrame(frame, display: true)
       normalFrame = nil
       normalStyle = nil
+      fullscreenMode = nil
+      window.invalidateRestorableState()
       owner?.updateFullscreenPresentation()
       applyWindowSettings()
       window.makeFirstResponder(session?.view)
@@ -713,7 +732,8 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
       window.toggleFullScreen(nil)
       return
     }
-    if shouldSaveState { window.saveFrame(usingName: "TerminalWindow") }
+    fullscreenMode = mode == "false" ? "true" : mode
+    window.invalidateRestorableState()
     normalFrame = window.frame
     normalStyle = window.styleMask
     window.styleMask = [.borderless]
@@ -741,9 +761,6 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
       withTimeInterval: max(0.01, native.resizeOverlayDuration), repeats: false
     ) { [weak chrome] _ in chrome?.resizeLabel.isHidden = true }
   }
-  func windowWillEnterFullScreen(_ notification: Notification) {
-    if shouldSaveState { window?.saveFrame(usingName: "TerminalWindow") }
-  }
   func windowDidEnterFullScreen(_ notification: Notification) { applyBackground() }
   func windowDidExitFullScreen(_ notification: Notification) { applyBackground() }
 
@@ -753,7 +770,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     }
   }
   func windowDidEndLiveResize(_ notification: Notification) {
-    if shouldSaveState { window?.saveFrame(usingName: "TerminalWindow") }
+    window?.invalidateRestorableState()
   }
 
   @objc func showCommands() {
