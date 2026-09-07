@@ -441,6 +441,44 @@ do {
   drain()
 }
 
+// Secure Input balances only successful calls, including failed release retries.
+do {
+  let input = SecureInputOwner()
+  var acquisitions = 0
+  var releases = 0
+  var failAcquire = true
+  var failRelease = true
+  input.acquire = { acquisitions += 1; return failAcquire ? -1 : 0 }
+  input.release = { releases += 1; return failRelease ? -1 : 0 }
+  input.update(wanted: true)
+  precondition(!input.enabled)
+  input.update(wanted: false)
+  precondition(releases == 0)
+  failAcquire = false
+  input.update(wanted: true)
+  input.update(wanted: true)
+  precondition(input.enabled && acquisitions == 2)
+  input.update(wanted: false)
+  precondition(input.enabled)
+  failRelease = false
+  input.update(wanted: false)
+  precondition(!input.enabled && releases == 2)
+
+  let firstProgress = TerminalProgress()
+  let secondProgress = TerminalProgress()
+  var report = ghostty_action_progress_report_s()
+  report.state = GHOSTTY_PROGRESS_STATE_SET
+  report.progress = 42
+  firstProgress.update(report)
+  report.state = GHOSTTY_PROGRESS_STATE_PAUSE
+  report.progress = -1
+  secondProgress.update(report)
+  firstProgress.clear()
+  precondition(firstProgress.isHidden && !secondProgress.isHidden)
+  precondition(secondProgress.report?.state == GHOSTTY_PROGRESS_STATE_PAUSE)
+  secondProgress.clear()
+}
+
 if CommandLine.arguments.contains("--configuration-only") {
   delegate.terminating = true
   for controller in delegate.windows {

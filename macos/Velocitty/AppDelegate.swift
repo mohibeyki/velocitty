@@ -7,6 +7,8 @@ import VeloKit
 import VelocittyConfiguration
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
+  let secureInputOwner = SecureInputOwner()
+  let fullscreenPresentation = FullscreenPresentation()
   var windows: [TerminalWindowController] = []
   weak var focusedWindow: TerminalWindowController?
   var runtime: TerminalRuntime? {
@@ -266,7 +268,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   @objc func findNext() { activeWindow?.findNext() }
   @objc func findPrevious() { activeWindow?.findPrevious() }
 
+  func updateFullscreenPresentation() {
+    let controller = NSApp.isActive ? windows.first { $0.window?.isKeyWindow == true && !$0.closing } : nil
+    let mode = controller?.native.nonNativeFullscreen
+    fullscreenPresentation.update(controller?.normalFrame != nil
+      ? (mode == "visible-menu" || controller?.native.fullscreen == "non-native-visible-menu"
+        ? [.autoHideDock] : [.autoHideDock, .autoHideMenuBar]) : nil)
+  }
+
   func applicationDidBecomeActive(_ notification: Notification) {
+    updateFullscreenPresentation()
     for controller in windows {
       controller.updateSecureInput()
     }
@@ -274,6 +285,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   }
 
   func applicationDidResignActive(_ notification: Notification) {
+    fullscreenPresentation.update(nil)
     for controller in windows {
       controller.updateSecureInput(forceOff: true)
     }
@@ -451,14 +463,13 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
   var palette: CommandPalette?
   var passwordInput = false
   var manualSecureInput = false
-  var secureInputEnabled = false
+  var secureInputWanted = false
+  var secureInputEnabled: Bool { secureInputWanted && owner?.secureInputOwner.enabled == true }
   var bellSound: NSSound?
   var terminalTitle = "Velocitty"
   var windowTitleOverride: String?
   var hasBell = false
   var readonly = false
-  var progressTimer: Timer?
-  var progressAnimationTimer: Timer?
   var chrome: TerminalChrome?
   var native: NativeSettings { NativeSettings(config: session?.config) }
 
@@ -532,6 +543,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
   func applyWindowSettings() {
     guard let window else { return }
     chrome?.refreshVisibility()
+    if !native.progressStyle { clearProgress() }
     // Detach before changing styles; borderless windows have no titlebar controller.
     if let titleAccessory {
       if let index = window.titlebarAccessoryViewControllers.firstIndex(of: titleAccessory) {
@@ -541,7 +553,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
       titleLabel = nil
     }
     let titlebar = native.titlebarStyle
-    if native.windowDecoration == "none" || titlebar == "hidden" {
+    if normalFrame != nil || native.windowDecoration == "none" || titlebar == "hidden" {
       window.styleMask.remove(.titled)
     } else {
       window.styleMask.insert(.titled)
@@ -636,7 +648,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     palette = nil
     normalFrame = nil
     normalStyle = nil
-    if NSApp.keyWindow == nil { NSApp.presentationOptions = [] }
+    owner?.updateFullscreenPresentation()
     resizeTimer?.invalidate()
     owner?.windowClosed(self)
   }
@@ -684,30 +696,35 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
 
   func toggleFullscreen() {
     guard let window else { return }
-    let mode = native.nonNativeFullscreen
+    let mode = native.fullscreen == "non-native-visible-menu" ? "visible-menu"
+      : native.fullscreen == "non-native-padded-notch" ? "padded-notch" : native.nonNativeFullscreen
     if let frame = normalFrame {
       window.styleMask = normalStyle ?? [.titled, .closable, .miniaturizable, .resizable]
       window.setFrame(frame, display: true)
       normalFrame = nil
       normalStyle = nil
-      NSApp.presentationOptions = []
+      owner?.updateFullscreenPresentation()
+      applyWindowSettings()
+      window.makeFirstResponder(session?.view)
       return
     }
-    guard mode != "false" || native.fullscreen == "non-native" else {
+    guard !window.styleMask.contains(.fullScreen),
+      mode != "false" || native.fullscreen.hasPrefix("non-native") else {
       window.toggleFullScreen(nil)
       return
     }
     if shouldSaveState { window.saveFrame(usingName: "TerminalWindow") }
     normalFrame = window.frame
     normalStyle = window.styleMask
-    window.styleMask = [.borderless, .resizable]
+    window.styleMask = [.borderless]
     if let screen = window.screen {
       var frame = mode == "visible-menu" ? screen.visibleFrame : screen.frame
       if mode == "padded-notch" { frame.size.height -= screen.safeAreaInsets.top }
       window.setFrame(frame, display: true)
     }
-    NSApp.presentationOptions =
-      mode == "visible-menu" ? [.autoHideDock] : [.autoHideDock, .autoHideMenuBar]
+    owner?.updateFullscreenPresentation()
+    window.makeFirstResponder(session?.view)
+    applyBackground()
   }
   func windowDidResize(_ notification: Notification) {
     defer { hasResized = true }
@@ -832,50 +849,13 @@ extension TerminalWindowController {
     }
   }
 
-  func clearProgress() {
-    progressTimer?.invalidate()
-    progressTimer = nil
-    progressAnimationTimer?.invalidate()
-    progressAnimationTimer = nil
-    NSApp.dockTile.contentView = nil
-    NSApp.dockTile.badgeLabel = nil
-    NSApp.dockTile.display()
-  }
+  func clearProgress() { chrome?.progress.clear() }
 
   func showProgress(_ report: ghostty_action_progress_report_s) {
-    guard native.progressStyle, report.state != GHOSTTY_PROGRESS_STATE_REMOVE else {
-      clearProgress()
-      return
-    }
-    let tile = NSApp.dockTile
-    let container = NSView(frame: NSRect(origin: .zero, size: tile.size))
-    let icon = NSImageView(frame: container.bounds)
-    icon.image = NSApp.applicationIconImage
-    container.addSubview(icon)
-    let progress = NSProgressIndicator(
-      frame: NSRect(x: 10, y: 7, width: max(20, tile.size.width - 20), height: 12))
-    progress.style = .bar
-    progress.isIndeterminate = report.state == GHOSTTY_PROGRESS_STATE_INDETERMINATE
-    progress.minValue = 0
-    progress.maxValue = 100
-    progress.doubleValue = Double(max(0, report.progress))
-    container.addSubview(progress)
-    if progress.isIndeterminate { progress.startAnimation(nil) }
-    progressAnimationTimer?.invalidate()
-    progressAnimationTimer =
-      progress.isIndeterminate
-      ? Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { _ in NSApp.dockTile.display()
-      } : nil
-    tile.contentView = container
-    tile.badgeLabel =
-      report.state == GHOSTTY_PROGRESS_STATE_ERROR
-      ? "!" : report.state == GHOSTTY_PROGRESS_STATE_PAUSE ? "Ⅱ" : nil
-    tile.display()
-    progressTimer?.invalidate()
-    progressTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: false) { [weak self] _ in
-      self?.clearProgress()
-    }
+    if native.progressStyle { chrome?.progress.update(report) }
+    else { clearProgress() }
   }
+
 }
 
 extension TerminalWindowController {
@@ -888,16 +868,10 @@ extension TerminalWindowController {
     updateSecureInput()
   }
   func updateSecureInput(forceOff: Bool = false) {
-    let wanted =
-      !forceOff && NSApp.isActive && window?.isKeyWindow == true
-      && (manualSecureInput || (passwordInput && native.autoSecureInput))
-    if wanted != secureInputEnabled {
-      if wanted {
-        secureInputEnabled = EnableSecureEventInput() == noErr
-      } else if DisableSecureEventInput() == noErr {
-        secureInputEnabled = false
-      }
-    }
+    secureInputWanted = !forceOff && NSApp.isActive && window?.isKeyWindow == true
+      && (manualSecureInput || (passwordInput && native.autoSecureInput
+        && session?.view?.terminalFocused == true))
+    owner?.secureInputOwner.update(wanted: owner?.windows.contains { $0.secureInputWanted } == true)
     var indicators: [String] = []
     if readonly { indicators.append("Read Only") }
     if secureInputEnabled && native.secureInputIndication {
@@ -906,12 +880,14 @@ extension TerminalWindowController {
     chrome?.secure.stringValue = indicators.joined(separator: " · ")
   }
   func windowDidBecomeKey(_ notification: Notification) {
+    owner?.updateFullscreenPresentation()
     applyBackground()
     owner?.windowFocused(self)
     updateSecureInput()
     session?.view?.updateFocus()
   }
   func windowDidResignKey(_ notification: Notification) {
+    DispatchQueue.main.async { [weak self] in self?.owner?.updateFullscreenPresentation() }
     updateSecureInput(forceOff: true)
     session?.view?.updateFocus()
   }

@@ -13,7 +13,7 @@ final class TerminalView: NSView, NSTextInputClient {
   var tracking: NSTrackingArea?
   var keyInProgress: NSEvent?
   var keyHandled = false
-  private var terminalFocused = false
+  private(set) var terminalFocused = false
   var linkURL: String?
   var pointer: NSCursor = .iBeam
   var config: ghostty_config_t? { surface == nil ? nil : session?.config }
@@ -152,6 +152,7 @@ final class TerminalView: NSView, NSTextInputClient {
       && window?.attachedSheet == nil && (firstResponder ?? (window?.firstResponder === self))
     if focused && !terminalFocused { session?.windowController?.clearBell() }
     terminalFocused = focused
+    session?.windowController?.updateSecureInput(forceOff: forceOff)
     velokit_surface_set_focus(surface, focused)
   }
 

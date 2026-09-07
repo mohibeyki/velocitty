@@ -6,6 +6,7 @@ import VelocittyConfiguration
 
 // Search and scrolling are native controls; the engine owns matches and viewport state.
 final class TerminalChrome: NSView, NSSearchFieldDelegate {
+  let progress = TerminalProgress()
   let terminal: TerminalView
   let search = NSSearchField()
   let dragHandle = TerminalDragHandle()
@@ -27,7 +28,7 @@ final class TerminalChrome: NSView, NSSearchFieldDelegate {
     self.terminal = terminal
     super.init(frame: terminal.frame)
     addSubview(terminal)
-    for view in [search, count, previous, next, close, scroller, secure, resizeLabel, dragHandle] {
+    for view in [search, count, previous, next, close, scroller, secure, resizeLabel, dragHandle, progress] {
       addSubview(view)
     }
     resizeLabel.isHidden = true
@@ -78,6 +79,7 @@ final class TerminalChrome: NSView, NSSearchFieldDelegate {
     resizeLabel.frame = NSRect(x: overlayX, y: overlayY, width: 140, height: 32)
     secure.frame = NSRect(x: max(8, bounds.width - 210), y: 5, width: 205, height: 18)
     terminal.frame = NSRect(x: 0, y: 0, width: bounds.width - width, height: bounds.height - height)
+    progress.frame = NSRect(x: 0, y: terminal.frame.maxY - 2, width: terminal.frame.width, height: 2)
     scroller.frame = NSRect(
       x: bounds.width - 14, y: 0, width: 14, height: bounds.height - height)
     search.frame = NSRect(
