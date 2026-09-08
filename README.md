@@ -6,8 +6,8 @@ terminal engine.
 
 The goal is to manage terminal and agent sessions in a single window. Today,
 Velocitty provides tabbed terminal windows with shell integration, search,
-copy/paste, clickable links, and file-based configuration. Panes
-are still ahead. Local multiplexing uses herdr.
+copy/paste, clickable links, split panes, and file-based configuration. Local
+multiplexing uses herdr.
 
 ## Roadmap
 
@@ -22,22 +22,24 @@ rendering; herdr owns the running terminal sessions.
   window restoration with fresh shells, and a searchable command palette.
 - [x] **Tabs:** create, close, rename, reorder, and switch tabs within a window;
   retain each terminal's state when switching and add menu/keyboard navigation.
-- [x] **Namespaces:** named groups with optional subtitles in a left sidebar;
+- [x] **Namespaces:** named groups in a compact left sidebar;
   each owns its tabs and remembers its selected tab. Showing terminals from
-  different namespaces side by side waits for panes.
+  different namespaces side by side remains a later workspace feature.
 - [x] **Local herdr MVP:** attach individual terminals to VeloKit for input,
   output, and resizing. Reconnect to the dedicated local session on launch;
   require herdr for tabs and namespaces.
-- [ ] **Panes:** split tabs horizontally or vertically, resize dividers, move
-  focus, and close individual panes. Route input, terminal resizing, and commands
-  to the correct pane.
+- [x] **Pane MVP:** split tabs horizontally or vertically, move focus, resize
+  through menu/keyboard controls, and close individual panes. Restore herdr
+  split layouts and route input to the focused pane.
+- [ ] **Pane polish:** draggable dividers, zoom, equalization, and refined styling.
 - [ ] **Workspace restoration:** save namespace organization, tab order, pane
   layouts, window placement, and active selection. Herdr already retains the
   running terminals; complete presentation restoration remains ahead.
 - [ ] **Connection recovery:** reconnect automatically after transport failures
   and synchronize changes made by other herdr clients.
-- [ ] **Agent status:** surface working, waiting, and completed states on the
-  corresponding sessions and make it easy to jump to agents needing attention.
+- [x] **Agent status:** compact icons show herdr’s working, waiting, idle, and
+  completed states; click an icon to focus its pane. Border appearance is reloadable.
+- [ ] **Workspace search:** a centered title-bar search field for tabs and namespaces.
 - [ ] **Remote sessions:** bring sessions on other machines into the same
   namespace/tab/pane interface, with reconnect behavior and clear host identity.
 
@@ -68,13 +70,13 @@ or copying is needed. `macos/` contains the app; `VeloKit/` contains the engine.
 ## Tabs
 
 Use **Terminal → New Tab** (⌘T), **Close Tab** (⌘W), and the tab strip to manage
-terminals in a window. Control-Tab / Control-Shift-Tab switch tabs; ⌘1–⌘9 select
+terminals in a window. ⌘[ / ⌘] switch tabs; ⌘1–⌘9 select
 by position within the current namespace. Rename and reorder tabs from the Terminal
 menu or command palette. Shortcuts follow the configured keybindings.
 
 Each tab attaches directly to a herdr terminal and keeps its view state while
 hidden. New tabs inherit the current directory by default. Closing a tab ends
-its shell; closing the last tab removes its namespace. The final namespace closes
+all its panes; closing the last tab removes its namespace. The final namespace closes
 the window. Closing a window or quitting detaches its views and leaves the herdr
 terminals running. Exiting a shell closes its tab automatically.
 
@@ -82,11 +84,24 @@ Herdr retains namespaces, names, subtitles, and terminals. Relaunching attaches
 them in one window. Local tab reordering, window layout, and view state are not
 restored yet.
 
+## Panes
+
+Use **Terminal → Split Vertically** (`Ctrl-\`) for side-by-side terminals or
+**Split Horizontally** (`Ctrl-minus`) for stacked terminals. Splits can be nested.
+Click a pane to focus it, or use Ctrl-H/J/K/L for left/down/up/right. These
+keys pass through to the terminal when there is only one pane. The focused pane has an accent outline. Resize Pane menu commands
+adjust the split, with Ctrl-Shift-arrow shortcuts; divider dragging is deferred.
+
+Ctrl-Shift-W closes the focused pane. ⌘W closes every pane in the current tab.
+Closing or exiting the last pane closes its tab. Herdr retains split layouts
+and running terminals when the window closes or the app quits.
+
 ## Namespaces
 
-Use the left sidebar or **Namespace** menu to create, select, edit, and close
-namespaces. Each has a customizable name and an optional subtitle. Ctrl-1–Ctrl-9
-select namespaces by position; switching returns to that namespace's selected
+Use the left sidebar or **Namespace** menu to create, select, rename, and close
+namespaces. Ctrl-R renames the current namespace. Ctrl-1–Ctrl-9
+select namespaces by position. Ctrl-T creates a namespace, Ctrl-W closes it,
+and Ctrl-[ / Ctrl-] switch namespaces. Switching returns to that namespace's selected
 tab, with its shells still running. Closing a namespace checks all its tabs
 before ending them.
 
@@ -103,8 +118,8 @@ detaches; **Close Tab** and **Close Namespace** end the corresponding terminals.
 Herdr owns shell configuration and process lifetime. Windows opened with
 Velocitty's `command` or `initial_command` setting remain standalone.
 
-This MVP supports one terminal per tab. Split layouts, automatic reconnection,
-and live synchronization of changes made outside Velocitty are deferred.
+Automatic reconnection and live synchronization of changes made outside
+Velocitty are deferred.
 
 ## Tests
 
@@ -127,7 +142,7 @@ configuration tests on pushes and pull requests.
 
 Edit `~/.config/velocitty/config.toml` (or
 `$XDG_CONFIG_HOME/velocitty/config.toml` when that variable is an absolute path).
-Settings belong under `[terminal]`:
+Terminal settings belong under `[terminal]`:
 
 ```toml
 [terminal]
@@ -155,6 +170,17 @@ Eleven iTerm2 themes are bundled across Rosé Pine, Tokyo Night, and Catppuccin.
 The shell starts in `~/workspace`, falling back to `~` if it does not exist.
 Standalone window restoration follows macOS preferences and starts fresh shells
 in saved directories. Herdr-backed windows reconnect to their running terminals.
+
+Agent indicators use herdr’s reported identity and state. Appearance lives in the
+`[interface]` table of `config.toml`; the default-config export includes every
+option. Adjust icon size, border width, per-state colors/styles, and animation
+duration, then use **Reload Configuration** (⌘⇧,). No rebuild is needed.
+The interface `theme` (`dark`, `light`, or `auto`) is independent of the terminal
+palette. Its `chrome_background_color`, `chrome_foreground_color`,
+`chrome_selected_color`, and `chrome_border_color` control the shared window,
+tab appearance. The namespace sidebar uses the native macOS material and
+selection color; its divider can be dragged, and the sidebar toggle switches to a narrow numbered namespace column. Ctrl-R renames the namespace; namespace and tab
+actions are also available in the command palette. Each tab has its own close button.
 
 ## License
 
