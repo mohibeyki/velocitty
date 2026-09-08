@@ -334,8 +334,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   }
 
   func present() {
-    let tab = controller?.activeTab
-    let visible = tab.map { $0.zoomed ? [$0.selected] : $0.panes } ?? []
+    let visible = controller?.visiblePanes ?? []
     let wanted = visible.compactMap(\.chrome)
     for view in panes.subviews where view is TerminalChrome && !wanted.contains(where: { $0 === view }) { view.removeFromSuperview() }
     for view in wanted where view.superview !== panes { panes.addSubview(view) }
@@ -382,7 +381,16 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     addTab.frame = NSRect(x: width - 34, y: height - 28, width: 30, height: 26)
     namespaceScroll.frame = sidebar.bounds
     panes.frame = NSRect(x: 0, y: 0, width: width, height: max(0, height - tabHeight))
-    guard let tab = controller?.activeTab else { return }
+    guard let controller else { return }
+    if !paneDividers.contains(where: \.dragging) {
+      paneDividers.forEach { $0.removeFromSuperview() }; paneDividers = []
+    }
+    for (position, tab) in controller.presentedTabs.enumerated() {
+      var region = panes.bounds
+      if controller.presentedTabs.count == 2 {
+        let split = region.width * controller.companionRatio
+        region = position == 0 ? NSRect(x: 0, y: 0, width: split - 3, height: region.height) : NSRect(x: split + 3, y: 0, width: region.width - split - 3, height: region.height)
+      }
     let completeLayout = tab.layout.map { layout in
       layout.area.width > 0 && layout.area.height > 0 && tab.panes.allSatisfy { pane in
         layout.panes.contains { $0.pane_id == pane.herdrTerminal?.pane.pane_id && $0.rect.width > 0 && $0.rect.height > 0 }
@@ -390,27 +398,40 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     } ?? false
     for (index, pane) in tab.panes.enumerated() {
       // A missing snapshot must never stack interactive terminals on top of one another.
-      var frame = NSRect(x: CGFloat(index) * panes.bounds.width / CGFloat(tab.panes.count), y: 0,
-        width: panes.bounds.width / CGFloat(tab.panes.count), height: panes.bounds.height)
+      var frame = NSRect(x: CGFloat(index) * region.width / CGFloat(tab.panes.count), y: 0,
+        width: region.width / CGFloat(tab.panes.count), height: region.height)
       if completeLayout, let layout = tab.layout, tab.panes.count > 1,
         let rect = layout.panes.first(where: { $0.pane_id == pane.herdrTerminal?.pane.pane_id })?.rect {
-        let sx = panes.bounds.width / max(1, CGFloat(layout.area.width))
-        let sy = panes.bounds.height / max(1, CGFloat(layout.area.height))
+        let sx = region.width / max(1, CGFloat(layout.area.width))
+        let sy = region.height / max(1, CGFloat(layout.area.height))
         frame = NSRect(x: CGFloat(rect.x - layout.area.x) * sx,
-          y: panes.bounds.height - CGFloat(rect.y - layout.area.y + rect.height) * sy,
+          y: region.height - CGFloat(rect.y - layout.area.y + rect.height) * sy,
           width: CGFloat(rect.width) * sx, height: CGFloat(rect.height) * sy).insetBy(dx: 2, dy: 2)
       }
-      if tab.zoomed { frame = panes.bounds }
+      if tab.zoomed { frame = NSRect(origin: .zero, size: region.size) }
+      frame.origin.x += region.minX
+      frame.origin.y += region.minY
       pane.chrome?.frame = frame
     }
-    layoutDividers(tab)
+    layoutDividers(tab, region: region)
+    }
+    if controller.presentedTabs.count == 2, !paneDividers.contains(where: \.dragging) {
+      let divider = PaneDivider()
+      divider.vertical = true; divider.container = panes.bounds; divider.ratio = controller.companionRatio
+      divider.frame = NSRect(x: panes.bounds.width * controller.companionRatio - 3, y: 0, width: 6, height: panes.bounds.height)
+      divider.onCommit = { [weak self] ratio in
+        guard let self, let controller = self.controller else { return }
+        controller.companionRatio = ratio
+        self.needsLayout = true
+        controller.owner?.scheduleWorkspaceSave(controller)
+      }
+      panes.addSubview(divider); paneDividers.append(divider)
+    }
     needsDisplay = true
   }
 
-  private func layoutDividers(_ tab: TerminalTab) {
+  private func layoutDividers(_ tab: TerminalTab, region: NSRect) {
     guard !paneDividers.contains(where: \.dragging) else { return }
-    paneDividers.forEach { $0.removeFromSuperview() }
-    paneDividers = []
     guard !tab.zoomed, let root = tab.layoutTree, tab.treeLayout == tab.layout, let tabID = tab.herdrID else { return }
     func visit(_ node: HerdrClient.LayoutNode, frame: NSRect, path: [Bool]) {
       guard let first = node.first, let second = node.second, let direction = node.direction else { return }
@@ -442,12 +463,12 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
       visit(first, frame: firstFrame, path: path + [false])
       visit(second, frame: secondFrame, path: path + [true])
     }
-    visit(root, frame: panes.bounds, path: [])
+    visit(root, frame: region, path: [])
   }
 
   override func draw(_ dirtyRect: NSRect) {
     super.draw(dirtyRect)
-    guard let controller, controller.activeTab.panes.count > 1, let chrome = controller.session?.chrome else { return }
+    guard let controller, controller.visiblePanes.count > 1, let chrome = controller.session?.chrome else { return }
     NSColor.controlAccentColor.setStroke()
     let path = NSBezierPath(rect: convert(chrome.bounds, from: chrome).insetBy(dx: -1, dy: -1))
     path.lineWidth = 2

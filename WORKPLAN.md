@@ -6,7 +6,7 @@ Each step ends with focused validation and a local commit. Consult a subagent fo
 
 - [x] 1. Connection recovery: retain pane identity/layout, distinguish shell exit from attachment failure, retry with backoff, expose retry state. Validate isolated attachment interruption, real exit, cancellation, no duplicate attachments.
 - [x] 2. Pane controls: draggable dividers, zoom, equalization, all split directions, styling. Validate nested splits, minimum sizes, selection and restoration.
-- [ ] 3. Rearrangement: move tabs across namespaces and panes across tabs, enable mixed-namespace presentation where ownership remains clear. Validate IDs/process lifetime and persistence.
+- [x] 3. Rearrangement: move tabs across namespaces and panes across tabs, enable mixed-namespace presentation where ownership remains clear. Validate IDs/process lifetime and persistence.
 - [x] 4. Workspace search: centered search, keyboard navigation across namespaces/tabs/agents, waiting-agent discovery. Validate dynamic result updates and focus.
 - [ ] 5. Deferred settings: implement applicable Ghostty pane/window behavior, retain deliberate exclusions. Validate defaults, reload, export and invalid values.
 - [x] 6. Settings GUI: native editor backed by existing TOML, preserve unknown settings/comments, validation and reload. Validate round-trip and external edits.
@@ -30,3 +30,5 @@ Progress:
 - Remote validation prerequisite confirmed: laptop192.168.1.12 SSH batch login succeeds; host key verified against local public host key using a temporary known-hosts file.
 
 - Step 7 remote transport validated against herdr 0.9 over laptop SSH: real keyboard input, scoped IDs, two servers in one window, and tunnel reconnect pass. Uses herdr machine catalog; reconnects saved enabled endpoints. Installed herdr remains unchanged. Remote Git queries execute over SSH.
+
+- Step 3 presentation validated: existing tabs from different servers can appear alongside one another, with local focus and outer divider, preserved terminal IDs and saved composition. Startup preserves offline companions and remote window ownership.

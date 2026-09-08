@@ -102,7 +102,7 @@ final class TerminalChrome: NSView, NSSearchFieldDelegate {
     dim.frame = terminal.frame
     let native = NativeSettings(config: terminal.config)
     let owner = terminal.session?.windowController
-    dim.isHidden = owner?.session === terminal.session || (owner?.activeTab.panes.count ?? 0) < 2
+    dim.isHidden = owner?.session === terminal.session || (owner?.visiblePanes.count ?? 0) < 2
     dim.layer?.backgroundColor = native.unfocusedFill.cgColor
     dim.alphaValue = max(0, min(1, 1 - native.unfocusedOpacity))
     progress.frame = NSRect(x: 0, y: terminal.frame.maxY - 2, width: terminal.frame.width, height: 2)

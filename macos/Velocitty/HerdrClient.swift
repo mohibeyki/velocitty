@@ -564,11 +564,11 @@ final class HerdrClient {
     environment.sorted { $0.key < $1.key }.flatMap { ["--env", "\($0.key)=\($0.value)"] }
   }
 
-  func create(workspace: String?, name: String, directory: String, environment: [String: String] = [:]) throws -> Snapshot {
+  func create(workspace: String?, name: String, directory: String?, environment: [String: String] = [:]) throws -> Snapshot {
     if let workspace {
-      _ = try request(["tab", "create", "--workspace", workspace, "--cwd", directory, "--no-focus"] + Self.environmentArguments(environment))
+      _ = try request(["tab", "create", "--workspace", workspace, "--no-focus"] + (directory.map { ["--cwd", $0] } ?? []) + Self.environmentArguments(environment))
     } else {
-      _ = try request(["workspace", "create", "--label", name, "--cwd", directory, "--no-focus"] + Self.environmentArguments(environment))
+      _ = try request(["workspace", "create", "--label", name, "--no-focus"] + (directory.map { ["--cwd", $0] } ?? []) + Self.environmentArguments(environment))
     }
     return try snapshot()
   }

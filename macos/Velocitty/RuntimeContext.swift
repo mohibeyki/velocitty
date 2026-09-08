@@ -234,7 +234,7 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_GOTO_SPLIT:
       guard let pane = view?.session, let controller = pane.windowController,
-        (controller.tab(for: pane)?.panes.count ?? 0) > 1 else { return false }
+        controller.visiblePanes.count > 1 else { return false }
       let directions = ["previous", "next", "up", "left", "down", "right"]
       let index = Int(action.action.goto_split.rawValue)
       guard directions.indices.contains(index) else { return false }

@@ -33,6 +33,10 @@ public struct WorkspaceState: Codable, Equatable, Sendable {
     public var id: String
     public var namespaceIDs: [String]
     public var selectedNamespaceID: String?
+    public var companionTabID: String?
+    public var primaryTabID: String?
+    public var companionRatio: Double?
+    public var focusedTerminalID: String?
     public var frame: Frame?
     public var sidebar: Sidebar?
     public init(id: String, namespaceIDs: [String], selectedNamespaceID: String?, frame: Frame?, sidebar: Sidebar?) {
