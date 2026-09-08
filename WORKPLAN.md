@@ -9,7 +9,7 @@ Each step ends with focused validation and a local commit. Consult a subagent fo
 - [ ] 3. Rearrangement: move tabs across namespaces and panes across tabs, enable mixed-namespace presentation where ownership remains clear. Validate IDs/process lifetime and persistence.
 - [x] 4. Workspace search: centered search, keyboard navigation across namespaces/tabs/agents, waiting-agent discovery. Validate dynamic result updates and focus.
 - [ ] 5. Deferred settings: implement applicable Ghostty pane/window behavior, retain deliberate exclusions. Validate defaults, reload, export and invalid values.
-- [ ] 6. Settings GUI: native editor backed by existing TOML, preserve unknown settings/comments, validation and reload. Validate round-trip and external edits.
+- [x] 6. Settings GUI: native editor backed by existing TOML, preserve unknown settings/comments, validation and reload. Validate round-trip and external edits.
 - [ ] 7. Remote support: use herdr 0.9 multi-server facilities, explicit server identity, config/UI, reconnect and persistence. Validate via laptop IP with isolated sessions; no changes to existing work sessions.
 - [ ] 8. Agent polish and integration: consistent status presentation, stale-state handling, navigation. Run focused end-to-end checks, update README roadmap, remove this temporary work plan, commit final docs.
 
@@ -25,3 +25,6 @@ Progress:
 - Step 4 validated: native centered search and Cmd-P, live results across windows, and selection into the existing pane passed the focused GUI test.
 
 - Step 5 pane/window settings validated: 27 configuration tests and focused GUI checks passed, including live font-size inheritance. Close undo/redo and Dock drop policy remain separate work within this step.
+
+- Step 6 validated: 28 configuration tests (including lossless source edits and conflict refusal), native settings window check, and final build passed. GUI retains raw TOML, supports included source files, and protects unsaved drafts on close/quit.
+- Remote validation prerequisite confirmed: laptop192.168.1.12 SSH batch login succeeds; host key verified against local public host key using a temporary known-hosts file.

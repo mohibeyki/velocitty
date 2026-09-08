@@ -306,20 +306,7 @@ final class RuntimeContext: NSObject {
       }
 
     case GHOSTTY_ACTION_OPEN_CONFIG:
-      perform { view, owner in
-        guard let source = (NSApp.delegate as? AppDelegate)?.runtime?.settings.source else {
-          return
-        }
-        ConfigurationEditor().open(source) { error in
-          guard let error else { return }
-          DispatchQueue.main.async {
-            let alert = NSAlert()
-            alert.messageText = "Could not open configuration"
-            alert.informativeText = error.localizedDescription
-            alert.runModal()
-          }
-        }
-      }
+      perform { _, owner in owner?.owner?.showSettings() }
 
     case GHOSTTY_ACTION_FLOAT_WINDOW:
       let level = action.action.float_window

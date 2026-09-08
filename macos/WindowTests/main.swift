@@ -1541,6 +1541,11 @@ func runWorkspacePersistenceCheck() throws {
   let detachedID = extraRestored.session!.herdrTerminal!.pane.terminal_id
   extraRestored.movePaneToNewTab(); wait(third, extraRestored)
   precondition(extraRestored.activeTab.panes.count == 1 && extraRestored.session!.herdrTerminal!.pane.terminal_id == detachedID)
+  let settingsUI = try SettingsWindow(appOwner: third)
+  settingsUI.showWindow(nil)
+  settingsUI.window?.contentView?.layoutSubtreeIfNeeded()
+  precondition(settingsUI.window?.isVisible == true)
+  settingsUI.window?.close()
   extraRestored.showWorkspaceSearch()
   let searchPanel = extraRestored.palette!
   precondition(searchPanel.entries.count == third.windows.flatMap(\.allPanes).count)

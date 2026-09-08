@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   let secureInputOwner = SecureInputOwner()
   let fullscreenPresentation = FullscreenPresentation()
   var windows: [TerminalWindowController] = []
+  private var settingsWindow: SettingsWindow?
   // Test sessions do not read or overwrite the user's workspace file.
   var workspaceStateURL: URL?
   private var workspaceStore: WorkspaceStateStore?
@@ -206,6 +207,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   }
 
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    guard settingsWindow?.confirmQuit() != false else { return .terminateCancel }
     // Confirm every terminal before closing any, so cancelling Quit preserves all windows.
     let closingWindows = windows
     for controller in closingWindows where !controller.confirmClose() { return .terminateCancel }
@@ -365,6 +367,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
   }
 
+  @objc func showSettings() {
+    do {
+      if settingsWindow == nil { settingsWindow = try SettingsWindow(appOwner: self) }
+      settingsWindow?.showWindow(nil)
+      settingsWindow?.window?.makeKeyAndOrderFront(nil)
+    } catch { showMuxError(error) }
+  }
   @objc func searchWorkspace() { activeWindow?.showWorkspaceSearch() }
   @objc func showCommands() { activeWindow?.showCommands() }
   @objc func findTerminal() { activeWindow?.findTerminal() }
@@ -411,6 +420,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
       keyEquivalent: "")
     aboutItem.target = self
     appMenu.addItem(.separator())
+    appMenu.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",").target = self
     let reloadItem = appMenu.addItem(
       withTitle: "Reload Configuration",
       action: #selector(reloadConfiguration(_:)),

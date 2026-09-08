@@ -11,6 +11,8 @@ public struct TerminalOption: Equatable, Sendable {
 
 public struct AppConfiguration: Equatable, Sendable {
   public var interface: [String: String] = [:]
+  public var sourceFiles: [URL] = []
+  public var interfaceSources: [String: URL] = [:]
   public let workingDirectory: URL
   public let options: [TerminalOption]
   public var diagnostics: [String] = []
@@ -48,6 +50,8 @@ public struct AppConfiguration: Equatable, Sendable {
     // Nested includes join the end of the queue; a file is loaded only once.
     var pending: [(URL, Bool, Int)] = []
     var loaded: Set<URL> = []
+    var sourceFiles: [URL] = []
+    var interfaceSources: [String: URL] = [:]
     var interface: [String: String] = [:]
     var options: [TerminalOption] = []
     var diagnostics: [String] = []
@@ -64,7 +68,9 @@ public struct AppConfiguration: Equatable, Sendable {
         let data: Data
         do { data = try Data(contentsOf: file) }
         catch let error as CocoaError where error.code == .fileReadNoSuchFile && optional { loaded.remove(canonical); continue }
+        sourceFiles.append(file)
         let own = try parse(data, home: home, source: file)
+        for key in own.interface.keys { interfaceSources[key] = file }
         interface.merge(own.interface) { _, new in new }
         diagnostics += own.diagnostics
         for option in own.options {
@@ -91,7 +97,7 @@ public struct AppConfiguration: Equatable, Sendable {
     let directory = options.last { $0.key == "working-directory" }
       .map { URL(fileURLWithPath: $0.value, isDirectory: true) }
       ?? defaults(home: home).workingDirectory
-    return Self(interface: interface, workingDirectory: directory, options: options, diagnostics: diagnostics,
+    return Self(interface: interface, sourceFiles: sourceFiles, interfaceSources: interfaceSources, workingDirectory: directory, options: options, diagnostics: diagnostics,
       source: url, home: home)
   }
 
