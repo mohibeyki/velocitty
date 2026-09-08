@@ -17,6 +17,10 @@ let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 app.finishLaunching()
 pumpEvents(until: Date(timeIntervalSinceNow: 0.2))
+if CommandLine.arguments.contains("--remote-check") {
+  try runRemoteCheck()
+  exit(0)
+}
 if CommandLine.arguments.contains("--workspace-persistence") {
   try runWorkspacePersistenceCheck()
   exit(0)
@@ -727,7 +731,7 @@ if let executable = HerdrClient.discover() {
   defer { try? FileManager.default.removeItem(at: directory) }
   let marker = directory.appendingPathComponent("streamed")
   drain(); drain()
-  let command = "printf VELOCITTY_HERDR_STREAM; printf ok > " + HerdrClient.quote(marker.path) + "\n"
+  let command = "printf VELOCITTY_HERDR_STREAM; printf ok > " + HerdrClient.quote(marker.path) + "\r"
   command.withCString { velokit_surface_text(a.surface!, $0, UInt(command.utf8.count)) }
   let deadline = Date(timeIntervalSinceNow: 8)
   while !FileManager.default.fileExists(atPath: marker.path) && Date() < deadline { drain() }
@@ -1592,4 +1596,74 @@ func runHerdrControlCheck() throws {
   Thread.sleep(forTimeInterval: 0.4)
   precondition(!FileManager.default.fileExists(atPath: descendant.path), "Timeout must also terminate request descendants")
   print("Herdr control tests passed.")
+}
+
+// Opt-in integration check: an isolated herdr 0.9 server reached through SSH.
+func runRemoteCheck() throws {
+  let env = ProcessInfo.processInfo.environment
+  guard let executablePath = env["VELO_TEST_HERDR"], let host = env["VELO_TEST_SSH_HOST"], let knownHosts = env["VELO_TEST_KNOWN_HOSTS"] else { fatalError("Remote check requires explicit executable, host, and known-hosts file") }
+  let root = URL(fileURLWithPath: "/tmp/velo-remote-" + String(UUID().uuidString.prefix(8)))
+  try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+  let config = root.appendingPathComponent("herdr.toml")
+  try Data("[terminal]\ndefault_shell='/bin/zsh'\n".utf8).write(to: config)
+  let previous = env["HERDR_CONFIG_PATH"]
+  setenv("HERDR_CONFIG_PATH", config.path, 1)
+  defer { if let previous { setenv("HERDR_CONFIG_PATH", previous, 1) } else { unsetenv("HERDR_CONFIG_PATH") }; try? FileManager.default.removeItem(at: root) }
+  let executable = URL(fileURLWithPath: executablePath)
+  let server = HerdrClient(executable: executable, sessionName: "vt-" + UUID().uuidString.lowercased())
+  defer { _ = try? server.run(["server", "stop"]); _ = try? server.run(["session", "delete", server.sessionName]) }
+  _ = try server.connect(directory: root)
+  let raw = try server.create(workspace: nil, name: "SSH test", directory: root.path, environment: [:])
+  let machine = HerdrClient.Machine(id: UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(), label: "Laptop test", target: host, session: server.sessionName, enabled: true)
+  let remote = HerdrClient(executable: executable, machine: machine,
+    sshOptions: ["-o", "UserKnownHostsFile=" + knownHosts, "-o", "StrictHostKeyChecking=yes"], remoteExecutable: executablePath,
+    remoteEnvironment: ["HERDR_CONFIG_PATH": config.path])
+  defer { remote.disconnectTransport() }
+  let scoped = try remote.snapshot()
+  precondition(Set(scoped.panes.map(\.terminal_id)) == Set(raw.panes.map { remote.qualify($0.terminal_id) }))
+  let settings = try AppConfiguration.parse(Data("[terminal]\nconfirm_close_surface=false\ntheme=''\n".utf8))
+  let owner = AppDelegate()
+  owner.runtime = try TerminalRuntime(settings: settings)
+  let local = HerdrClient(executable: executable, sessionName: "vt-" + UUID().uuidString.lowercased())
+  defer { _ = try? local.run(["server", "stop"]); _ = try? local.run(["session", "delete", local.sessionName]) }
+  owner.herdr = local
+  owner.openHerdrWindow(using: local)
+  func wait() {
+    let deadline = Date(timeIntervalSinceNow: 15)
+    while owner.muxOpening && Date() < deadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.02)) }
+    precondition(!owner.muxOpening)
+  }
+  wait()
+  let window = owner.windows[0]
+  let localPane = window.session!
+  owner.connectEndpoint(remote); wait()
+  let remotePane = window.allPanes.first { $0.herdrTerminal?.client === remote }!
+  precondition(window.allPanes.contains { $0 === localPane })
+  owner.synchronizeHerdr(try remote.snapshot(), client: remote)
+  owner.synchronizeHerdr(try local.snapshot(), client: local)
+  precondition(window.allPanes.contains { $0 === localPane } && window.allPanes.contains { $0 === remotePane })
+  pumpEvents(until: Date(timeIntervalSinceNow: 0.5))
+  let marker = root.appendingPathComponent("ssh-input")
+  let command = "printf remote-ok > " + HerdrClient.quote(marker.path)
+  command.withCString { velokit_surface_text(remotePane.surface!, $0, UInt(command.utf8.count)) }
+  var enter = ghostty_input_key_s()
+  enter.action = GHOSTTY_ACTION_PRESS
+  enter.keycode = 36
+  _ = velokit_surface_key(remotePane.surface!, enter)
+  let deadline = Date(timeIntervalSinceNow: 5)
+  while !FileManager.default.fileExists(atPath: marker.path) && Date() < deadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.02)) }
+  if !FileManager.default.fileExists(atPath: marker.path) {
+    var capture = velokit_accessibility_s()
+    if velokit_surface_read_accessibility(remotePane.surface!, &capture) {
+      if let text = capture.text { FileHandle.standardError.write(Data(String(cString: text).utf8)) }
+      velokit_free_accessibility(&capture)
+    }
+    throw ConfigurationError("SSH attachment did not deliver input. Command: " + remotePane.herdrTerminal!.command)
+  }
+  remote.disconnectTransport()
+  let reconnected = try remote.snapshot()
+  owner.synchronizeHerdr(reconnected, client: remote)
+  precondition(window.allPanes.contains { $0 === remotePane }, "Reconnect must preserve the terminal view")
+  for controller in Array(owner.windows) { controller.window?.performClose(nil) }
+  print("Remote transport tests passed.")
 }

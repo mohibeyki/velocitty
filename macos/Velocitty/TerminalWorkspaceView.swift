@@ -48,6 +48,8 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   private var paneTitles: [String: String] = [:]
   private var paneDirectories: [String: String] = [:]
   private var branches: [String: String] = [:]
+  private var remoteBranches: [String: String] = [:]
+  private var remoteBranchChecks: [String: TimeInterval] = [:]
   private var pollingBranches = false
   private var branchPaths: Set<String> = []
   private var branchesCheckedAt = -Double.infinity
@@ -160,36 +162,60 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     guard now - lastAgentPoll >= (client.eventsConnected ? 10 : 2) else { return }
     lastAgentPoll = now
     pollingAgents = true
-    client.perform({ try $0.statusSnapshot() }) { [weak self] result in
-      guard let self else { return }
-      self.pollingAgents = false
-      switch result {
-      case .success(let snapshot):
-        guard self.controller?.closing == false, self.controller?.owner?.terminating != true else { return }
-        if let client = self.controller?.session?.herdrTerminal?.client { self.controller?.owner?.synchronizeHerdr(snapshot, client: client) }
-        self.updateAgents(snapshot)
-        self.applyPolledLayouts(snapshot)
-      case .failure:
-        let stale = self.agents.mapValues { Agent(name: $0.name, status: "unknown") }
-        if stale != self.agents { self.agents = stale; self.refreshTabs() }
+    let clients = controller.allPanes.compactMap { $0.herdrTerminal?.client }.reduce(into: [String: HerdrClient]()) { $0[$1.endpointID] = $1 }.values
+    var remaining = clients.count
+    for client in clients {
+      client.perform({ try $0.statusSnapshot() }) { [weak self, weak client] result in
+        guard let self, let client else { return }
+        remaining -= 1
+        if remaining == 0 { self.pollingAgents = false }
+        switch result {
+        case .success(let snapshot):
+          guard self.controller?.closing == false, self.controller?.owner?.terminating != true else { return }
+          self.controller?.owner?.synchronizeHerdr(snapshot, client: client)
+          self.updateAgents(snapshot)
+          self.applyPolledLayouts(snapshot)
+        case .failure:
+          let stale = self.agents.mapValues { $0 }
+          for (id, agent) in stale where client.owns(id) { self.agents[id] = Agent(name: agent.name, status: "unknown") }
+          self.refreshTabs()
+        }
       }
     }
   }
 
   func updateAgents(_ snapshot: HerdrClient.Snapshot) {
-    var updated: [String: Agent] = [:]
+    let belongs: (String) -> Bool = { id in
+      guard let endpoint = snapshot.endpointID, endpoint != "local" else { return !id.contains("::") }
+      return id.hasPrefix(endpoint + "::")
+    }
+    var updated = agents.filter { !belongs($0.key) }
     for pane in snapshot.panes {
       guard let name = [pane.display_agent, pane.agent].compactMap({ $0 })
         .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { continue }
       updated[pane.pane_id] = Agent(name: name, status: pane.agent_status ?? "unknown")
     }
-    var titles: [String: String] = [:]
-    var directories: [String: String] = [:]
+    var titles = paneTitles.filter { !belongs($0.key) }
+    var directories = paneDirectories.filter { !belongs($0.key) }
     for pane in snapshot.panes {
       titles[pane.pane_id] = pane.terminal_title_stripped ?? pane.terminal_title
       directories[pane.pane_id] = pane.foreground_cwd ?? pane.cwd
     }
     pollBranches(directories: directories)
+    for namespace in controller?.namespaces ?? [] {
+      guard let terminal = namespace.selected.selected.herdrTerminal, terminal.client.machine != nil else { continue }
+      let path = directories[terminal.pane.pane_id] ?? directory(for: namespace)
+      let key = terminal.client.endpointID + "::" + path
+      let now = ProcessInfo.processInfo.systemUptime
+      guard now - (remoteBranchChecks[key] ?? -Double.infinity) >= 60 else { continue }
+      remoteBranchChecks[key] = now
+      terminal.client.perform({ try $0.gitBranch(directory: path) }) { [weak self] result in
+        guard let self else { return }
+        if case .success(let branch) = result { self.remoteBranches[key] = branch }
+        else { self.remoteBranches[key] = nil }
+        if let controller = self.controller { self.refreshNamespaces(controller) }
+      }
+    }
     guard updated != agents || titles != paneTitles || directories != paneDirectories else { return }
     let previousTitles = controller?.tabs.map { title(for: $0) }
     paneTitles = titles
@@ -197,6 +223,14 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     agents = updated
     if previousTitles != controller?.tabs.map({ title(for: $0) }) { refreshTabs() }
     else if let controller { refreshNamespaces(controller) }
+  }
+
+  private func branch(for namespace: TerminalNamespace) -> String? {
+    let path = directory(for: namespace)
+    if let client = namespace.selected.selected.herdrTerminal?.client, client.machine != nil {
+      return remoteBranches[client.endpointID + "::" + path]
+    }
+    return branches[path]
   }
 
   private func directory(for namespace: TerminalNamespace) -> String {
@@ -207,7 +241,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
 
   private func pollBranches(directories: [String: String]) {
     guard !pollingBranches, let controller else { return }
-    let paths = Set(controller.namespaces.map { namespace in
+    let paths = Set(controller.namespaces.filter { $0.selected.selected.herdrTerminal?.client.machine == nil }.map { namespace in
       directories[namespace.selected.selected.herdrTerminal?.pane.pane_id ?? ""] ?? directory(for: namespace)
     })
     let now = ProcessInfo.processInfo.systemUptime
@@ -521,7 +555,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
     if sidebarCompact { return 34 }
     guard let namespace = namespace(for: item) else { return 34 }
-    let hasBranch = branches[directory(for: namespace)] != nil
+    let hasBranch = branch(for: namespace) != nil
     let hasAgents = namespace.tabs.flatMap(\.panes).contains { agent(for: $0) != nil }
     return 50 + (hasBranch ? 18 : 0) + (hasAgents ? metric("agent_icon_size") + 8 : 0)
   }
@@ -537,7 +571,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     title.translatesAutoresizingMaskIntoConstraints = false
     cell.addSubview(title)
     cell.textField = title
-    cell.toolTip = namespace.name
+    cell.toolTip = namespace.name + " — " + (namespace.selected.selected.herdrTerminal?.client.endpointLabel ?? "Local")
     let members = namespace.tabs.flatMap(\.panes).filter { agent(for: $0) != nil }
     NSLayoutConstraint.activate([
       title.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
@@ -565,11 +599,12 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
       ])
     }
     var detailTop: CGFloat = 27
-    if let branch = branches[cwd] {
+    if let branch = branch(for: namespace) {
       detail(branch, top: detailTop)
       detailTop += 18
     }
-    detail(displayDirectory, top: detailTop, tooltip: cwd)
+    let host = namespace.selected.selected.herdrTerminal?.client.machine?.label
+    detail(host.map { $0 + ": " + displayDirectory } ?? displayDirectory, top: detailTop, tooltip: cwd)
     guard !members.isEmpty else { return cell }
     let size = metric("agent_icon_size")
     let statusScroll = NSScrollView()

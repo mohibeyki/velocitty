@@ -6,6 +6,25 @@ import VelocittyConfiguration
 // Control requests use the CLI; interactive I/O uses herdr's direct attach client.
 // All control work runs off the main thread and is serialized per app instance.
 final class HerdrClient {
+  struct Machine: Codable {
+    let id: String
+    let label: String
+    let target: String
+    let session: String
+    let enabled: Bool
+  }
+  var endpointID: String { machine.map { "ssh:" + $0.id } ?? "local" }
+  var endpointLabel: String { machine?.label ?? "Local" }
+  func owns(_ id: String) -> Bool { machine == nil ? !id.contains("::") : id.hasPrefix(endpointID + "::") }
+  func qualify(_ id: String) -> String { machine == nil || id.isEmpty ? id : endpointID + "::" + id }
+  private func raw(_ id: String) -> String { let prefix = endpointID + "::"; return id.hasPrefix(prefix) ? String(id.dropFirst(prefix.count)) : id }
+  private func mapIDs(_ value: Any, incoming: Bool, key: String = "") -> Any {
+    if let dictionary = value as? [String: Any] { return dictionary.mapValues { $0 }.reduce(into: [String: Any]()) { $0[$1.key] = mapIDs($1.value, incoming: incoming, key: $1.key) } }
+    if let array = value as? [Any] { return array.map { mapIDs($0, incoming: incoming, key: key) } }
+    if ["workspace_id", "tab_id", "pane_id", "terminal_id", "active_tab_id", "focused_pane_id", "target_pane_id", "source_pane_id"].contains(key), let id = value as? String { return incoming ? qualify(id) : raw(id) }
+    return value
+  }
+
   struct Workspace: Decodable {
     let workspace_id: String
     let label: String
@@ -53,12 +72,13 @@ final class HerdrClient {
     let workspaces: [Workspace]
     let tabs: [Tab]
     let panes: [Pane]
+    var endpointID: String? = nil
     func filtered(namespaceIDs: Set<String>) -> Snapshot {
       let tabs = tabs.filter { namespaceIDs.contains($0.workspace_id) }
       let tabIDs = Set(tabs.map(\.tab_id))
       return Snapshot(layouts: layouts.filter { tabIDs.contains($0.tab_id) },
         workspaces: workspaces.filter { namespaceIDs.contains($0.workspace_id) }, tabs: tabs,
-        panes: panes.filter { namespaceIDs.contains($0.workspace_id) })
+        panes: panes.filter { namespaceIDs.contains($0.workspace_id) }, endpointID: endpointID)
     }
   }
   final class LayoutNode: Decodable {
@@ -78,16 +98,22 @@ final class HerdrClient {
     let client: HerdrClient
     let pane: Pane
     var command: String {
-      ([
-        "/usr/bin/env", "-u", "HERDR_SOCKET_PATH", "-u", "HERDR_SESSION",
-        client.executable.path, "--session", client.sessionName,
-        "terminal", "attach", pane.terminal_id,
-      ].map(HerdrClient.quote)).joined(separator: " ")
+      var environment = ["/usr/bin/env", "-u", "HERDR_SESSION", "-u", "HERDR_SOCKET_PATH"]
+      if let socket = client.forwardedSocket { environment.append("HERDR_SOCKET_PATH=" + socket) }
+      return (environment + [client.executable.path] + client.connectionArguments + ["terminal", "attach", client.raw(pane.terminal_id)]).map(HerdrClient.quote).joined(separator: " ")
     }
   }
 
   let executable: URL
   let sessionName: String
+  let machine: Machine?
+  private let sshOptions: [String]
+  private let remoteExecutable: String?
+  private let remoteEnvironment: [String: String]
+  private var tunnel: Process?
+  private var tunnelDirectory: URL?
+  private(set) var forwardedSocket: String?
+  private var connectionArguments: [String] { machine == nil ? ["--session", sessionName] : [] }
   private let queue = DispatchQueue(label: "velocitty.herdr", qos: .userInitiated)
   private var server: Process?
   private var eventStream: HerdrEventStream?
@@ -98,9 +124,13 @@ final class HerdrClient {
   var onWorkspaceEvent: (() -> Void)?
   private var cachedStatus: (TimeInterval, Snapshot)?
 
-  init(executable: URL, sessionName: String = "velocitty") {
+  init(executable: URL, sessionName: String = "velocitty", machine: Machine? = nil, sshOptions: [String] = [], remoteExecutable: String? = nil, remoteEnvironment: [String: String] = [:]) {
     self.executable = executable
-    self.sessionName = sessionName
+    self.sessionName = machine?.session ?? sessionName
+    self.machine = machine
+    self.sshOptions = sshOptions
+    self.remoteExecutable = remoteExecutable
+    self.remoteEnvironment = remoteEnvironment
   }
 
   func observeEvents(panes: [Pane]) {
@@ -113,13 +143,8 @@ final class HerdrClient {
     eventStream = nil
     eventPaneIDs = ids
     perform({ client -> HerdrEventStream in
-      let data = try client.run(["session", "list", "--json"])
-      let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-      guard let sessions = json?["sessions"] as? [[String: Any]],
-        let path = sessions.first(where: { $0["name"] as? String == client.sessionName })?["socket_path"] as? String else {
-        throw ConfigurationError("herdr did not report its event socket.")
-      }
-      return try HerdrEventStream(path: path, paneIDs: ids, changed: { [weak client] in
+      let path = try client.socketPath()
+      return try HerdrEventStream(path: path, paneIDs: Set(ids.map(client.raw)), changed: { [weak client] in
         DispatchQueue.main.async { client?.onWorkspaceEvent?() }
       }, ended: { [weak client] in
         DispatchQueue.main.async {
@@ -177,13 +202,14 @@ final class HerdrClient {
   private func process(_ arguments: [String]) -> Process {
     let process = Process()
     process.executableURL = executable
-    process.arguments = ["--session", sessionName] + arguments
+    process.arguments = connectionArguments + arguments.map(raw)
     process.environment = ProcessInfo.processInfo.environment.filter {
       !$0.key.hasPrefix("HERDR_") || $0.key == "HERDR_CONFIG_PATH"
     }
     if process.environment?["SHELL"] == nil, let user = getpwuid(getuid()) {
       process.environment?["SHELL"] = String(cString: user.pointee.pw_shell)
     }
+    if let forwardedSocket { process.environment?["HERDR_SOCKET_PATH"] = forwardedSocket }
     process.standardInput = FileHandle.nullDevice
     return process
   }
@@ -235,9 +261,14 @@ final class HerdrClient {
   // Drain both streams without allowing an inherited pipe in a descendant to
   // extend the deadline. JSON is always read from stdout, never mixed with logs.
   func run(_ arguments: [String], timeout: TimeInterval = 5) throws -> Data {
+    if machine != nil { try ensureRemoteTransport() }
+    return try runProgram(executable: executable, arguments: connectionArguments + arguments.map(raw), environment: process(arguments).environment ?? [:], timeout: timeout)
+  }
+
+  private func runProgram(executable: URL, arguments: [String], environment: [String: String], timeout: TimeInterval) throws -> Data {
     let output = Pipe(), errors = Pipe()
-    let child = try RequestProcess(executable: executable.path, arguments: ["--session", sessionName] + arguments,
-      environment: process(arguments).environment ?? [:], stdout: output.fileHandleForWriting.fileDescriptor,
+    let child = try RequestProcess(executable: executable.path, arguments: arguments,
+      environment: environment, stdout: output.fileHandleForWriting.fileDescriptor,
       stderr: errors.fileHandleForWriting.fileDescriptor)
     try output.fileHandleForWriting.close()
     try errors.fileHandleForWriting.close()
@@ -281,6 +312,7 @@ final class HerdrClient {
   }
 
   private func socketPath() throws -> String {
+    if machine != nil { try ensureRemoteTransport(); if let forwardedSocket { return forwardedSocket } }
     let data = try run(["session", "list", "--json"])
     let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
     guard let sessions = json?["sessions"] as? [[String: Any]],
@@ -310,7 +342,7 @@ final class HerdrClient {
       pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
     }
     guard connected == 0 else { throw ConfigurationError("Could not connect to herdr.") }
-    var data = try JSONSerialization.data(withJSONObject: ["id": UUID().uuidString, "method": method, "params": params])
+    var data = try JSONSerialization.data(withJSONObject: ["id": UUID().uuidString, "method": method, "params": mapIDs(params, incoming: false)])
     data.append(10)
     var sent = 0
     while sent < data.count {
@@ -330,7 +362,7 @@ final class HerdrClient {
         if let error = json?["error"] as? [String: Any] { throw RequestError(code: error["code"] as? String, message: error["message"] as? String ?? "herdr API request failed.") }
         guard let result = json?["result"] as? [String: Any] else { throw ConfigurationError("Invalid herdr API response.") }
         cachedStatus = nil
-        return result
+        return mapIDs(result, incoming: true) as? [String: Any] ?? result
       }
     }
     throw ConfigurationError("herdr API response exceeded its limit.")
@@ -395,7 +427,7 @@ final class HerdrClient {
     else {
       throw ConfigurationError("herdr returned an invalid response.")
     }
-    return result
+    return mapIDs(result, incoming: true) as? [String: Any] ?? result
   }
 
   // Shared by all windows; structural operations always request a fresh snapshot.
@@ -412,7 +444,8 @@ final class HerdrClient {
     guard let value = result["snapshot"] else {
       throw ConfigurationError("herdr did not return a session snapshot.")
     }
-    let snapshot = try JSONDecoder().decode(Snapshot.self, from: JSONSerialization.data(withJSONObject: value))
+    var snapshot = try JSONDecoder().decode(Snapshot.self, from: JSONSerialization.data(withJSONObject: value))
+    snapshot.endpointID = endpointID
     let workspaceIDs = snapshot.workspaces.map(\.workspace_id)
     let tabIDs = snapshot.tabs.map(\.tab_id)
     let paneIDs = snapshot.panes.map(\.pane_id)
@@ -436,6 +469,7 @@ final class HerdrClient {
     }
     do { return try snapshot() }
     catch let error as RequestError where error.code == "server_not_running" { /* Start only an absent server. */ }
+    guard machine == nil else { throw ConfigurationError("Start the selected herdr session on " + endpointLabel + " before connecting.") }
     let child = process(["server"])
     child.currentDirectoryURL = directory
     child.standardOutput = FileHandle.nullDevice
@@ -453,7 +487,70 @@ final class HerdrClient {
       "Could not connect to the herdr session ‘\(sessionName)’. Check herdr's server log.")
   }
 
+  func gitBranch(directory: String) throws -> String? {
+    guard machine != nil else { return nil }
+    let command = "git -C " + Self.quote(directory) + " symbolic-ref --quiet --short HEAD 2>/dev/null || git -C " + Self.quote(directory) + " rev-parse --short HEAD 2>/dev/null || true"
+    let value = String(decoding: try ssh(command, timeout: 3), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+    return value.isEmpty ? nil : value
+  }
+
+  func machines() throws -> [Machine] {
+    try JSONDecoder().decode([Machine].self, from: run(["machine", "list", "--json"]))
+  }
+
+  private func ssh(_ command: String, timeout: TimeInterval = 10) throws -> Data {
+    guard let machine, !machine.target.isEmpty, !machine.target.hasPrefix("-") else { throw ConfigurationError("Invalid SSH destination.") }
+    return try runProgram(executable: URL(fileURLWithPath: "/usr/bin/ssh"),
+      arguments: sshOptions + ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", machine.target, command],
+      environment: ProcessInfo.processInfo.environment, timeout: timeout)
+  }
+
+  private func ensureRemoteTransport() throws {
+    guard let machine else { return }
+    if tunnel?.isRunning == true, let forwardedSocket, FileManager.default.fileExists(atPath: forwardedSocket) { return }
+    disconnectTransport()
+    let executable: String
+    if let remoteExecutable { executable = remoteExecutable }
+    else {
+      let lookup = "command -v herdr || for p in \"$HOME/.local/bin/herdr\" \"$HOME/.cargo/bin/herdr\" /opt/homebrew/bin/herdr \"$HOME/.nix-profile/bin/herdr\" \"/etc/profiles/per-user/$(id -un)/bin/herdr\"; do if test -x \"$p\"; then printf '%s' \"$p\"; break; fi; done"
+      let output = try ssh("/bin/sh -lc " + Self.quote(lookup))
+      executable = String(decoding: output, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !executable.isEmpty, !executable.contains("\n") else { throw ConfigurationError("herdr was not found on " + machine.label) }
+    }
+    let command = (["/usr/bin/env"] + remoteEnvironment.sorted { $0.key < $1.key }.map { $0.key + "=" + $0.value } + [executable, "--session", machine.session, "session", "list", "--json"]).map(Self.quote).joined(separator: " ")
+    let response = try JSONSerialization.jsonObject(with: ssh(command)) as? [String: Any]
+    guard let sessions = response?["sessions"] as? [[String: Any]], let socket = sessions.first(where: { $0["name"] as? String == machine.session })?["socket_path"] as? String else { throw ConfigurationError("The selected herdr session was not found on " + machine.label) }
+    let directory = URL(fileURLWithPath: "/tmp").appendingPathComponent("vt-" + String(UUID().uuidString.prefix(8)))
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    let local = directory.appendingPathComponent("herdr.sock").path
+    let remoteClient = String(socket.dropLast(5)) + "-client.sock"
+    let connection = Process()
+    connection.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+    connection.arguments = sshOptions + ["-N", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3", "-L", local + ":" + socket, "-L", directory.appendingPathComponent("herdr-client.sock").path + ":" + remoteClient, machine.target]
+    connection.standardInput = FileHandle.nullDevice
+    connection.standardOutput = FileHandle.nullDevice
+    connection.standardError = FileHandle.nullDevice
+    do { try connection.run() } catch { try? FileManager.default.removeItem(at: directory); throw error }
+    tunnel = connection
+    tunnelDirectory = directory
+    let deadline = Date(timeIntervalSinceNow: 6)
+    while connection.isRunning && !FileManager.default.fileExists(atPath: local) && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
+    guard connection.isRunning, FileManager.default.fileExists(atPath: local) else { disconnectTransport(); throw ConfigurationError("SSH forwarding failed for " + machine.label + ". Check your SSH login and server availability.") }
+    forwardedSocket = local
+  }
+
+  func disconnectTransport() {
+    if tunnel?.isRunning == true { tunnel?.terminate() }
+    tunnel = nil
+    forwardedSocket = nil
+    if let tunnelDirectory { try? FileManager.default.removeItem(at: tunnelDirectory) }
+    tunnelDirectory = nil
+  }
+  deinit { disconnectTransport() }
+
   func shellEnvironment(settings: AppConfiguration) -> [String: String] {
+    // Local bundle paths are not valid on another host.
+    if machine != nil { return [:] }
     let inherited = ProcessInfo.processInfo.environment
     let home = settings.home
     let config = inherited["HERDR_CONFIG_PATH"].map { URL(fileURLWithPath: $0) }

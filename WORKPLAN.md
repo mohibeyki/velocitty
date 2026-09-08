@@ -28,3 +28,5 @@ Progress:
 
 - Step 6 validated: 28 configuration tests (including lossless source edits and conflict refusal), native settings window check, and final build passed. GUI retains raw TOML, supports included source files, and protects unsaved drafts on close/quit.
 - Remote validation prerequisite confirmed: laptop192.168.1.12 SSH batch login succeeds; host key verified against local public host key using a temporary known-hosts file.
+
+- Step 7 remote transport validated against herdr 0.9 over laptop SSH: real keyboard input, scoped IDs, two servers in one window, and tunnel reconnect pass. Uses herdr machine catalog; reconnects saved enabled endpoints. Installed herdr remains unchanged. Remote Git queries execute over SSH.
