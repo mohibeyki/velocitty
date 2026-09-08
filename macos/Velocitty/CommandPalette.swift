@@ -39,6 +39,13 @@ final class CommandPalette: NSPanel, NSTextFieldDelegate, NSWindowDelegate, NSTa
       else { return nil }
       return Entry(title: command.title, detail: command.detail, action: command.action)
     }
+    if terminal.session?.herdrTerminal != nil {
+      entries += [
+        Entry(title: "Move Tab to Namespace…", detail: "Move all panes while retaining their running processes.", action: "velocitty:move-tab"),
+        Entry(title: "Move Pane to Tab…", detail: "Move this terminal into another tab.", action: "velocitty:move-pane"),
+        Entry(title: "Move Pane to New Tab", detail: "Detach this pane into its own tab.", action: "velocitty:detach-pane"),
+      ]
+    }
     let color = native.background.usingColorSpace(.sRGB) ?? .windowBackgroundColor
     let dark = 0.2126 * color.redComponent + 0.7152 * color.greenComponent
       + 0.0722 * color.blueComponent < 0.5
@@ -221,7 +228,12 @@ final class CommandPalette: NSPanel, NSTextFieldDelegate, NSWindowDelegate, NSTa
     let action = filtered[table.selectedRow].action
     close()
     terminal?.window?.makeFirstResponder(terminal)
-    terminal?.performSurfaceAction(action)
+    switch action {
+    case "velocitty:move-tab": terminal?.session?.windowController?.chooseTabNamespace()
+    case "velocitty:move-pane": terminal?.session?.windowController?.choosePaneTab()
+    case "velocitty:detach-pane": terminal?.session?.windowController?.movePaneToNewTab()
+    default: terminal?.performSurfaceAction(action)
+    }
   }
 }
 

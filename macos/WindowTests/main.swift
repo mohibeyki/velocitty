@@ -1527,6 +1527,17 @@ func runWorkspacePersistenceCheck() throws {
   let extraRestored = third.windows.first { $0.workspaceWindowID == extraID }!
   precondition(extraRestored.activeNamespace.herdrID == extraNamespace)
   precondition(extraRestored.window!.frame.width == 850)
+  let sourceWindow = third.windows.first { $0 !== extraRestored }!
+  let movingTab = sourceWindow.namespaces.flatMap(\.tabs).first { $0.panes.count > 1 }!
+  let movedIDs = Set(movingTab.panes.compactMap { $0.herdrTerminal?.pane.terminal_id })
+  sourceWindow.selectTab(movingTab)
+  sourceWindow.moveTab(movingTab, toNamespace: extraNamespace!); wait(third, sourceWindow)
+  let movedTab = extraRestored.tabs.first { Set($0.panes.compactMap { $0.herdrTerminal?.pane.terminal_id }) == movedIDs }
+  precondition(movedTab != nil, "Moving a tab must preserve its existing terminals")
+  extraRestored.selectTab(movedTab!)
+  let detachedID = extraRestored.session!.herdrTerminal!.pane.terminal_id
+  extraRestored.movePaneToNewTab(); wait(third, extraRestored)
+  precondition(extraRestored.activeTab.panes.count == 1 && extraRestored.session!.herdrTerminal!.pane.terminal_id == detachedID)
   for controller in Array(third.windows) { controller.window?.performClose(nil) }
   print("Workspace persistence tests passed.")
 }

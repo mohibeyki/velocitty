@@ -229,6 +229,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   @objc func newTab() { if let activeWindow { activeWindow.newTab() } else { newWindow() } }
   @objc func splitVertical() { activeWindow?.splitPane("right") }
   @objc func splitHorizontal() { activeWindow?.splitPane("down") }
+  @objc func moveTabToNamespace() { activeWindow?.chooseTabNamespace() }
+  @objc func movePaneToTab() { activeWindow?.choosePaneTab() }
+  @objc func detachPaneToTab() { activeWindow?.movePaneToNewTab() }
   @objc func equalizePanes() { activeWindow?.equalizePanes() }
   @objc func zoomPane() { activeWindow?.togglePaneZoom() }
   @objc func closePane() { activeWindow?.closePane() }
@@ -439,6 +442,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     terminalMenu.addItem(withTitle: "Rename Tab…", action: #selector(renameTab), keyEquivalent: "").target = self
     terminalMenu.addItem(withTitle: "Next Tab", action: #selector(nextTab), keyEquivalent: "").target = self
     terminalMenu.addItem(withTitle: "Previous Tab", action: #selector(previousTab), keyEquivalent: "").target = self
+    terminalMenu.addItem(withTitle: "Move Tab to Namespace…", action: #selector(moveTabToNamespace), keyEquivalent: "").target = self
+    terminalMenu.addItem(withTitle: "Move Pane to Tab…", action: #selector(movePaneToTab), keyEquivalent: "").target = self
+    terminalMenu.addItem(withTitle: "Move Pane to New Tab", action: #selector(detachPaneToTab), keyEquivalent: "").target = self
     terminalMenu.addItem(withTitle: "Move Tab Left", action: #selector(moveTabLeft), keyEquivalent: "").target = self
     terminalMenu.addItem(withTitle: "Move Tab Right", action: #selector(moveTabRight), keyEquivalent: "").target = self
     terminalMenu.addItem(.separator())
@@ -1816,6 +1822,83 @@ extension TerminalWindowController {
         tab.layoutTree = tree
         tab.treeLayout = layout
         self.workspaceView.needsLayout = true
+      }
+    }
+  }
+
+  private func chooseDestination(title: String, labels: [String], complete: @escaping (Int) -> Void) {
+    guard !closing, let window, window.attachedSheet == nil, !labels.isEmpty else { return }
+    let alert = NSAlert()
+    alert.messageText = title
+    alert.informativeText = "The running terminals will be preserved."
+    let choices = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 360, height: 26))
+    choices.addItems(withTitles: labels)
+    alert.accessoryView = choices
+    alert.addButton(withTitle: "Move")
+    alert.addButton(withTitle: "Cancel")
+    alert.beginSheetModal(for: window) { response in
+      if response == .alertFirstButtonReturn { complete(choices.indexOfSelectedItem) }
+    }
+  }
+
+  func chooseTabNamespace() {
+    guard let client = session?.herdrTerminal?.client else { return }
+    let tab = activeTab
+    let destinations = (owner?.windows.flatMap(\.namespaces) ?? namespaces).filter { $0 !== activeNamespace && $0.selected.selected.herdrTerminal?.client === client }
+    chooseDestination(title: "Move Tab to Namespace", labels: destinations.map(\.name)) { [weak self, weak tab] index in
+      guard let self, let tab, destinations.indices.contains(index), let id = destinations[index].herdrID else { return }
+      self.moveTab(tab, toNamespace: id)
+    }
+  }
+
+  func moveTab(_ tab: TerminalTab, toNamespace id: String) {
+    guard let tabID = tab.herdrID else { return }
+    moveTerminals { try $0.moveTab(tabID: tabID, workspaceID: id, label: tab.title) }
+  }
+
+  func choosePaneTab() {
+    guard let client = session?.herdrTerminal?.client, let pane = session else { return }
+    let tabs = (owner?.windows.flatMap(\.namespaces) ?? namespaces).flatMap { namespace in
+      namespace.tabs.filter { $0 !== activeTab && $0.selected.herdrTerminal?.client === client }.map { (namespace.name + " / " + $0.displayTitle, $0) }
+    }
+    chooseDestination(title: "Move Pane to Tab", labels: tabs.map { $0.0 }) { [weak self, weak pane] index in
+      guard let self, let pane, tabs.indices.contains(index), let target = tabs[index].1.selected.herdrTerminal else { return }
+      self.movePane(pane, toTab: target.pane.tab_id, targetPane: target.pane.pane_id)
+    }
+  }
+
+  func movePane(_ pane: TerminalSession, toTab tabID: String, targetPane: String) {
+    guard let id = pane.herdrTerminal?.pane.pane_id else { return }
+    moveTerminals { _ = try $0.api("pane.move", ["pane_id": id, "destination": ["type": "tab", "tab_id": tabID, "target_pane_id": targetPane, "split": "right"], "focus": false]) }
+  }
+
+  func movePaneToNewTab() {
+    guard activeTab.panes.count > 1, let terminal = session?.herdrTerminal else { return }
+    moveTerminals { _ = try $0.api("pane.move", ["pane_id": terminal.pane.pane_id, "destination": ["type": "new_tab", "workspace_id": terminal.pane.workspace_id], "focus": false]) }
+  }
+
+  private func moveTerminals(_ change: @escaping (HerdrClient) throws -> Void) {
+    guard !closing, let client = session?.herdrTerminal?.client else { return }
+    if deferMuxAction({ [weak self] in self?.moveTerminals(change) }) { return }
+    let selected = session
+    let app = owner
+    muxBusy = true
+    client.perform({ client -> (HerdrClient.Snapshot?, Error?) in
+      do { try change(client); return (try client.snapshot(), nil) }
+      catch { return (try? client.snapshot(), error) }
+    }) { [weak self] result in
+      guard let self else { return }
+      self.muxBusy = false
+      guard !self.closing, self.owner?.terminating != true else { return }
+      if case .success(let (snapshot, error)) = result {
+        if let snapshot {
+          app?.synchronizeHerdr(snapshot, client: client)
+          if let selected, let destination = app?.windows.first(where: { $0.allPanes.contains { $0 === selected } }) {
+            destination.selectTab(selected)
+            destination.window?.makeKeyAndOrderFront(nil)
+          }
+        }
+        if let error { self.owner?.showMuxError(error) }
       }
     }
   }

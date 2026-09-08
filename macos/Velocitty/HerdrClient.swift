@@ -342,6 +342,36 @@ final class HerdrClient {
     return try JSONDecoder().decode(LayoutNode.self, from: JSONSerialization.data(withJSONObject: root))
   }
 
+  func moveTab(tabID: String, workspaceID: String, label: String?) throws {
+    let before = try snapshot()
+    let root = try layoutTree(tabID: tabID)
+    let terminals = Dictionary(uniqueKeysWithValues: before.panes.map { ($0.pane_id, $0.terminal_id) })
+    func firstTerminal(_ node: LayoutNode) throws -> String {
+      if let id = node.pane_id, let terminal = terminals[id] { return terminal }
+      if let first = node.first { return try firstTerminal(first) }
+      throw ConfigurationError("Invalid source pane layout.")
+    }
+    func current(_ terminal: String) throws -> Pane {
+      guard let pane = try snapshot().panes.first(where: { $0.terminal_id == terminal }) else { throw ConfigurationError("A terminal disappeared while moving the tab.") }
+      return pane
+    }
+    let firstID = try firstTerminal(root)
+    let firstPane = try current(firstID)
+    var destination: [String: Any] = ["type": "new_tab", "workspace_id": workspaceID]
+    if let label { destination["label"] = label }
+    _ = try api("pane.move", ["pane_id": firstPane.pane_id, "destination": destination, "focus": false])
+    let newTabID = try current(firstID).tab_id
+    func build(_ node: LayoutNode) throws {
+      guard let first = node.first, let second = node.second, let direction = node.direction else { return }
+      let target = try current(firstTerminal(first))
+      let source = try current(firstTerminal(second))
+      _ = try api("pane.move", ["pane_id": source.pane_id, "destination": ["type": "tab", "tab_id": newTabID, "target_pane_id": target.pane_id, "split": direction, "ratio": node.ratio ?? 0.5], "focus": false])
+      try build(first)
+      try build(second)
+    }
+    try build(root)
+  }
+
   func equalize(tabID: String) throws {
     let root = try layoutTree(tabID: tabID)
     func apply(_ node: LayoutNode, path: [Bool]) throws {

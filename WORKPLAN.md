@@ -19,3 +19,5 @@ Progress:
 - Step 1 validated: build and isolated workspace GUI test passed, including repeated recovery requests and input reaching the original terminal ID. Recovery retries eight times with capped backoff; manual retry remains available.
 
 - Step 2 validated: build and isolated GUI checks passed for split ratios, equalization, left placement, zoom and restoration. Left/up use process-preserving split+swap; backend incidental selection is ignored. Divider commits one ratio on release.
+
+- Step 3 moves validated and complete: split-tab moves across namespaces and pane detachment preserve terminal IDs/processes; focused GUI test passed. Mixed-namespace simultaneous presentation remains to be addressed with endpoint presentation in step 7.
