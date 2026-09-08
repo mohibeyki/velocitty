@@ -13,6 +13,10 @@ let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 app.finishLaunching()
 pumpEvents(until: Date(timeIntervalSinceNow: 0.2))
+if CommandLine.arguments.contains("--workspace-persistence") {
+  try runWorkspacePersistenceCheck()
+  exit(0)
+}
 let delegate = AppDelegate()
 app.delegate = delegate
 let testAutomaticQuit = CommandLine.arguments.contains("--quit-on-close")
@@ -1353,4 +1357,64 @@ func runRestorationCheck() -> Never {
   application.run()
   withExtendedLifetime(owner) {}
   exit(0)
+}
+
+
+func runWorkspacePersistenceCheck() throws {
+  guard let executable = HerdrClient.discover() else { fatalError("herdr is required for this check") }
+  let directory = FileManager.default.temporaryDirectory.appendingPathComponent("velocitty-state-" + UUID().uuidString)
+  let file = directory.appendingPathComponent("workspace.json")
+  let client = HerdrClient(executable: executable, sessionName: "velocitty-test-" + UUID().uuidString.lowercased())
+  defer {
+    _ = try? client.run(["server", "stop"])
+    _ = try? client.run(["session", "delete", client.sessionName])
+    try? FileManager.default.removeItem(at: directory)
+  }
+  let settings = try AppConfiguration.parse(Data("[terminal]\nconfirm_close_surface=false\ntheme=''\n".utf8))
+  func makeOwner() throws -> AppDelegate {
+    let owner = AppDelegate()
+    owner.workspaceStateURL = file
+    owner.runtime = try TerminalRuntime(settings: settings)
+    owner.herdr = client
+    return owner
+  }
+  func wait(_ owner: AppDelegate, _ controller: TerminalWindowController? = nil) {
+    let deadline = Date(timeIntervalSinceNow: 10)
+    while (owner.muxOpening || controller?.muxBusy == true) && Date() < deadline {
+      pumpEvents(until: Date(timeIntervalSinceNow: 0.02))
+    }
+    precondition(!owner.muxOpening && controller?.muxBusy != true)
+  }
+  let first = try makeOwner()
+  first.newWindow(); wait(first)
+  let window = first.windows.last!
+  window.splitPane("right"); wait(first, window)
+  let selectedPane = window.session!.herdrTerminal!.pane.pane_id
+  let splitTabID = window.activeTab.herdrID!
+  window.newTab(); wait(first, window)
+  window.moveTab(-1)
+  let order = window.tabs.map { $0.herdrID! }
+  window.selectTab(window.tabs.first { $0.herdrID == splitTabID }!)
+  window.newNamespace(); wait(first, window)
+  let selectedNamespace = window.activeNamespace.herdrID!
+  window.workspaceView.restoreSidebarState(.init(width: 276, compact: true))
+  window.workspaceView.layoutSubtreeIfNeeded()
+  first.scheduleWorkspaceSave(window)
+  first.flushWorkspaceSave()
+  let saved = try WorkspaceStateStore(url: file).load()
+  precondition(saved.selectedNamespaceID == selectedNamespace)
+  window.window?.performClose(nil)
+  pumpEvents(until: Date(timeIntervalSinceNow: 0.05))
+  // A fresh owner loads the file, rather than reusing the in-memory state.
+  let second = try makeOwner()
+  second.newWindow(); wait(second)
+  let restored = second.windows.last!
+  restored.workspaceView.layoutSubtreeIfNeeded()
+  precondition(restored.activeNamespace.herdrID == selectedNamespace)
+  precondition(restored.namespaces[0].tabs.map { $0.herdrID! } == order)
+  let split = restored.namespaces[0].tabs.first { $0.herdrID == splitTabID }!
+  precondition(split.selected.herdrTerminal!.pane.pane_id == selectedPane)
+  precondition(restored.workspaceView.savedSidebarState == .init(width: 276, compact: true))
+  restored.window?.performClose(nil)
+  print("Workspace persistence tests passed.")
 }

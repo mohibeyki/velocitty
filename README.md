@@ -32,9 +32,10 @@ rendering; herdr owns the running terminal sessions.
   through menu/keyboard controls, and close individual panes. Restore herdr
   split layouts and route input to the focused pane.
 - [ ] **Pane polish:** draggable dividers, zoom, equalization, and refined styling.
-- [ ] **Workspace restoration:** save namespace organization, tab order, pane
-  layouts, window placement, and active selection. Herdr already retains the
-  running terminals; complete presentation restoration remains ahead.
+- [x] **Workspace state:** restore namespace/tab order, active selections, and
+  sidebar width/compact mode against live herdr sessions and split layouts.
+- [ ] **Window restoration:** restore window placement and assign namespaces to
+  their previous windows; workspace sessions currently reopen together.
 - [ ] **Connection recovery:** reconnect automatically after transport failures
   and synchronize changes made by other herdr clients.
 - [x] **Agent status:** compact icons show herdr’s working, waiting, idle, and
@@ -80,9 +81,14 @@ all its panes; closing the last tab removes its namespace. The final namespace c
 the window. Closing a window or quitting detaches its views and leaves the herdr
 terminals running. Exiting a shell closes its tab automatically.
 
-Herdr retains namespaces, names, subtitles, and terminals. Relaunching attaches
-them in one window. Local tab reordering, window layout, and view state are not
-restored yet.
+Herdr retains namespaces, names, subtitles, terminals, and split layouts.
+Velocitty saves namespace/tab order, active namespace/tab/pane, and sidebar state
+in `~/Library/Application Support/Velocitty/workspace.json`, separate from TOML
+preferences. Saves are automatic and atomic. Relaunching reconciles saved IDs
+with live herdr sessions and attaches them in one window. Missing sessions are
+removed from saved state only after a successful connection; new sessions append.
+A connection failure preserves the saved workspace. Window placement and separate
+window assignments are not restored yet; rebooting does not recreate processes.
 
 ## Panes
 

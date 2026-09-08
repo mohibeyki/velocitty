@@ -16,6 +16,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   let secureInputOwner = SecureInputOwner()
   let fullscreenPresentation = FullscreenPresentation()
   var windows: [TerminalWindowController] = []
+  // Test sessions do not read or overwrite the user's workspace file.
+  var workspaceStateURL: URL?
+  private var workspaceStore: WorkspaceStateStore?
+  private var workspaceState: WorkspaceState?
+  private var workspaceLoadAttempted = false
+  private var workspaceNeedsSave = false
+  private var workspaceSaveTimer: Timer?
+
   weak var focusedWindow: TerminalWindowController?
   var runtime: TerminalRuntime? {
     didSet {
@@ -159,6 +167,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   func windowFocused(_ controller: TerminalWindowController) {
     for other in windows where other !== controller { other.updateSecureInput(forceOff: true) }
     focusedWindow = controller
+    scheduleWorkspaceSave(controller)
     if controller.hasBell {
       controller.clearBell()
     }
@@ -200,6 +209,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   func applicationWillTerminate(_ notification: Notification) {
     secureInputOwner.update(wanted: false)
     fullscreenPresentation.update(nil)
+    flushWorkspaceSave()
     for controller in windows {
       controller.clearProgress()
       for tab in controller.allPanes { tab.close() }
@@ -611,6 +621,8 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     namespaces.first { $0.tabs.contains { $0.panes.contains { $0 === tab } } }
   }
   private var pendingTabClosures: [TerminalSession] = []
+  var persistenceReady = false
+  var persistedNamespaceIDs: Set<String> = []
   var muxBusy = false
   var closing = false
   var resizeTimer: Timer?
@@ -821,6 +833,9 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
   func windowShouldClose(_ sender: NSWindow) -> Bool { closing || confirmClose() }
 
   func windowWillClose(_ notification: Notification) {
+    owner?.scheduleWorkspaceSave(self)
+    owner?.flushWorkspaceSave()
+    persistenceReady = false
     passwordInput = false
     manualSecureInput = false
     readonly = false
@@ -1383,6 +1398,7 @@ extension AppDelegate {
       }
       do {
         let snapshot = try result.get()
+        self.loadWorkspaceState(for: client)
         let panes = snapshot.panes.filter { !attached.contains($0.terminal_id) }
         guard let first = panes.first else { throw ConfigurationError("herdr returned no terminals to attach.") }
         let session = runtime.makeSession()
@@ -1403,6 +1419,23 @@ extension AppDelegate {
         let namespace = controller.namespaces.first!
         let selectedID = snapshot.workspaces.first { $0.workspace_id == namespace.herdrID }?.active_tab_id
         controller.selectTab(namespace.tabs.first { $0.herdrID == selectedID } ?? namespace.selected)
+        if let saved = self.workspaceState {
+          let live = snapshot.workspaces.map { workspace in
+            WorkspaceState.Namespace(id: workspace.workspace_id,
+              tabs: snapshot.tabs.filter { $0.workspace_id == workspace.workspace_id }.map { tab in
+                WorkspaceState.Tab(id: tab.tab_id,
+                  selectedPaneID: snapshot.layouts.first { $0.tab_id == tab.tab_id }?.focused_pane_id)
+              }, selectedTabID: workspace.active_tab_id)
+          }
+          let panesByTab = Dictionary(grouping: snapshot.panes, by: \.tab_id).mapValues { Set($0.map(\.pane_id)) }
+          let restored = saved.reconciled(with: live, panesByTab: panesByTab)
+          controller.restoreWorkspaceState(restored)
+          self.workspaceNeedsSave = self.workspaceNeedsSave || saved != restored
+          self.workspaceState = restored
+        }
+        controller.persistenceReady = self.workspaceStore != nil
+        controller.persistedNamespaceIDs = Set(controller.namespaces.compactMap(\.herdrID))
+        self.scheduleWorkspaceSave(controller)
       } catch {
         self.muxError = error.localizedDescription
         if self.windows.isEmpty { self.newLocalWindow() }
@@ -1602,5 +1635,73 @@ extension TerminalWindowController {
         if case .success(let snapshot) = result { self.updateHerdrLabels(snapshot) }
       }
     }
+  }
+}
+
+extension AppDelegate {
+  private func loadWorkspaceState(for client: HerdrClient) {
+    guard !workspaceLoadAttempted, client.sessionName == "velocitty" || workspaceStateURL != nil else { return }
+    workspaceLoadAttempted = true
+    let store = workspaceStateURL.map { WorkspaceStateStore(url: $0) } ?? WorkspaceStateStore()
+    do {
+      workspaceState = try store.load()
+      workspaceStore = store
+    } catch {
+      // Preserve unreadable, malformed, or future-version state for recovery.
+      NSLog("Workspace persistence disabled for this run: %@", error.localizedDescription)
+    }
+  }
+
+  func scheduleWorkspaceSave(_ controller: TerminalWindowController) {
+    guard controller.persistenceReady, workspaceStore != nil, var state = workspaceState else { return }
+    let current = controller.namespaces.compactMap { namespace -> WorkspaceState.Namespace? in
+      guard let id = namespace.herdrID else { return nil }
+      return WorkspaceState.Namespace(id: id, tabs: namespace.tabs.compactMap { tab in
+        guard let id = tab.herdrID else { return nil }
+        return WorkspaceState.Tab(id: id, selectedPaneID: tab.selected.herdrTerminal?.pane.pane_id)
+      }, selectedTabID: namespace.selected.herdrID)
+    }
+    state.update(current, replacing: controller.persistedNamespaceIDs)
+    controller.persistedNamespaceIDs = Set(current.map(\.id))
+    if focusedWindow == nil || focusedWindow === controller {
+      state.selectedNamespaceID = controller.activeNamespace.herdrID
+      state.sidebar = controller.workspaceView.savedSidebarState
+    }
+    guard state != workspaceState || workspaceNeedsSave else { return }
+    workspaceNeedsSave = true
+    workspaceState = state
+    workspaceSaveTimer?.invalidate()
+    workspaceSaveTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
+      self?.flushWorkspaceSave()
+    }
+  }
+
+  func flushWorkspaceSave() {
+    workspaceSaveTimer?.invalidate()
+    workspaceSaveTimer = nil
+    guard workspaceNeedsSave, let state = workspaceState, let store = workspaceStore else { return }
+    do { try store.save(state); workspaceNeedsSave = false }
+    catch { NSLog("Could not save workspace: %@", error.localizedDescription) }
+  }
+}
+
+extension TerminalWindowController {
+  func restoreWorkspaceState(_ state: WorkspaceState) {
+    let namespaceOrder = state.namespaces.map(\.id)
+    namespaces.sort { (namespaceOrder.firstIndex(of: $0.herdrID ?? "") ?? Int.max) < (namespaceOrder.firstIndex(of: $1.herdrID ?? "") ?? Int.max) }
+    for namespace in namespaces {
+      guard let saved = state.namespaces.first(where: { $0.id == namespace.herdrID }) else { continue }
+      let tabOrder = saved.tabs.map(\.id)
+      namespace.tabs.sort { (tabOrder.firstIndex(of: $0.herdrID ?? "") ?? Int.max) < (tabOrder.firstIndex(of: $1.herdrID ?? "") ?? Int.max) }
+      for tab in namespace.tabs {
+        if let paneID = saved.tabs.first(where: { $0.id == tab.herdrID })?.selectedPaneID,
+          let pane = tab.panes.first(where: { $0.herdrTerminal?.pane.pane_id == paneID }) { tab.selected = pane }
+      }
+      if let tab = namespace.tabs.first(where: { $0.herdrID == saved.selectedTabID }) { namespace.selected = tab }
+    }
+    if let sidebar = state.sidebar { workspaceView.restoreSidebarState(sidebar) }
+    let selected = namespaces.first { $0.herdrID == state.selectedNamespaceID } ?? namespaces.first
+    if let selected { selectTab(selected.selected) }
+    workspaceView.present()
   }
 }

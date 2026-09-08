@@ -248,6 +248,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   func refreshTabs() {
     for view in tabButtons.arrangedSubviews { tabButtons.removeArrangedSubview(view); view.removeFromSuperview() }
     guard let controller else { return }
+    controller.owner?.scheduleWorkspaceSave(controller)
     refreshNamespaces(controller)
     var contentWidth: CGFloat = 0
     for (index, tab) in controller.tabs.enumerated() {
@@ -402,7 +403,18 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   func splitView(_ splitView: NSSplitView, shouldHideDividerAt dividerIndex: Int) -> Bool { sidebar.isHidden }
   func splitViewDidResizeSubviews(_ notification: Notification) {
     needsLayout = true
+    if animatedSidebarWidth == nil, let controller { controller.owner?.scheduleWorkspaceSave(controller) }
     if let controller { refreshNamespaces(controller) }
+  }
+  var savedSidebarState: WorkspaceState.Sidebar {
+    let width = sidebarCompact || animatedSidebarWidth != nil ? expandedSidebarWidth ?? metric("sidebar_width") : sidebar.frame.width
+    return WorkspaceState.Sidebar(width: Double(min(400, max(160, width))), compact: sidebarCompact)
+  }
+  func restoreSidebarState(_ state: WorkspaceState.Sidebar) {
+    sidebarCompact = state.compact
+    expandedSidebarWidth = CGFloat(state.width)
+    configuredWidth = 0
+    needsLayout = true
   }
   @objc private func toggleNamespaceSidebar() {
     sidebarAnimation?.invalidate()
@@ -432,6 +444,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
         self.sidebarAnimation = nil
         self.animatedSidebarWidth = nil
         self.configuredWidth = self.sidebarCompact ? 56 : self.metric("sidebar_width")
+        if let controller = self.controller { controller.owner?.scheduleWorkspaceSave(controller) }
       }
     }
     sidebarAnimation = timer
