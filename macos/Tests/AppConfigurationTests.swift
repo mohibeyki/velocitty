@@ -9,6 +9,30 @@ final class AppConfigurationTests: XCTestCase {
     try AppConfiguration.parse(Data(text.utf8))
   }
 
+  func testInterfaceSettingsAreValidatedSeparatelyFromTerminalOptions() throws {
+    let config = try parse("""
+      [interface]
+      theme = "light"
+      chrome_background_color = "#112233"
+      agent_icon_size = 18
+      waiting_color = "#998877"
+      waiting_style = "dotted"
+      idle_style = "invalid"
+      agent_border_width = -1
+      [terminal]
+      font_size = 14
+      """)
+    XCTAssertEqual(config.interface["theme"], "light")
+    XCTAssertEqual(config.interface["chrome_background_color"], "#112233")
+    XCTAssertEqual(config.interface["agent_icon_size"], "18")
+    XCTAssertEqual(config.interface["waiting_color"], "#998877")
+    XCTAssertEqual(config.interface["waiting_style"], "dotted")
+    XCTAssertNil(config.interface["idle_style"])
+    XCTAssertNil(config.interface["agent_border_width"])
+    XCTAssertEqual(config.diagnostics.count, 2)
+    XCTAssertEqual(config.options.map(\.key), ["font-size"])
+  }
+
   func testConfigurationTemplateRoundTrip() throws {
     let template = try ConfigurationTemplate.render { key in
       switch key {
@@ -24,6 +48,7 @@ final class AppConfigurationTests: XCTestCase {
     }.joined(separator: "\n")
     let settings = try parse(active)
     XCTAssertEqual(Set(settings.options.map(\.key)), TerminalSettings.supported)
+    XCTAssertEqual(settings.interface, NamespaceAppearance.defaults)
     XCTAssertEqual(settings.options.first { $0.key == "title" }?.value, "a \"quote\" \\ path\t雪")
     XCTAssertEqual(
       settings.options.filter { $0.key == "font-family" }.map(\.value), ["Menlo", "Monaco"])

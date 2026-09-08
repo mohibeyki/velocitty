@@ -41,6 +41,11 @@ public enum ConfigurationTemplate {
       }
       lines.append("# \(key.replacingOccurrences(of: "-", with: "_")) = \(value)")
     }
+    lines += ["", "[interface]", "# Border styles: solid, dotted, animated, none. Colors: #RRGGBB.",
+      "# Sizes are points; animation duration is seconds. Reload with Cmd-Shift-comma."]
+    for key in NamespaceAppearance.defaults.keys.sorted() {
+      lines.append("# \(key) = \(quote(NamespaceAppearance.defaults[key]!))")
+    }
     return lines.joined(separator: "\n") + "\n"
   }
 

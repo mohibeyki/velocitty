@@ -10,6 +10,7 @@ public struct TerminalOption: Equatable, Sendable {
 }
 
 public struct AppConfiguration: Equatable, Sendable {
+  public var interface: [String: String] = [:]
   public let workingDirectory: URL
   public let options: [TerminalOption]
   public var diagnostics: [String] = []
@@ -47,6 +48,7 @@ public struct AppConfiguration: Equatable, Sendable {
     // Nested includes join the end of the queue; a file is loaded only once.
     var pending: [(URL, Bool, Int)] = []
     var loaded: Set<URL> = []
+    var interface: [String: String] = [:]
     var options: [TerminalOption] = []
     var diagnostics: [String] = []
     var index = -1
@@ -63,6 +65,7 @@ public struct AppConfiguration: Equatable, Sendable {
         do { data = try Data(contentsOf: file) }
         catch let error as CocoaError where error.code == .fileReadNoSuchFile && optional { continue }
         let own = try parse(data, home: home, source: file)
+        interface.merge(own.interface) { _, new in new }
         diagnostics += own.diagnostics
         for option in own.options {
           if option.key == "config-file" {
@@ -88,7 +91,7 @@ public struct AppConfiguration: Equatable, Sendable {
     let directory = options.last { $0.key == "working-directory" }
       .map { URL(fileURLWithPath: $0.value, isDirectory: true) }
       ?? defaults(home: home).workingDirectory
-    return Self(workingDirectory: directory, options: options, diagnostics: diagnostics,
+    return Self(interface: interface, workingDirectory: directory, options: options, diagnostics: diagnostics,
       source: url, home: home)
   }
 
@@ -109,6 +112,14 @@ public struct AppConfiguration: Equatable, Sendable {
       var diagnostics = document.diagnostics.map { "\(source.path): \($0)" }
       let aliases = Dictionary(grouping: (document.terminal ?? [:]).keys) {
         $0.replacingOccurrences(of: "_", with: "-")
+      }
+      var interface: [String: String] = [:]
+      for (key, value) in document.interface ?? [:] {
+        if case .scalar(let text) = value, NamespaceAppearance.validate(text, for: key) {
+          interface[key] = text
+        } else {
+          diagnostics.append("\(source.path): Invalid or unknown interface.\(key); using the default.")
+        }
       }
       var directory = defaults(home: home, source: source).workingDirectory
       for (spelling, value) in (document.terminal ?? [:]).sorted(by: { $0.key < $1.key }) {
@@ -188,7 +199,7 @@ public struct AppConfiguration: Equatable, Sendable {
         } catch { diagnostics.append("\(source.path): \(error.localizedDescription)") }
       }
       return Self(
-        workingDirectory: directory.standardizedFileURL, options: options,
+        interface: interface, workingDirectory: directory.standardizedFileURL, options: options,
         diagnostics: diagnostics, source: source, home: home)
     } catch let error as DecodingError {
       let detail: String
@@ -253,17 +264,20 @@ private struct Key: CodingKey {
 
 private struct Document: Decodable {
   let terminal: [String: Value]?
+  let interface: [String: Value]?
   let diagnostics: [String]
-  enum CodingKeys: String, CodingKey { case terminal }
+  enum CodingKeys: String, CodingKey { case terminal, interface }
   init(from decoder: Decoder) throws {
     let keys = try decoder.container(keyedBy: Key.self).allKeys.map(\.stringValue)
-    diagnostics = keys.sorted().filter { $0 != "terminal" }.map {
+    diagnostics = keys.sorted().filter { $0 != "terminal" && $0 != "interface" }.map {
       "Unknown configuration key: \($0)"
     }
     let container = try decoder.container(keyedBy: CodingKeys.self)
     // Validate the table explicitly: TOMLDecoder can otherwise decode a scalar
     // dictionary using the enclosing table's keys.
     if container.contains(.terminal) { _ = try container.decode(TOMLTable.self, forKey: .terminal) }
+    if container.contains(.interface) { _ = try container.decode(TOMLTable.self, forKey: .interface) }
+    interface = try container.decodeIfPresent([String: Value].self, forKey: .interface)
     terminal = try container.decodeIfPresent([String: Value].self, forKey: .terminal)
   }
 }
