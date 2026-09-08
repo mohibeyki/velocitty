@@ -121,6 +121,7 @@ do {
 let settings = try AppConfiguration.parse(Data(("""
 [terminal]
 command = "/bin/sh"
+undo_timeout = "0s"
 shell_integration = "none"
 theme = ""
 confirm_close_surface = false
@@ -680,6 +681,7 @@ if let executable = HerdrClient.discover() {
   }
   let muxSettings = try AppConfiguration.parse(Data("""
   [terminal]
+  undo_timeout = "0s"
   confirm_close_surface = false
   theme = ""
   """.utf8))
@@ -1694,6 +1696,8 @@ func runRemoteCheck() throws {
   let originalSurface = remotePane.surface
   window.closePane(remotePane, confirm: false)
   precondition(!window.allPanes.contains { $0 === remotePane })
+  let pendingState = try WorkspaceStateStore(url: owner.workspaceStateURL!).load()
+  precondition(pendingState.pendingTerminalClosures?.contains(remotePane.herdrTerminal!.pane.terminal_id) == true)
   let beforeUndo = try remote.snapshot()
   precondition(beforeUndo.panes.contains { $0.terminal_id == remotePane.herdrTerminal!.pane.terminal_id })
   owner.undoClose()
@@ -1709,6 +1713,19 @@ func runRemoteCheck() throws {
     afterClose = try remote.snapshot()
   }
   precondition(!afterClose.panes.contains { $0.terminal_id == remotePane.herdrTerminal!.pane.terminal_id })
+  let retainedSurface = localPane.surface
+  let retainedWindowID = window.workspaceWindowID
+  window.window?.performClose(nil)
+  precondition(owner.windows.isEmpty && localPane.surface == retainedSurface)
+  owner.undoClose()
+  pumpEvents(until: Date(timeIntervalSinceNow: 0.5))
+  precondition(owner.windows.contains { $0.workspaceWindowID == retainedWindowID && $0.allPanes.contains { $0 === localPane } })
+  precondition(localPane.surface == retainedSurface)
+  owner.redoClose()
+  precondition(owner.windows.isEmpty)
+  owner.undoClose()
+  pumpEvents(until: Date(timeIntervalSinceNow: 0.5))
+  precondition(localPane.surface == retainedSurface && !owner.windows.isEmpty)
   for controller in Array(owner.windows) { controller.closing = true; controller.window?.close() }
   print("Remote transport, comparison and close undo tests passed.")
 }

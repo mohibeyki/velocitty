@@ -9,3 +9,4 @@ DerivedData/
 /VeloKit/zig-pkg/
 /macos/.build/
 /macos/.swiftpm/
+/*.profraw

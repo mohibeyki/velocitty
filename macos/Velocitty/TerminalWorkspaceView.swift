@@ -29,6 +29,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   }
   func metric(_ key: String) -> CGFloat { CGFloat(Double(appearanceValues[key] ?? "") ?? Double(NamespaceAppearance.defaults[key] ?? "") ?? 0) }
   private var paneDividers: [PaneDivider] = []
+  private var displayedNamespaces: [TerminalNamespace] = []
   private let splitView = WorkspaceSplitView()
   private let sidebar = NSVisualEffectView()
   private let content = NSView()
@@ -555,6 +556,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   private func refreshNamespaces(_ controller: TerminalWindowController) {
     refreshingNamespaces = true
     defer { refreshingNamespaces = false }
+    displayedNamespaces = controller.namespaces
     namespaceList.reloadData()
     if let index = controller.namespaces.firstIndex(where: { $0 === controller.activeNamespace }) {
       namespaceList.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
@@ -562,9 +564,13 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   }
 
   func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-    item == nil ? controller?.namespaces.count ?? 0 : 0
+    item == nil ? displayedNamespaces.count : 0
   }
-  func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any { controller!.namespaces[index] }
+  func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
+    // AppKit may request a cached row while a window or namespace is being removed.
+    guard displayedNamespaces.indices.contains(index) else { return NSNull() }
+    return displayedNamespaces[index]
+  }
   func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool { false }
   private func namespace(for item: Any) -> TerminalNamespace? {
     guard let namespace = item as? TerminalNamespace,

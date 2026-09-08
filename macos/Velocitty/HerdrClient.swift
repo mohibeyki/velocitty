@@ -4,7 +4,7 @@ import Foundation
 import VelocittyConfiguration
 
 // Control requests use the CLI; interactive I/O uses herdr's direct attach client.
-// All control work runs off the main thread and is serialized per app instance.
+// Control work runs off the main thread and is serialized per endpoint.
 final class HerdrClient {
   struct Machine: Codable {
     let id: String
@@ -537,8 +537,8 @@ final class HerdrClient {
     let command = (["/usr/bin/env"] + remoteEnvironment.sorted { $0.key < $1.key }.map { $0.key + "=" + $0.value } + [executable, "--session", machine.session, "session", "list", "--json"]).map(Self.quote).joined(separator: " ")
     let response = try JSONSerialization.jsonObject(with: ssh(command)) as? [String: Any]
     guard let sessions = response?["sessions"] as? [[String: Any]], let socket = sessions.first(where: { $0["name"] as? String == machine.session })?["socket_path"] as? String else { throw ConfigurationError("The selected herdr session was not found on " + machine.label) }
-    let directory = URL(fileURLWithPath: "/tmp").appendingPathComponent("vt-" + String(UUID().uuidString.prefix(8)))
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    let directory = URL(fileURLWithPath: "/tmp").appendingPathComponent("vt-" + UUID().uuidString.replacingOccurrences(of: "-", with: ""))
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
     let local = directory.appendingPathComponent("herdr.sock").path
     let remoteClient = String(socket.dropLast(5)) + "-client.sock"
     let connection = Process()

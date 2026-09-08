@@ -2734,9 +2734,13 @@ extension AppDelegate {
   @objc func redoClose() {
     if let editor = NSApp.keyWindow?.firstResponder as? NSTextView, let undo = editor.undoManager, undo.canRedo { undo.redo(); return }
     guard let operation = redoOperations.last, let controller = operation.controller, !controller.closing else { return }
+    if !operation.destroy { controller.window?.performClose(nil); return }
     operation.timer?.invalidate()
     let panes = operation.panes.filter { pane in controller.allPanes.contains { $0 === pane } }
-    _ = deferClose(panes, in: controller, destroy: operation.destroy)
+    if !deferClose(panes, in: controller, destroy: true) {
+      redoOperations.removeAll { $0 === operation }
+      for pane in panes { controller.closePane(pane, confirm: false) }
+    }
   }
 }
 
