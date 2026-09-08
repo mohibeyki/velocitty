@@ -17,6 +17,7 @@ final class HerdrClient {
     let workspace_id: String
     let label: String
     let pane_count: Int
+    var number: Int? = nil
   }
   struct Pane: Decodable {
     let pane_id: String
@@ -24,8 +25,31 @@ final class HerdrClient {
     let workspace_id: String
     let tab_id: String
     let cwd: String?
+    var terminal_title: String? = nil
+    var terminal_title_stripped: String? = nil
+    var foreground_cwd: String? = nil
+    var agent: String? = nil
+    var display_agent: String? = nil
+    var agent_status: String? = nil
+  }
+  struct Rect: Decodable {
+    let x: Int
+    let y: Int
+    let width: Int
+    let height: Int
+  }
+  struct LayoutPane: Decodable {
+    let pane_id: String
+    let rect: Rect
+  }
+  struct Layout: Decodable {
+    let tab_id: String
+    let area: Rect
+    let focused_pane_id: String
+    let panes: [LayoutPane]
   }
   struct Snapshot: Decodable {
+    let layouts: [Layout]
     let workspaces: [Workspace]
     let tabs: [Tab]
     let panes: [Pane]

@@ -202,16 +202,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     fullscreenPresentation.update(nil)
     for controller in windows {
       controller.clearProgress()
-      for tab in controller.allTabs { tab.close() }
+      for tab in controller.allPanes { tab.close() }
     }
   }
 
   @objc func newNamespace() { activeWindow?.newNamespace() }
   @objc func editNamespace() { activeWindow?.editNamespace() }
   @objc func closeNamespace() { activeWindow?.closeNamespace() }
-  @objc func selectNamespace(_ sender: NSMenuItem) { activeWindow?.selectNamespace(at: sender.tag) }
+
 
   @objc func newTab() { if let activeWindow { activeWindow.newTab() } else { newWindow() } }
+  @objc func splitVertical() { activeWindow?.splitPane("right") }
+  @objc func splitHorizontal() { activeWindow?.splitPane("down") }
+  @objc func closePane() { activeWindow?.closePane() }
+  @objc func nextPane() { activeWindow?.focusPane("next") }
+  @objc func previousPane() { activeWindow?.focusPane("previous") }
+  @objc func resizePane(_ sender: NSMenuItem) { activeWindow?.resizePane(["left", "right", "up", "down"][sender.tag]) }
   @objc func closeTab() { activeWindow?.closeTab() }
   @objc func nextTab() { activeWindow?.cycleTab(1) }
   @objc func previousTab() { activeWindow?.cycleTab(-1) }
@@ -222,13 +228,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   @objc func closeWindow() { activeWindow?.window?.performClose(nil) }
 
   func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-    let muxActions: [Selector] = [#selector(editNamespace), #selector(closeNamespace), #selector(selectNamespace(_:)),
+    let muxActions: [Selector] = [#selector(splitVertical), #selector(splitHorizontal), #selector(nextPane), #selector(previousPane), #selector(resizePane(_:)), #selector(editNamespace), #selector(closeNamespace),
       #selector(nextTab), #selector(previousTab), #selector(renameTab), #selector(moveTabLeft), #selector(moveTabRight)]
     if let action = menuItem.action, muxActions.contains(action) {
       return activeWindow?.session?.herdrTerminal != nil && activeWindow?.muxBusy == false
     }
     switch menuItem.action {
-    case #selector(newNamespace), #selector(editNamespace), #selector(closeNamespace), #selector(selectNamespace(_:)), #selector(closeTab), #selector(nextTab), #selector(previousTab), #selector(renameTab),
+    case #selector(closePane), #selector(newNamespace), #selector(editNamespace), #selector(closeNamespace),  #selector(closeTab), #selector(nextTab), #selector(previousTab), #selector(renameTab),
       #selector(moveTabLeft), #selector(moveTabRight), #selector(closeWindow), #selector(showCommands), #selector(findTerminal),
       #selector(findNext), #selector(findPrevious):
       return activeWindow?.session?.view?.surface != nil
@@ -283,7 +289,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   func configurationDidChange() {
     updateRestorationPolicy()
     for controller in windows {
-      for tab in controller.allTabs { tab.chrome?.refreshVisibility() }
+      for tab in controller.allPanes { tab.chrome?.refreshVisibility() }
+      controller.workspaceView.refreshTabs()
       controller.applyWindowSettings()
       controller.updateSecureInput()
     }
@@ -406,7 +413,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
       withTitle: "New Window", action: #selector(newWindow), keyEquivalent: "n"
     ).target = self
     terminalMenu.addItem(withTitle: "New Tab", action: #selector(newTab), keyEquivalent: "t").target = self
-    terminalMenu.addItem(withTitle: "Close Tab", action: #selector(closeTab), keyEquivalent: "w").target = self
+    terminalMenu.addItem(withTitle: "Close Pane", action: #selector(closePane), keyEquivalent: "w").target = self
+    terminalMenu.addItem(withTitle: "Close Tab", action: #selector(closeTab), keyEquivalent: "").target = self
     terminalMenu.addItem(withTitle: "Rename Tab…", action: #selector(renameTab), keyEquivalent: "").target = self
     terminalMenu.addItem(withTitle: "Next Tab", action: #selector(nextTab), keyEquivalent: "").target = self
     terminalMenu.addItem(withTitle: "Previous Tab", action: #selector(previousTab), keyEquivalent: "").target = self
@@ -417,20 +425,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
       withTitle: "Close Window", action: #selector(closeWindow), keyEquivalent: "w"
     ).target = self
 
+    terminalMenu.addItem(.separator())
+    terminalMenu.addItem(withTitle: "Split Vertically", action: #selector(splitVertical), keyEquivalent: "").target = self
+    terminalMenu.addItem(withTitle: "Split Horizontally", action: #selector(splitHorizontal), keyEquivalent: "").target = self
+    terminalMenu.addItem(withTitle: "Next Pane", action: #selector(nextPane), keyEquivalent: "").target = self
+    terminalMenu.addItem(withTitle: "Previous Pane", action: #selector(previousPane), keyEquivalent: "").target = self
+    for (index, direction) in ["Left", "Right", "Up", "Down"].enumerated() {
+      let item = terminalMenu.addItem(withTitle: "Resize Pane \(direction)", action: #selector(resizePane(_:)), keyEquivalent: "")
+      item.target = self
+      item.tag = index
+    }
+
     let namespaceMenu = NSMenu(title: "Namespace")
     let namespaceMenuItem = NSMenuItem()
     namespaceMenuItem.submenu = namespaceMenu
     mainMenu.addItem(namespaceMenuItem)
     namespaceMenu.addItem(withTitle: "New Namespace", action: #selector(newNamespace), keyEquivalent: "").target = self
-    namespaceMenu.addItem(withTitle: "Edit Name and Subtitle…", action: #selector(editNamespace), keyEquivalent: "").target = self
+    namespaceMenu.addItem(withTitle: "Rename Namespace…", action: #selector(editNamespace), keyEquivalent: "").target = self
     namespaceMenu.addItem(withTitle: "Close Namespace", action: #selector(closeNamespace), keyEquivalent: "").target = self
-    namespaceMenu.addItem(.separator())
-    for number in 1...9 {
-      let item = namespaceMenu.addItem(withTitle: "Namespace \(number)", action: #selector(selectNamespace(_:)), keyEquivalent: String(number))
-      item.target = self
-      item.tag = number - 1
-      item.keyEquivalentModifierMask = [.control]
-    }
 
     let editMenu = NSMenu(title: "Edit")
     let editMenuItem = NSMenuItem()
@@ -484,7 +496,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
       "Find Previous": "navigate_search:previous",
       "Command Palette…": "toggle_command_palette", "Reload Configuration": "reload_config",
       "Close Window": "close_window", "Quit Velocitty": "quit",
-      "New Tab": "new_tab", "Close Tab": "close_surface", "Rename Tab…": "prompt_tab_title",
+      "Rename Namespace…": "rename_namespace",
+      "New Namespace": "new_namespace", "Close Namespace": "close_namespace",
+      "Resize Pane Left": "resize_split:left,5", "Resize Pane Right": "resize_split:right,5",
+      "Resize Pane Up": "resize_split:up,5", "Resize Pane Down": "resize_split:down,5",
+      "Split Vertically": "new_split:right", "Split Horizontally": "new_split:down",
+      "Next Pane": "goto_split:next", "Previous Pane": "goto_split:previous",
+      "New Tab": "new_tab", "Close Pane": "close_surface", "Close Tab": "close_tab", "Rename Tab…": "prompt_tab_title",
       "Next Tab": "next_tab", "Previous Tab": "previous_tab",
       "Move Tab Left": "move_tab:-1", "Move Tab Right": "move_tab:1",
     ]
@@ -531,17 +549,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   }
 }
 
+final class TerminalTab {
+  var panes: [TerminalSession]
+  var selected: TerminalSession
+  var title: String?
+  var layout: HerdrClient.Layout?
+  var displayTitle: String { title ?? selected.terminalTitle }
+  var hasBell: Bool { panes.contains { $0.hasBell } }
+  var herdrID: String? { panes.first?.herdrTerminal?.pane.tab_id }
+
+  init(_ pane: TerminalSession) {
+    panes = [pane]
+    selected = pane
+    title = pane.tabTitle
+  }
+}
+
 final class TerminalNamespace {
   var name: String
   var herdrID: String?
   var subtitle = ""
-  var tabs: [TerminalSession]
-  var selected: TerminalSession
+  var tabs: [TerminalTab]
+  var selected: TerminalTab
 
   init(name: String, session: TerminalSession) {
     self.name = name
-    self.tabs = [session]
-    self.selected = session
+    let tab = TerminalTab(session)
+    self.tabs = [tab]
+    self.selected = tab
   }
 }
 
@@ -562,13 +597,18 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
   private(set) var session: TerminalSession?
   private(set) var namespaces: [TerminalNamespace]
   private(set) var activeNamespace: TerminalNamespace
-  private(set) var tabs: [TerminalSession] {
+  private(set) var tabs: [TerminalTab] {
     get { activeNamespace.tabs }
     set { activeNamespace.tabs = newValue }
   }
-  var allTabs: [TerminalSession] { namespaces.flatMap(\.tabs) }
+  var activeTab: TerminalTab { activeNamespace.selected }
+  var allPanes: [TerminalSession] { namespaces.flatMap(\.tabs).flatMap(\.panes) }
+  lazy var workspaceView = TerminalWorkspaceView(controller: self)
+  func tab(for pane: TerminalSession) -> TerminalTab? {
+    namespaces.flatMap(\.tabs).first { $0.panes.contains { $0 === pane } }
+  }
   func namespace(for tab: TerminalSession) -> TerminalNamespace? {
-    namespaces.first { $0.tabs.contains { $0 === tab } }
+    namespaces.first { $0.tabs.contains { $0.panes.contains { $0 === tab } } }
   }
   private var pendingTabClosures: [TerminalSession] = []
   var muxBusy = false
@@ -638,7 +678,8 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     let chrome = TerminalChrome(terminalView)
     self.chrome = chrome
     refreshTabBars()
-    window.contentView = chrome
+    workspaceView.present()
+    window.contentView = workspaceView
     self.window = window
     applyWindowSettings()
     if let surface = terminalView.surface {
@@ -686,7 +727,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
   func applyWindowSettings() {
     guard let window else { return }
     // Until workspace restoration lands, do not silently restore only one tab.
-    window.isRestorable = shouldSaveState && session?.herdrTerminal == nil && namespaces.count == 1 && allTabs.count == 1 && session?.hasCustomCommand != true
+    window.isRestorable = shouldSaveState && session?.herdrTerminal == nil && namespaces.count == 1 && allPanes.count == 1 && session?.hasCustomCommand != true
     window.invalidateRestorableState()
     chrome?.refreshVisibility()
     if !native.progressStyle { clearProgress() }
@@ -704,7 +745,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     } else {
       window.styleMask.insert(.titled)
     }
-    window.titlebarAppearsTransparent = titlebar != "native"
+    window.titlebarAppearsTransparent = false
     window.hasShadow = native.windowShadow
     window.titleVisibility = titlebar == "hidden" ? .hidden : .visible
     for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
@@ -713,9 +754,9 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     }
     window.colorSpace = native.windowColorspace == "display-p3" ? .displayP3 : .sRGB
     let family = native.titleFontFamily
-    let foreground = native.titlebarForeground
-    let background = native.titlebarBackground
-    if window.styleMask.contains(.titled) && (!family.isEmpty || foreground != nil || background != nil) {
+    let foreground: NSColor? = workspaceView.chromeColor("chrome_foreground_color")
+    let background: NSColor? = nil
+    if window.styleMask.contains(.titled) && !family.isEmpty {
       let accessory = NSTitlebarAccessoryViewController()
       let label = NSTextField(labelWithString: window.title)
       label.frame = NSRect(x: 0, y: 0, width: 400, height: 24)
@@ -738,34 +779,24 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     window.representedURL =
       native.titlebarProxyIcon == "visible"
       ? URL(fileURLWithPath: directory) : nil
-    let theme = native.windowTheme
-    let color = native.background.usingColorSpace(.sRGB) ?? .black
-    let dark =
-      0.2126 * color.redComponent + 0.7152 * color.greenComponent + 0.0722 * color.blueComponent
-      < 0.5
-    let inferred = theme == "ghostty" || (theme == "auto" && titlebar != "native")
-    window.appearance =
-      theme == "dark" || (inferred && dark)
-      ? NSAppearance(named: .darkAqua)
-      : theme == "light" || (inferred && !dark) ? NSAppearance(named: .aqua) : nil
+    window.appearance = NSAppearance(named: workspaceView.chromeIsDark ? .darkAqua : .aqua)
     applyBackground()
     refreshBell()
   }
 
   func applyBackground() {
-    guard let window, let chrome else { return }
-    WindowAppearance.apply(to: window, terminal: chrome, native: native,
+    guard let window, chrome != nil else { return }
+    WindowAppearance.apply(to: window, terminal: workspaceView, native: native,
       forceOpaque: session?.opacityOverride != nil)
-    if let color = session?.backgroundColor {
-      window.backgroundColor = color.withAlphaComponent(window.backgroundColor.alphaComponent)
-    }
+    // Match the native chrome material rather than the terminal or a flat custom tint.
+    window.backgroundColor = .windowBackgroundColor
   }
 
 
   func confirmClose(of target: TerminalSession? = nil) -> Bool {
     guard let target else {
       // Closing a window or quitting only detaches herdr clients.
-      return allTabs.filter { $0.herdrTerminal == nil }.allSatisfy { confirmClose(of: $0) }
+      return allPanes.filter { $0.herdrTerminal == nil }.allSatisfy { confirmClose(of: $0) }
     }
     if target.herdrTerminal != nil {
       guard NativeSettings(config: target.config).confirmClose != "false" else { return true }
@@ -795,7 +826,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     readonly = false
     updateSecureInput(forceOff: true)
     clearProgress()
-    for tab in allTabs { tab.close() }
+    for tab in allPanes { tab.close() }
     for namespace in namespaces { namespace.tabs.removeAll() }
     namespaces.removeAll()
     pendingTabClosures.removeAll()
@@ -814,7 +845,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
   func setTitle(_ title: String) {
     terminalTitle = title
     refreshTabBars()
-    let displayed = (hasBell && native.bellFeatures & 8 != 0 ? "● " : "") + (windowTitleOverride ?? session?.displayTitle ?? title)
+    let displayed = (hasBell && native.bellFeatures & 8 != 0 ? "● " : "") + (windowTitleOverride ?? activeTab.displayTitle)
     window?.title = displayed
     titleLabel?.stringValue = displayed
     window?.invalidateRestorableState()
@@ -847,8 +878,8 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
   func resetWindowSize() {
     guard let window else { return }
     var size = session?.view?.initialSize ?? NSSize(width: 960, height: 640)
-    size.width += chrome?.sidebarInset ?? 0
-    size.height += chrome?.tabHeight ?? 0
+    size.width += workspaceView.sidebarInset
+    size.height += workspaceView.tabHeight
     let drag = native.dragHandle
     if drag == "always" || (drag == "auto" && !window.styleMask.contains(.titled)) {
       size.height += 12
@@ -911,8 +942,9 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
   func windowDidExitFullScreen(_ notification: Notification) { applyBackground() }
 
   func windowDidChangeOcclusionState(_ notification: Notification) {
-    if let window, let surface = session?.view?.surface {
-      velokit_surface_set_occlusion(surface, window.occlusionState.contains(.visible))
+    guard let window else { return }
+    for pane in activeTab.panes {
+      if let surface = pane.surface { velokit_surface_set_occlusion(surface, window.occlusionState.contains(.visible)) }
     }
   }
   func windowDidEndLiveResize(_ notification: Notification) {
@@ -1069,7 +1101,7 @@ extension TerminalWindowController {
       self.session?.view?.updateFocus()
       let pending = self.pendingTabClosures
       self.pendingTabClosures.removeAll()
-      for tab in pending { self.closeTab(tab, confirm: false, endSession: false) }
+      for tab in pending { self.closePane(tab, confirm: false, endSession: false) }
     }
   }
 }
@@ -1087,7 +1119,7 @@ extension TerminalWindowController {
     let name = "Namespace \(namespaces.count + 1)"
     let directory = native.tabInheritsDirectory ? currentDirectory ?? session.settings.workingDirectory.path
       : session.settings.workingDirectory.path
-    let existing = Set((owner?.windows.flatMap(\.allTabs) ?? allTabs).compactMap { $0.herdrTerminal?.pane.terminal_id })
+    let existing = Set((owner?.windows.flatMap(\.allPanes) ?? allPanes).compactMap { $0.herdrTerminal?.pane.terminal_id })
     muxBusy = true
     client.perform({ try $0.create(workspace: workspace, name: name, directory: directory) }) { [weak self] result in
       guard let self else { return }
@@ -1100,118 +1132,108 @@ extension TerminalWindowController {
     }
   }
 
-  func selectTab(_ tab: TerminalSession) {
-    guard let namespace = namespace(for: tab), tab.surface != nil,
+  func selectTab(_ tab: TerminalTab) { selectTab(tab.selected) }
+
+  // Selecting a pane also selects its containing tab and namespace.
+  func selectTab(_ pane: TerminalSession) {
+    guard let namespace = namespace(for: pane), let tab = tab(for: pane), pane.surface != nil,
       let window, window.attachedSheet == nil, !closing else { return }
-    if session !== tab {
+    if session !== pane {
       palette?.close()
       updateSecureInput(forceOff: true)
       session?.view?.updateFocus(forceOff: true)
-      if let surface = session?.surface { velokit_surface_set_occlusion(surface, false) }
-      chrome?.removeFromSuperview()
       activeNamespace = namespace
       namespace.selected = tab
-      session = tab
-      tab.chrome?.frame = window.contentLayoutRect
+      tab.selected = pane
+      session = pane
+      workspaceView.present()
       applyWindowSettings()
-      setTitle(tab.terminalTitle)
-      applySizeLimit(for: tab)
-      if let surface = tab.surface {
-        velokit_surface_set_occlusion(surface, window.occlusionState.contains(.visible))
-        if native.windowStepResize {
-          let size = velokit_surface_size(surface)
-          window.contentResizeIncrements = NSSize(width: max(1, CGFloat(size.cell_width_px) / window.backingScaleFactor),
-            height: max(1, CGFloat(size.cell_height_px) / window.backingScaleFactor))
-        } else { window.contentResizeIncrements = NSSize(width: 1, height: 1) }
+      setTitle(pane.terminalTitle)
+      applySizeLimit(for: pane)
+    }
+    for terminal in allPanes {
+      if let surface = terminal.surface {
+        velokit_surface_set_occlusion(surface,
+          tab.panes.contains { $0 === terminal } && window.occlusionState.contains(.visible))
       }
     }
-    if let terminal = tab.herdrTerminal {
+    if native.windowStepResize, tab.panes.count == 1, let surface = pane.surface {
+      let size = velokit_surface_size(surface)
+      window.contentResizeIncrements = NSSize(width: max(1, CGFloat(size.cell_width_px) / window.backingScaleFactor),
+        height: max(1, CGFloat(size.cell_height_px) / window.backingScaleFactor))
+    } else { window.contentResizeIncrements = NSSize(width: 1, height: 1) }
+    if let terminal = pane.herdrTerminal {
       terminal.client.perform({ _ = try $0.request(["tab", "focus", terminal.pane.tab_id]) }) { result in
         if case .failure(let error) = result { NSLog("herdr focus: %@", error.localizedDescription) }
       }
     }
     refreshTabBars()
-    window.makeFirstResponder(tab.view)
-    tab.view?.updateFocus()
+    if window.firstResponder !== pane.view { window.makeFirstResponder(pane.view) }
+    pane.view?.updateFocus()
     updateSecureInput()
     owner?.updateMenuShortcuts()
   }
 
   func cycleTab(_ step: Int, from source: TerminalSession? = nil) {
-    guard let selected = source ?? session, let namespace = namespace(for: selected) else { return }
+    guard let selected = source ?? session, let namespace = namespace(for: selected),
+      let tab = tab(for: selected), let index = namespace.tabs.firstIndex(where: { $0 === tab }) else { return }
     let tabs = namespace.tabs
-    guard !tabs.isEmpty,
-      let index = tabs.firstIndex(where: { $0 === selected }) else { return }
     selectTab(tabs[(index + step % tabs.count + tabs.count) % tabs.count])
   }
 
   func moveTab(_ amount: Int, from source: TerminalSession? = nil) {
-    guard let tab = source ?? session, let namespace = namespace(for: tab),
+    guard let pane = source ?? session, let namespace = namespace(for: pane), let tab = tab(for: pane),
       let index = namespace.tabs.firstIndex(where: { $0 === tab }),
       window?.attachedSheet == nil, !closing else { return }
-    let tabs = namespace.tabs
-    let destination = max(0, min(tabs.count - 1, index + max(-tabs.count, min(tabs.count, amount))))
+    let destination = max(0, min(namespace.tabs.count - 1, index + max(-namespace.tabs.count, min(namespace.tabs.count, amount))))
     namespace.tabs.remove(at: index)
     namespace.tabs.insert(tab, at: destination)
     refreshTabBars()
   }
 
-  func requestTabClose(_ tab: TerminalSession) {
-    guard namespace(for: tab) != nil, !closing else { return }
+  func requestTabClose(_ pane: TerminalSession) {
+    guard namespace(for: pane) != nil, !closing else { return }
     if window?.attachedSheet != nil {
-      if !pendingTabClosures.contains(where: { $0 === tab }) { pendingTabClosures.append(tab) }
-    } else { closeTab(tab, confirm: false, endSession: false) }
+      if !pendingTabClosures.contains(where: { $0 === pane }) { pendingTabClosures.append(pane) }
+    } else { closePane(pane, confirm: false, endSession: false) }
   }
 
   func closeTab(_ source: TerminalSession? = nil, confirm: Bool = true, endSession: Bool = true) {
-    guard let tab = source ?? session, let namespace = namespace(for: tab),
+    guard let pane = source ?? session, let namespace = namespace(for: pane), let tab = tab(for: pane),
       let index = namespace.tabs.firstIndex(where: { $0 === tab }),
-      window?.attachedSheet == nil, !closing, (!confirm || confirmClose(of: tab)) else { return }
-    if endSession, let terminal = tab.herdrTerminal {
-      guard !muxBusy else { return }
-      muxBusy = true
-      terminal.client.perform({ _ = try $0.request(["tab", "close", terminal.pane.tab_id]) }) { [weak self, weak tab] result in
-        guard let self else { return }
-        self.muxBusy = false
-        switch result {
-        case .success: if let tab { self.closeTab(tab, confirm: false, endSession: false) }
-        case .failure(let error): self.owner?.showMuxError(error)
-        }
-      }
-      return
-    }
-    let tabs = namespace.tabs
-    if allTabs.count == 1 {
+      window?.attachedSheet == nil, !closing else { return }
+    if confirm && !tab.panes.allSatisfy({ confirmClose(of: $0) }) { return }
+    if endSession, pane.herdrTerminal != nil { endHerdrTabs([tab]); return }
+    if namespaces.flatMap(\.tabs).count == 1 {
       closing = true
       window?.close()
       return
     }
-    let active = session === tab
-    if active {
-      let next = tabs.count > 1 ? tabs[index == tabs.count - 1 ? index - 1 : index + 1]
+    if activeTab === tab {
+      let next = namespace.tabs.count > 1
+        ? namespace.tabs[index == namespace.tabs.count - 1 ? index - 1 : index + 1]
         : namespaces.first { $0 !== namespace }!.selected
       selectTab(next)
     }
     namespace.tabs.removeAll { $0 === tab }
     if namespace.tabs.isEmpty { namespaces.removeAll { $0 === namespace } }
     else if namespace.selected === tab { namespace.selected = namespace.tabs[min(index, namespace.tabs.count - 1)] }
-    tab.close()
-    refreshTabBars()
+    for pane in tab.panes { pane.close() }
+    workspaceView.present()
     applyWindowSettings()
   }
 
   func closeTabs(_ mode: ghostty_action_close_tab_mode_e, from source: TerminalSession? = nil) {
-    guard let tab = source ?? session, let namespace = namespace(for: tab),
+    guard let pane = source ?? session, let namespace = namespace(for: pane), let tab = tab(for: pane),
       let index = namespace.tabs.firstIndex(where: { $0 === tab }),
       window?.attachedSheet == nil, !closing else { return }
-    let tabs = namespace.tabs
-    let targets: [TerminalSession]
+    let targets: [TerminalTab]
     switch mode {
-    case GHOSTTY_ACTION_CLOSE_TAB_MODE_OTHER: targets = tabs.filter { $0 !== tab }
-    case GHOSTTY_ACTION_CLOSE_TAB_MODE_RIGHT: targets = Array(tabs.dropFirst(index + 1))
+    case GHOSTTY_ACTION_CLOSE_TAB_MODE_OTHER: targets = namespace.tabs.filter { $0 !== tab }
+    case GHOSTTY_ACTION_CLOSE_TAB_MODE_RIGHT: targets = Array(namespace.tabs.dropFirst(index + 1))
     default: targets = [tab]
     }
-    guard targets.allSatisfy({ confirmClose(of: $0) }) else { return }
+    guard targets.flatMap(\.panes).allSatisfy({ confirmClose(of: $0) }) else { return }
     endHerdrTabs(targets)
   }
 
@@ -1228,12 +1250,15 @@ extension TerminalWindowController {
     alert.addButton(withTitle: "Cancel")
     alert.beginSheetModal(for: window) { [weak self, weak tab] response in
       guard response == .alertFirstButtonReturn, let self, let tab, tab.surface != nil else { return }
-      let value = field.stringValue.isEmpty ? tab.terminalTitle : field.stringValue
+      let value = field.stringValue
       guard let terminal = tab.herdrTerminal else { return }
       terminal.client.perform({ _ = try $0.request(["tab", "rename", terminal.pane.tab_id, value]) }) { [weak self, weak tab] result in
         guard let self, let tab else { return }
         switch result {
-        case .success: tab.tabTitle = value; self.tabMetadataChanged(tab)
+        case .success:
+          self.tab(for: tab)?.title = value.isEmpty ? nil : value
+          for pane in self.tab(for: tab)?.panes ?? [] { pane.tabTitle = value.isEmpty ? nil : value }
+          self.tabMetadataChanged(tab)
         case .failure(let error): self.owner?.showMuxError(error)
         }
       }
@@ -1251,19 +1276,24 @@ extension TerminalWindowController {
   }
 
   func refreshTabBars() {
-    for tab in allTabs { tab.chrome?.refreshTabs() }
+    workspaceView.refreshTabs()
   }
 
   func applySizeLimit(for tab: TerminalSession) {
     guard session === tab, let window, let limit = tab.sizeLimit else { return }
+    if activeTab.panes.count > 1 {
+      window.contentMinSize = NSSize(width: workspaceView.sidebarInset + 320, height: 240)
+      window.contentMaxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+      return
+    }
     let scale = window.backingScaleFactor
-    window.contentMinSize = NSSize(width: CGFloat(limit.min_width) / scale + (chrome?.sidebarInset ?? 0),
-      height: CGFloat(limit.min_height) / scale + (chrome?.tabHeight ?? 0))
+    window.contentMinSize = NSSize(width: CGFloat(limit.min_width) / scale + (workspaceView.sidebarInset),
+      height: CGFloat(limit.min_height) / scale + (workspaceView.tabHeight))
     window.contentMaxSize = NSSize(
       width: limit.max_width == 0 ? CGFloat.greatestFiniteMagnitude
-        : max(window.contentMinSize.width, CGFloat(limit.max_width) / scale + (chrome?.sidebarInset ?? 0)),
+        : max(window.contentMinSize.width, CGFloat(limit.max_width) / scale + (workspaceView.sidebarInset)),
       height: limit.max_height == 0 ? CGFloat.greatestFiniteMagnitude
-        : max(window.contentMinSize.height, CGFloat(limit.max_height) / scale + (chrome?.tabHeight ?? 0)))
+        : max(window.contentMinSize.height, CGFloat(limit.max_height) / scale + (workspaceView.tabHeight)))
   }
 }
 
@@ -1279,7 +1309,7 @@ extension TerminalWindowController {
   func closeNamespace() {
     guard window?.attachedSheet == nil, !closing else { return }
     let targets = activeNamespace.tabs
-    guard targets.allSatisfy({ confirmClose(of: $0) }) else { return }
+    guard targets.flatMap(\.panes).allSatisfy({ confirmClose(of: $0) }) else { return }
     endHerdrTabs(targets)
   }
 
@@ -1287,18 +1317,11 @@ extension TerminalWindowController {
     guard let window, window.attachedSheet == nil, !closing else { return }
     let namespace = activeNamespace
     let alert = NSAlert()
-    alert.messageText = "Edit Namespace"
-    let fields = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 100))
+    alert.messageText = "Rename Namespace"
     let name = NSTextField(string: namespace.name)
-    let subtitle = NSTextField(string: namespace.subtitle)
-    for (title, field, y) in [("Name", name, CGFloat(76)), ("Subtitle", subtitle, CGFloat(26))] {
-      let label = NSTextField(labelWithString: title)
-      label.frame = NSRect(x: 0, y: y, width: 320, height: 20)
-      field.frame = NSRect(x: 0, y: y - 24, width: 320, height: 24)
-      fields.addSubview(label)
-      fields.addSubview(field)
-    }
-    alert.accessoryView = fields
+    name.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+    name.setAccessibilityLabel("Namespace name")
+    alert.accessoryView = name
     alert.addButton(withTitle: "Save")
     alert.addButton(withTitle: "Cancel")
     alert.beginSheetModal(for: window) { [weak self] response in
@@ -1307,7 +1330,7 @@ extension TerminalWindowController {
       let value = name.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
       guard let client = self.session?.herdrTerminal?.client, let id = namespace.herdrID else { return }
       let name = value.isEmpty ? namespace.name : value
-      let subtitle = subtitle.stringValue
+      let subtitle = namespace.subtitle
       client.perform({ try $0.rename(workspace: id, name: name, subtitle: subtitle) }) { [weak self] result in
         guard let self else { return }
         switch result {
@@ -1342,7 +1365,7 @@ extension AppDelegate {
     guard !muxOpening, !terminating, let runtime else { return }
     muxOpening = true
     quitTimer?.invalidate()
-    let attached = Set(windows.flatMap(\.allTabs).compactMap { $0.herdrTerminal?.pane.terminal_id })
+    let attached = Set(windows.flatMap(\.allPanes).compactMap { $0.herdrTerminal?.pane.terminal_id })
     let directory = runtime.settings.workingDirectory
     client.perform({ client -> HerdrClient.Snapshot in
       let snapshot = try client.connect(directory: directory)
@@ -1362,9 +1385,6 @@ extension AppDelegate {
         let snapshot = try result.get()
         let panes = snapshot.panes.filter { !attached.contains($0.terminal_id) }
         guard let first = panes.first else { throw ConfigurationError("herdr returned no terminals to attach.") }
-        guard snapshot.tabs.filter({ tab in panes.contains { $0.tab_id == tab.tab_id } }).allSatisfy({ $0.pane_count == 1 }) else {
-          throw ConfigurationError("This herdr session contains split panes. Velocitty's MVP supports one terminal per tab.")
-        }
         let session = runtime.makeSession()
         session.herdrTerminal = HerdrClient.Terminal(client: client, pane: first)
         let controller = TerminalWindowController(session: session, owner: self)
@@ -1382,7 +1402,7 @@ extension AppDelegate {
         // Restore herdr's selected tab within the first namespace where possible.
         let namespace = controller.namespaces.first!
         let selectedID = snapshot.workspaces.first { $0.workspace_id == namespace.herdrID }?.active_tab_id
-        controller.selectTab(namespace.tabs.first { $0.herdrTerminal?.pane.tab_id == selectedID } ?? namespace.selected)
+        controller.selectTab(namespace.tabs.first { $0.herdrID == selectedID } ?? namespace.selected)
       } catch {
         self.muxError = error.localizedDescription
         if self.windows.isEmpty { self.newLocalWindow() }
@@ -1398,64 +1418,72 @@ extension TerminalWindowController {
     var newest: TerminalSession?
     for workspace in snapshot.workspaces {
       for record in snapshot.tabs where record.workspace_id == workspace.workspace_id {
-        let panes = snapshot.panes.filter { $0.tab_id == record.tab_id && !excluded.contains($0.terminal_id) }
-        guard !panes.isEmpty else { continue }
-        guard record.pane_count == 1, let pane = panes.first else {
-          throw ConfigurationError("Split panes are not supported by Velocitty yet.")
+        for pane in snapshot.panes where pane.tab_id == record.tab_id && !excluded.contains(pane.terminal_id) {
+          let terminal = runtime.makeSession()
+          terminal.herdrTerminal = HerdrClient.Terminal(client: client, pane: pane)
+          terminal.surfaceContext = GHOSTTY_SURFACE_CONTEXT_SPLIT
+          terminal.windowController = self
+          guard let view = terminal.createView() else {
+            terminal.close()
+            throw ConfigurationError("Could not attach the terminal view. Its herdr session is still running.")
+          }
+          terminal.chrome = TerminalChrome(view)
+          terminal.currentDirectory = pane.cwd
+          if let namespace = namespaces.first(where: { $0.herdrID == workspace.workspace_id }) {
+            if let tab = namespace.tabs.first(where: { $0.herdrID == record.tab_id }) {
+              tab.panes.append(terminal)
+            } else {
+              let tab = TerminalTab(terminal)
+              if !restoring, native.newTabPosition == "current", let index = namespace.tabs.firstIndex(where: { $0 === activeTab }) {
+                namespace.tabs.insert(tab, at: index + 1)
+              } else { namespace.tabs.append(tab) }
+            }
+          } else {
+            let namespace = TerminalNamespace(name: workspace.label, session: terminal)
+            namespace.herdrID = workspace.workspace_id
+            namespaces.append(namespace)
+          }
+          newest = terminal
         }
-        let tab = runtime.makeSession()
-        tab.herdrTerminal = HerdrClient.Terminal(client: client, pane: pane)
-        tab.surfaceContext = GHOSTTY_SURFACE_CONTEXT_TAB
-        tab.windowController = self
-        guard let view = tab.createView() else {
-          tab.close()
-          throw ConfigurationError("Could not attach the terminal view. Its herdr session is still running.")
-        }
-        tab.chrome = TerminalChrome(view)
-        tab.currentDirectory = pane.cwd
-        if let namespace = namespaces.first(where: { $0.herdrID == workspace.workspace_id }) {
-          if !restoring, native.newTabPosition == "current", let index = namespace.tabs.firstIndex(where: { $0 === session }) {
-            namespace.tabs.insert(tab, at: index + 1)
-          } else { namespace.tabs.append(tab) }
-        } else {
-          let namespace = TerminalNamespace(name: workspace.label, session: tab)
-          namespace.herdrID = workspace.workspace_id
-          namespaces.append(namespace)
-        }
-        newest = tab
       }
     }
     updateHerdrLabels(snapshot)
     if restoring {
       for namespace in namespaces {
         let selectedID = snapshot.workspaces.first { $0.workspace_id == namespace.herdrID }?.active_tab_id
-        if let selected = namespace.tabs.first(where: { $0.herdrTerminal?.pane.tab_id == selectedID }) {
-          namespace.selected = selected
+        if let selected = namespace.tabs.first(where: { $0.herdrID == selectedID }) { namespace.selected = selected }
+        for tab in namespace.tabs {
+          if let pane = tab.panes.first(where: { $0.herdrTerminal?.pane.pane_id == tab.layout?.focused_pane_id }) { tab.selected = pane }
         }
       }
     } else if let newest { selectTab(newest) }
-    refreshTabBars()
+    workspaceView.present()
   }
 
   func updateHerdrLabels(_ snapshot: HerdrClient.Snapshot) {
+    workspaceView.updateAgents(snapshot)
     for namespace in namespaces {
       if let record = snapshot.workspaces.first(where: { $0.workspace_id == namespace.herdrID }) {
         namespace.name = record.label
         namespace.subtitle = record.tokens?["subtitle"] ?? ""
       }
       for tab in namespace.tabs {
-        if let record = snapshot.tabs.first(where: { $0.tab_id == tab.herdrTerminal?.pane.tab_id }) {
-          tab.tabTitle = record.label
+        tab.layout = snapshot.layouts.first { $0.tab_id == tab.herdrID }
+        if let record = snapshot.tabs.first(where: { $0.tab_id == tab.herdrID }) {
+          let position = snapshot.tabs.filter { $0.workspace_id == record.workspace_id }.firstIndex { $0.tab_id == record.tab_id }.map { $0 + 1 }
+          let defaultLabel = String(position ?? record.number ?? 1)
+          tab.title = record.label == defaultLabel ? nil : record.label
+          for pane in tab.panes { pane.tabTitle = tab.title }
         }
       }
     }
-    refreshTabBars()
+    workspaceView.present()
   }
 
-  func endHerdrTabs(_ targets: [TerminalSession]) {
-    guard !muxBusy, let client = targets.first?.herdrTerminal?.client else { return }
+  func endHerdrTabs(_ targets: [TerminalTab]) {
+    guard !muxBusy, let client = targets.first?.selected.herdrTerminal?.client else { return }
     muxBusy = true
-    let ids = targets.compactMap { $0.herdrTerminal?.pane.tab_id }
+    let ids = targets.compactMap(\.herdrID)
     client.perform({ client -> ([String], Error?) in
       var closed: [String] = []
       for id in ids {
@@ -1468,11 +1496,110 @@ extension TerminalWindowController {
       self.muxBusy = false
       switch result {
       case .success(let (closed, error)):
-        for tab in targets where closed.contains(tab.herdrTerminal?.pane.tab_id ?? "") {
-          self.closeTab(tab, confirm: false, endSession: false)
+        for tab in targets where closed.contains(tab.herdrID ?? "") {
+          self.closeTab(tab.selected, confirm: false, endSession: false)
         }
         if let error { self.owner?.showMuxError(error) }
       case .failure(let error): self.owner?.showMuxError(error)
+      }
+    }
+  }
+}
+
+extension TerminalWindowController {
+  func splitPane(_ direction: String, from source: TerminalSession? = nil) {
+    guard let pane = source ?? session, let terminal = pane.herdrTerminal else { owner?.showMuxWarning(); return }
+    guard !muxBusy, !closing, window?.attachedSheet == nil else { return }
+    let existing = Set((owner?.windows.flatMap(\.allPanes) ?? allPanes).compactMap { $0.herdrTerminal?.pane.terminal_id })
+    muxBusy = true
+    terminal.client.perform({ client in
+      _ = try client.request(["pane", "split", terminal.pane.pane_id, "--direction", direction, "--no-focus"])
+      return try client.snapshot()
+    }) { [weak self] result in
+      guard let self else { return }
+      self.muxBusy = false
+      guard !self.closing, self.window != nil else { return }
+      do { try self.addHerdrTerminals(result.get(), excluding: existing) }
+      catch { self.owner?.showMuxError(error) }
+    }
+  }
+
+  func focusPane(_ direction: String, from source: TerminalSession? = nil) {
+    guard let pane = source ?? session, let tab = tab(for: pane),
+      let index = tab.panes.firstIndex(where: { $0 === pane }) else { return }
+    if direction == "next" || direction == "previous" {
+      let step = direction == "next" ? 1 : -1
+      selectTab(tab.panes[(index + step + tab.panes.count) % tab.panes.count])
+      return
+    }
+    guard let origin = pane.chrome?.frame else { return }
+    let candidates = tab.panes.filter { candidate in
+      guard candidate !== pane, let frame = candidate.chrome?.frame else { return false }
+      switch direction {
+      case "left": return frame.midX < origin.minX
+      case "right": return frame.midX > origin.maxX
+      case "up": return frame.midY > origin.maxY
+      default: return frame.midY < origin.minY
+      }
+    }
+    if let next = candidates.min(by: {
+      let a = $0.chrome!.frame, b = $1.chrome!.frame
+      return hypot(a.midX - origin.midX, a.midY - origin.midY) < hypot(b.midX - origin.midX, b.midY - origin.midY)
+    }) { selectTab(next) }
+  }
+
+  func resizePane(_ direction: String, amount: Double = 0.05, from source: TerminalSession? = nil) {
+    guard let pane = source ?? session, let terminal = pane.herdrTerminal,
+      tab(for: pane)?.panes.count ?? 0 > 1, !muxBusy, !closing, window?.attachedSheet == nil else { return }
+    muxBusy = true
+    terminal.client.perform({ client in
+      _ = try client.request(["pane", "resize", "--pane", terminal.pane.pane_id,
+        "--direction", direction, "--amount", String(max(0.01, min(0.4, amount)))])
+      return try client.snapshot()
+    }) { [weak self] result in
+      guard let self else { return }
+      self.muxBusy = false
+      guard !self.closing else { return }
+      switch result {
+      case .success(let snapshot): self.updateHerdrLabels(snapshot)
+      case .failure(let error): self.owner?.showMuxError(error)
+      }
+    }
+  }
+
+  func closePane(_ source: TerminalSession? = nil, confirm: Bool = true, endSession: Bool = true) {
+    guard let pane = source ?? session, let tab = tab(for: pane),
+      !closing, window?.attachedSheet == nil else { return }
+    if tab.panes.count == 1 { closeTab(pane, confirm: confirm, endSession: endSession); return }
+    if confirm && !confirmClose(of: pane) { return }
+    if endSession, let terminal = pane.herdrTerminal {
+      guard !muxBusy else { return }
+      muxBusy = true
+      terminal.client.perform({ client in
+        _ = try client.request(["pane", "close", terminal.pane.pane_id])
+        return try client.snapshot()
+      }) { [weak self, weak pane] result in
+        guard let self else { return }
+        self.muxBusy = false
+        switch result {
+        case .success(let snapshot):
+          if let pane { self.closePane(pane, confirm: false, endSession: false) }
+          self.updateHerdrLabels(snapshot)
+        case .failure(let error): self.owner?.showMuxError(error)
+        }
+      }
+      return
+    }
+    let index = tab.panes.firstIndex { $0 === pane }!
+    tab.panes.remove(at: index)
+    if tab.selected === pane { tab.selected = tab.panes[min(index, tab.panes.count - 1)] }
+    if session === pane { selectTab(tab.selected) }
+    pane.close()
+    workspaceView.present()
+    if let client = tab.selected.herdrTerminal?.client {
+      client.perform({ try $0.snapshot() }) { [weak self] result in
+        guard let self, !self.closing else { return }
+        if case .success(let snapshot) = result { self.updateHerdrLabels(snapshot) }
       }
     }
   }

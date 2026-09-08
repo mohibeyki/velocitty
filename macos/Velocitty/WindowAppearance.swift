@@ -17,7 +17,7 @@ enum WindowAppearance {
     if result != 0 { NSLog("Could not apply window blur: %d", result) }
   }
 
-  static func apply(to window: NSWindow, terminal: TerminalChrome, native: NativeSettings,
+  static func apply(to window: NSWindow, terminal: NSView, native: NativeSettings,
     forceOpaque: Bool)
   {
     let opaque = forceOpaque || window.styleMask.contains(.fullScreen)

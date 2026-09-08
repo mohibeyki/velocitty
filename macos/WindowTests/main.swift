@@ -410,9 +410,9 @@ do {
     if #available(macOS 26, *), blur.hasPrefix("macos-glass") {
       let effect = first.window!.contentView as! NSGlassEffectView
       precondition(effect.style == (blur.hasSuffix("clear") ? .clear : .regular))
-      precondition(effect.contentView === first.chrome)
+      precondition(effect.contentView === first.workspaceView)
     } else {
-      precondition(first.window!.contentView === first.chrome)
+      precondition(first.window!.contentView === first.workspaceView)
     }
     precondition(first.session!.surface != nil && !first.window!.isOpaque)
   }
@@ -646,7 +646,7 @@ do {
 do {
   delegate.newLocalWindow()
   let controller = delegate.windows.last!
-  precondition(controller.chrome?.muxEnabled == false)
+  precondition(controller.workspaceView.muxEnabled == false)
   controller.newTab()
   precondition(controller.tabs.count == 1 && controller.namespaces.count == 1)
   if let sheet = controller.window?.attachedSheet {
@@ -682,7 +682,26 @@ if let executable = HerdrClient.discover() {
   waitMux()
   let controller = delegate.windows.last!
   let a = controller.session!
-  precondition(a.herdrTerminal != nil && controller.chrome!.muxEnabled)
+  precondition(a.herdrTerminal != nil && controller.workspaceView.muxEnabled)
+  precondition("new_split:right".withCString { velokit_surface_binding_action(a.surface!, $0, 15) })
+  drain()
+  waitMux(controller)
+  let right = controller.session!
+  controller.splitPane("down")
+  waitMux(controller)
+  let bottom = controller.session!
+  controller.workspaceView.layoutSubtreeIfNeeded()
+  precondition(controller.tabs.count == 1 && controller.activeTab.panes.count == 3)
+  precondition(right.chrome!.frame.minX > a.chrome!.frame.minX)
+  precondition(bottom.chrome!.frame.minY < right.chrome!.frame.minY)
+  precondition(a.view!.window === controller.window && right.view!.window === controller.window)
+  controller.focusPane("up")
+  precondition(controller.session === right)
+  let height = right.chrome!.frame.height
+  controller.resizePane("down")
+  waitMux(controller)
+  controller.workspaceView.layoutSubtreeIfNeeded()
+  precondition(right.chrome!.frame.height != height)
   controller.newTab()
   waitMux(controller)
   let b = controller.session!
@@ -706,7 +725,7 @@ if let executable = HerdrClient.discover() {
   precondition(FileManager.default.fileExists(atPath: marker.path), "Input must reach the herdr shell")
   drain()
   precondition((a.view!.accessibilityValue() as? String)?.contains("VELOCITTY_HERDR_STREAM") == true)
-  let ids = Set(controller.allTabs.compactMap { $0.herdrTerminal?.pane.terminal_id })
+  let ids = Set(controller.allPanes.compactMap { $0.herdrTerminal?.pane.terminal_id })
   let workspace = controller.activeNamespace.herdrID!
   try client.rename(workspace: workspace, name: "Agents", subtitle: "Local tasks")
   controller.window?.performClose(nil)
@@ -717,8 +736,9 @@ if let executable = HerdrClient.discover() {
   delegate.newWindow()
   waitMux()
   let restored = delegate.windows.last!
-  precondition(Set(restored.allTabs.compactMap { $0.herdrTerminal?.pane.terminal_id }) == ids)
+  precondition(Set(restored.allPanes.compactMap { $0.herdrTerminal?.pane.terminal_id }) == ids)
   precondition(restored.namespaces.contains { $0.name == "Agents" && $0.subtitle == "Local tasks" })
+  precondition(restored.namespaces.flatMap(\.tabs).contains { $0.panes.count == 3 })
   restored.selectNamespace(at: 1)
   let exiting = restored.session!
   drain(); drain()
@@ -728,7 +748,17 @@ if let executable = HerdrClient.discover() {
   precondition(exiting.surface == nil && restored.namespaces.count == 1,
     "A herdr shell exit must close its tab without another keypress")
   let remaining = try client.snapshot()
-  precondition(remaining.workspaces.count == 1 && remaining.panes.count == 2)
+  precondition(remaining.workspaces.count == 1 && remaining.panes.count == 4)
+  let splitTab = restored.tabs.first { $0.panes.count == 3 }!
+  restored.selectTab(splitTab)
+  let closedPane = restored.session!
+  restored.closePane(confirm: false)
+  waitMux(restored)
+  precondition(closedPane.surface == nil && splitTab.panes.count == 2)
+  precondition(splitTab.panes.allSatisfy { $0.surface != nil })
+  restored.closeTab(confirm: false)
+  waitMux(restored)
+  precondition(restored.tabs.count == 1 && restored.allPanes.count == 1)
   restored.window?.performClose(nil)
   drain()
 }

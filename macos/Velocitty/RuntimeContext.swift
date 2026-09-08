@@ -100,8 +100,11 @@ final class RuntimeContext: NSObject {
     case GHOSTTY_ACTION_SET_TAB_TITLE:
       let title = action.action.set_tab_title.title.map { String(cString: $0) } ?? ""
       perform { view, owner in
-        view?.session?.tabTitle = title.isEmpty ? nil : title
-        if let tab = view?.session { owner?.tabMetadataChanged(tab) }
+        if let pane = view?.session {
+          owner?.tab(for: pane)?.title = title.isEmpty ? nil : title
+          for sibling in owner?.tab(for: pane)?.panes ?? [] { sibling.tabTitle = title.isEmpty ? nil : title }
+          owner?.tabMetadataChanged(pane)
+        }
       }
 
     case GHOSTTY_ACTION_READONLY:
@@ -187,6 +190,47 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_TOGGLE_COMMAND_PALETTE:
       perform { view, owner in owner?.showCommands() }
+
+    case GHOSTTY_ACTION_RENAME_NAMESPACE:
+      guard view?.session?.herdrTerminal != nil else { return false }
+      perform { _, owner in owner?.editNamespace() }
+
+    case GHOSTTY_ACTION_NEW_NAMESPACE:
+      perform { _, owner in owner?.newNamespace() }
+
+    case GHOSTTY_ACTION_CLOSE_NAMESPACE:
+      perform { _, owner in owner?.closeNamespace() }
+
+    case GHOSTTY_ACTION_PREVIOUS_NAMESPACE, GHOSTTY_ACTION_NEXT_NAMESPACE:
+      let step = action.tag == GHOSTTY_ACTION_NEXT_NAMESPACE ? 1 : -1
+      perform { _, owner in
+        guard let owner, let index = owner.namespaces.firstIndex(where: { $0 === owner.activeNamespace }) else { return }
+        owner.selectNamespace(at: (index + step + owner.namespaces.count) % owner.namespaces.count)
+      }
+
+    case GHOSTTY_ACTION_GOTO_NAMESPACE:
+      let index = Int(action.action.goto_namespace.index) - 1
+      perform { _, owner in owner?.selectNamespace(at: index) }
+
+    case GHOSTTY_ACTION_NEW_SPLIT:
+      let direction = action.action.new_split
+      guard direction == GHOSTTY_SPLIT_DIRECTION_RIGHT || direction == GHOSTTY_SPLIT_DIRECTION_DOWN else { return false }
+      perform { view, owner in owner?.splitPane(direction == GHOSTTY_SPLIT_DIRECTION_RIGHT ? "right" : "down", from: view?.session) }
+
+    case GHOSTTY_ACTION_GOTO_SPLIT:
+      guard let pane = view?.session, let controller = pane.windowController,
+        (controller.tab(for: pane)?.panes.count ?? 0) > 1 else { return false }
+      let directions = ["previous", "next", "up", "left", "down", "right"]
+      let index = Int(action.action.goto_split.rawValue)
+      guard directions.indices.contains(index) else { return false }
+      perform { view, owner in owner?.focusPane(directions[index], from: view?.session) }
+
+    case GHOSTTY_ACTION_RESIZE_SPLIT:
+      let value = action.action.resize_split
+      let directions = ["up", "down", "left", "right"]
+      let index = Int(value.direction.rawValue)
+      guard directions.indices.contains(index) else { return false }
+      perform { view, owner in owner?.resizePane(directions[index], amount: Double(value.amount) / 100, from: view?.session) }
 
     case GHOSTTY_ACTION_NEW_TAB:
       perform { [weak self] _, owner in
@@ -535,11 +579,14 @@ final class RuntimeContext: NSObject {
     }
   }
 
-  static let closeSurface: ghostty_runtime_close_surface_cb = { userdata, _ in
+  static let closeSurface: ghostty_runtime_close_surface_cb = { userdata, processAlive in
     guard let view = RuntimeContext.fromSurfaceUserdata(userdata) else { return }
     DispatchQueue.main.async { [weak view] in
       guard let view, view.surface != nil else { return }
-      if let tab = view.session { tab.windowController?.requestTabClose(tab) }
+      if let pane = view.session {
+        if processAlive { pane.windowController?.closePane(pane) }
+        else { pane.windowController?.requestTabClose(pane) }
+      }
     }
   }
 }

@@ -70,7 +70,10 @@ final class TerminalView: NSView, NSTextInputClient {
       ghostty_input_mouse_button_e(rawValue: UInt32(button)),
       Int32(ghosttyMods(event.modifierFlags).rawValue))
   }
-  override func mouseDown(with event: NSEvent) { mouseButton(event, down: true) }
+  override func mouseDown(with event: NSEvent) {
+    if let session { session.windowController?.selectTab(session) }
+    mouseButton(event, down: true)
+  }
   override func mouseUp(with event: NSEvent) { mouseButton(event, down: false) }
   override func rightMouseDown(with event: NSEvent) {
     mouseButton(event, down: true)

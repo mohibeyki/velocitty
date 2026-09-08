@@ -136,7 +136,10 @@ final class CommandPalette: NSPanel, NSTextFieldDelegate, NSWindowDelegate, NSTa
     PaletteRow()
   }
   func shortcut(for action: String) -> String {
-    guard let config = terminal?.config else { return "" }
+    Self.formatShortcut(for: action, config: terminal?.config)
+  }
+  static func formatShortcut(for action: String, config: ghostty_config_t?) -> String {
+    guard let config else { return "" }
     var trigger = ghostty_input_trigger_s()
     guard action.withCString({ velokit_config_trigger(config, $0, &trigger) }) else { return "" }
     let key: String
