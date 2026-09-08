@@ -6,6 +6,8 @@ import VelocittyConfiguration
 
 // Search and scrolling are native controls; the engine owns matches and viewport state.
 final class TerminalChrome: NSView, NSSearchFieldDelegate {
+  let connectionStatus = NSTextField(labelWithString: "")
+  let retryConnection = NSButton(title: "Retry", target: nil, action: nil)
   let progress = TerminalProgress()
   let terminal: TerminalView
   let search = NSSearchField()
@@ -33,6 +35,15 @@ final class TerminalChrome: NSView, NSSearchFieldDelegate {
     for view in [search, count, previous, next, close, scroller, secure, resizeLabel, dragHandle, progress] {
       addSubview(view)
     }
+    addSubview(connectionStatus)
+    addSubview(retryConnection)
+    connectionStatus.isHidden = true
+    connectionStatus.drawsBackground = true
+    connectionStatus.backgroundColor = .windowBackgroundColor
+    connectionStatus.alignment = .center
+    retryConnection.isHidden = true
+    retryConnection.target = self
+    retryConnection.action = #selector(retryAttachment)
     resizeLabel.isHidden = true
     resizeLabel.font = .monospacedDigitSystemFont(ofSize: 16, weight: .medium)
     resizeLabel.alignment = .center
@@ -62,6 +73,8 @@ final class TerminalChrome: NSView, NSSearchFieldDelegate {
 
   override func layout() {
     super.layout()
+    connectionStatus.frame = NSRect(x: 12, y: bounds.height - 36, width: max(60, bounds.width - 100), height: 24)
+    retryConnection.frame = NSRect(x: bounds.width - 82, y: bounds.height - 38, width: 70, height: 28)
     let contentWidth = bounds.width
     let policy = NativeSettings(config: terminal.config).dragHandle
     let dragging =
@@ -93,6 +106,14 @@ final class TerminalChrome: NSView, NSSearchFieldDelegate {
     next.frame = NSRect(x: contentWidth - 101, y: searchTop - 32, width: 32, height: 26)
     close.frame = NSRect(x: contentWidth - 67, y: searchTop - 32, width: 60, height: 26)
   }
+
+  func showConnectionStatus(_ message: String?, retry: Bool) {
+    connectionStatus.stringValue = message ?? ""
+    connectionStatus.isHidden = message == nil
+    retryConnection.isHidden = !retry
+    needsLayout = true
+  }
+  @objc private func retryAttachment() { terminal.session?.retryAttachment() }
 
   func refreshVisibility() {
     for view in [search, count, previous, next, close] { view.isHidden = !searching }

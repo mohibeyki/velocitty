@@ -1422,6 +1422,20 @@ func runWorkspacePersistenceCheck() throws {
   precondition(FileManager.default.fileExists(atPath: integrationMarker.path), "New herdr shells must load integration")
   let running = try client.hasRunningTask(paneID: window.session!.herdrTerminal!.pane.pane_id)
   precondition(running == false, "An idle shell should not prompt to close")
+  let recoveredPane = window.session!
+  let terminalID = recoveredPane.herdrTerminal!.pane.terminal_id
+  recoveredPane.attachmentExited()
+  recoveredPane.attachmentExited()
+  let recoveryDeadline = Date(timeIntervalSinceNow: 8)
+  while recoveredPane.recovering && Date() < recoveryDeadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.02)) }
+  precondition(!recoveredPane.recovering && window.session === recoveredPane)
+  precondition(recoveredPane.herdrTerminal!.pane.terminal_id == terminalID)
+  let recoveryMarker = directory.appendingPathComponent("recovered")
+  let recoveredCommand = "printf ok > " + HerdrClient.quote(recoveryMarker.path) + "\n"
+  recoveredCommand.withCString { velokit_surface_text(recoveredPane.surface!, $0, UInt(recoveredCommand.utf8.count)) }
+  let inputDeadline = Date(timeIntervalSinceNow: 5)
+  while !FileManager.default.fileExists(atPath: recoveryMarker.path) && Date() < inputDeadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.02)) }
+  precondition(FileManager.default.fileExists(atPath: recoveryMarker.path), "Recovered attachment must accept input in the same shell")
   window.newTab()
   window.newTab()
   wait(first, window)

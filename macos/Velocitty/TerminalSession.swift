@@ -43,8 +43,8 @@ final class TerminalSession {
 
   func createView() -> TerminalView? {
     guard !closed, let app = runtime.app else { return nil }
-    if let view { return view }
-    let terminalView = TerminalView(session: self)
+    if let view, surface != nil { return view }
+    let terminalView = view ?? TerminalView(session: self)
     view = terminalView
     var options = velokit_surface_config_new()
     let pointer = Unmanaged.passUnretained(terminalView).toOpaque()
@@ -70,6 +70,89 @@ final class TerminalSession {
     }
     terminalView.updateFocus()
     return terminalView
+  }
+
+  private var recoveryTimer: Timer?
+  private var recoveryGeneration = UUID()
+  private var recoveryAttempts = 0
+  private(set) var recovering = false
+
+  func attachmentExited() {
+    guard !closed, herdrTerminal != nil, windowController?.closing == false,
+      windowController?.owner?.terminating != true, !recovering else { return }
+    recovering = true
+    recoveryGeneration = UUID()
+    checkAttachment(generation: recoveryGeneration)
+  }
+
+  func retryAttachment() {
+    guard !closed, herdrTerminal != nil else { return }
+    recoveryTimer?.invalidate()
+    recoveryAttempts = 0
+    recovering = true
+    recoveryGeneration = UUID()
+    checkAttachment(generation: recoveryGeneration)
+  }
+
+  private func checkAttachment(generation: UUID) {
+    guard !closed, let terminal = herdrTerminal else { return }
+    chrome?.showConnectionStatus("Reconnecting…", retry: false)
+    terminal.client.perform({ try $0.snapshot(timeout: 2) }) { [weak self] result in
+      guard let self, !self.closed, self.recoveryGeneration == generation,
+        self.windowController?.closing == false, self.windowController?.owner?.terminating != true else { return }
+      switch result {
+      case .success(let snapshot):
+        guard let record = snapshot.panes.first(where: { $0.terminal_id == terminal.pane.terminal_id }) else {
+          self.recovering = false
+          self.windowController?.requestTabClose(self)
+          return
+        }
+        self.herdrTerminal = .init(client: terminal.client, pane: record)
+        self.scheduleAttachmentRetry(generation: generation, canAttach: true)
+      case .failure:
+        self.scheduleAttachmentRetry(generation: generation, canAttach: false)
+      }
+    }
+  }
+
+  private func scheduleAttachmentRetry(generation: UUID, canAttach: Bool) {
+    guard recoveryAttempts < 8 else {
+      chrome?.showConnectionStatus("Disconnected", retry: true)
+      return
+    }
+    let delay = min(10, pow(2, Double(recoveryAttempts)))
+    recoveryAttempts += 1
+    chrome?.showConnectionStatus("Disconnected · retrying in \(Int(delay))s", retry: true)
+    recoveryTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+      guard let self, !self.closed, self.recoveryGeneration == generation else { return }
+      if canAttach {
+        self.view?.inputContext?.discardMarkedText()
+        self.view?.clipboard.cancel()
+        self.links.cancel()
+        let savedConfig = self.config.flatMap { velokit_config_clone($0) }
+        defer { if let savedConfig { velokit_config_free(savedConfig) } }
+        let old = self.surface
+        self.surface = nil
+        if let old { velokit_surface_free(old) }
+        if self.createView() != nil {
+          if let savedConfig { _ = self.applyPreparedConfiguration(savedConfig) }
+          self.view?.updateSurfaceSize()
+          self.recovering = false
+          self.chrome?.showConnectionStatus(nil, retry: false)
+          self.chrome?.needsLayout = true
+          self.windowController?.workspaceView.needsLayout = true
+          self.view?.updateFocus()
+          // A process launch isn't an attachment acknowledgement. Keep the retry
+          // budget until the replacement has remained alive for a while.
+          self.recoveryTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: false) { [weak self] _ in
+            guard let self, !self.recovering else { return }
+            self.recoveryAttempts = 0
+          }
+          return
+        }
+      }
+      self.checkAttachment(generation: generation)
+    }
   }
 
   private var opacityBase: ghostty_config_t?
@@ -126,6 +209,8 @@ final class TerminalSession {
 
   func close() {
     guard !closed else { return }
+    recoveryTimer?.invalidate()
+    recoveryGeneration = UUID()
     chrome?.progress.clear()
     chrome?.fadeTimer?.invalidate()
     view?.inputContext?.discardMarkedText()

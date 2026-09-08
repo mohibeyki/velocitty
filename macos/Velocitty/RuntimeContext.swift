@@ -51,12 +51,8 @@ final class RuntimeContext: NSObject {
     }
     switch action.tag {
     case GHOSTTY_ACTION_SHOW_CHILD_EXITED:
-      // A successful herdr detach/terminal exit needs no extra keypress.
-      // Leave failed attachments visible so their error can still be read.
-      guard view?.session?.herdrTerminal != nil, action.action.child_exited.exit_code == 0 else { return false }
-      perform { view, owner in
-        if let tab = view?.session { owner?.requestTabClose(tab) }
-      }
+      guard view?.session?.herdrTerminal != nil else { return false }
+      perform { view, _ in view?.session?.attachmentExited() }
 
     case GHOSTTY_ACTION_CONFIG_CHANGE:
       guard let config = action.action.config_change.config else { return false }
@@ -590,6 +586,7 @@ final class RuntimeContext: NSObject {
       guard let view, view.surface != nil else { return }
       if let pane = view.session {
         if processAlive { pane.windowController?.closePane(pane) }
+        else if pane.herdrTerminal != nil { pane.attachmentExited() }
         else { pane.windowController?.requestTabClose(pane) }
       }
     }
