@@ -34,10 +34,11 @@ rendering; herdr owns the running terminal sessions.
 - [ ] **Pane polish:** draggable dividers, zoom, equalization, and refined styling.
 - [x] **Workspace state:** restore namespace/tab order, active selections, and
   sidebar width/compact mode against live herdr sessions and split layouts.
-- [ ] **Window restoration:** restore window placement and assign namespaces to
-  their previous windows; workspace sessions currently reopen together.
-- [ ] **Connection recovery:** reconnect automatically after transport failures
-  and synchronize changes made by other herdr clients.
+- [x] **Window restoration:** restore window placement, namespace ownership, and
+  each window’s selections and sidebar state.
+- [x] **Live synchronization:** reflect changes from other herdr clients while
+  keeping focus and selection local to Velocitty.
+- [ ] **Connection recovery:** reconnect terminal streams after transport failures.
 - [x] **Agent status:** compact icons show herdr’s working, waiting, idle, and
   completed states; click an icon to focus its pane. Border appearance is reloadable.
 - [ ] **Workspace search:** a centered title-bar search field for tabs and namespaces.
@@ -81,14 +82,17 @@ all its panes; closing the last tab removes its namespace. The final namespace c
 the window. Closing a window or quitting detaches its views and leaves the herdr
 terminals running. Exiting a shell closes its tab automatically.
 
+Each pane attaches directly to its herdr terminal ID. Velocitty owns focus and
+selection; navigation does not change herdr’s global focus.
+
 Herdr retains namespaces, names, subtitles, terminals, and split layouts.
 Velocitty saves namespace/tab order, active namespace/tab/pane, and sidebar state
 in `~/Library/Application Support/Velocitty/workspace.json`, separate from TOML
 preferences. Saves are automatic and atomic. Relaunching reconciles saved IDs
-with live herdr sessions and attaches them in one window. Missing sessions are
-removed from saved state only after a successful connection; new sessions append.
-A connection failure preserves the saved workspace. Window placement and separate
-window assignments are not restored yet; rebooting does not recreate processes.
+with live herdr sessions and restores their window assignments and placement.
+Missing sessions are removed only after a successful connection; new namespaces
+join the active window. A connection failure preserves the saved workspace.
+Rebooting does not recreate processes.
 
 ## Panes
 
@@ -112,7 +116,8 @@ Ctrl-R renames the current namespace. Ctrl-1–Ctrl-9
 select namespaces by position. Ctrl-T creates a namespace, Ctrl-W closes it,
 and Ctrl-[ / Ctrl-] switch namespaces. Switching returns to that namespace's selected
 tab, with its shells still running. Closing a namespace checks all its tabs
-before ending them.
+before ending them. Unless confirmation is disabled, running work or unknown
+process state prompts once for the group; idle shells close immediately.
 
 Monochrome agent marks are bundled for Codex, Claude, Grok, Gemini, Cursor,
 GitHub Copilot, OpenCode, Kimi, Amp, Cline, Kilo Code, Qwen, Devin, Antigravity,
@@ -133,8 +138,14 @@ detaches; **Close Tab** and **Close Namespace** end the corresponding terminals.
 Herdr owns shell configuration and process lifetime. Windows opened with
 Velocitty's `command` or `initial_command` setting remain standalone.
 
-Automatic reconnection and live synchronization of changes made outside
-Velocitty are deferred.
+A read-only herdr event subscription triggers updates, with polling as a fallback.
+External creation, moves, renames, and removals update the workspace without
+changing Velocitty’s selection. Terminal-stream reconnection remains deferred.
+
+New herdr shells receive the bundled shell-integration startup hooks; existing
+shells are left intact. Fish, Zsh, Elvish, Nushell autoload hooks, and modern Bash
+are supported. Nushell command wrappers require `use ghostty *` in the shell;
+Apple’s Bash 3.2 is excluded, matching the engine. Herdr selects the shell.
 
 ## Tests
 

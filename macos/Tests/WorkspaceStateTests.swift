@@ -35,6 +35,22 @@ final class WorkspaceStateTests: XCTestCase {
     XCTAssertEqual(state.namespaces.map(\.id), ["c", "a"])
   }
 
+  func testLegacyStateAndWindowOwnership() throws {
+    let legacy = try JSONDecoder().decode(WorkspaceState.self, from: Data("{\"version\":1,\"namespaces\":[]}".utf8))
+    XCTAssertNil(legacy.windows)
+    XCTAssertEqual(legacy.reconciled(with: [], panesByTab: [:]).version, 2)
+    var state = WorkspaceState()
+    state.namespaces = ["a", "b"].map { .init(id: $0, tabs: [], selectedTabID: nil) }
+    state.windows = [
+      .init(id: "one", namespaceIDs: ["a", "gone"], selectedNamespaceID: "gone", frame: .init(x: 10, y: 20, width: 800, height: 600), sidebar: nil),
+      .init(id: "two", namespaceIDs: ["a", "b"], selectedNamespaceID: "b", frame: nil, sidebar: nil),
+    ]
+    let restored = state.reconciled(with: state.namespaces, panesByTab: [:])
+    XCTAssertEqual(restored.windows?.map(\.namespaceIDs), [["a"], ["b"]])
+    XCTAssertEqual(restored.windows?.first?.selectedNamespaceID, "a")
+    XCTAssertEqual(try JSONDecoder().decode(WorkspaceState.self, from: JSONEncoder().encode(restored)), restored)
+  }
+
   func testStoreRoundTripAndFutureVersionProtection() throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: directory) }

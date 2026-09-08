@@ -21,6 +21,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   private var workspaceStore: WorkspaceStateStore?
   private var workspaceState: WorkspaceState?
   private var workspaceLoadAttempted = false
+  private var restoringWorkspace = false
+  private var synchronizingWorkspace = false
+  private var eventRefresh: Timer?
+  private var eventRefreshRunning = false
   private var workspaceNeedsSave = false
   private var workspaceSaveTimer: Timer?
 
@@ -85,7 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
       runtime = try self.runtime ?? TerminalRuntime(settings: AppConfiguration.load())
     } catch {
       configurationAlert(error).runModal()
-      if !pendingFiles.isEmpty { NSApp.reply(toOpenOrPrint: .failure) }
+      pendingFiles.removeAll()
       NSApp.terminate(nil)
       return
     }
@@ -98,7 +102,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     if native.initialWindow && windows.isEmpty { newWindow() }
     if herdr == nil { showMuxWarning() }
     if !pendingFiles.isEmpty && !muxOpening {
-      NSApp.reply(toOpenOrPrint: insertFiles(pendingFiles) ? .success : .failure)
+      if !insertFiles(pendingFiles) { NSLog("Could not insert queued files.") }
       pendingFiles.removeAll()
     }
     scheduleQuitIfNeeded()
@@ -201,6 +205,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     let closingWindows = windows
     for controller in closingWindows where !controller.confirmClose() { return .terminateCancel }
     terminating = true
+    pendingFiles.removeAll()
     quitTimer?.invalidate()
     // Leave windows registered while AppKit captures their restorable state.
     return .terminateNow
@@ -243,6 +248,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     if let action = menuItem.action, muxActions.contains(action) {
       return activeWindow?.session?.herdrTerminal != nil && activeWindow?.muxBusy == false
     }
+    if [#selector(closePane), #selector(closeTab)].contains(menuItem.action), activeWindow?.muxBusy == true { return false }
     switch menuItem.action {
     case #selector(closePane), #selector(newNamespace), #selector(editNamespace), #selector(closeNamespace),  #selector(closeTab), #selector(nextTab), #selector(previousTab), #selector(renameTab),
       #selector(moveTabLeft), #selector(moveTabRight), #selector(closeWindow), #selector(showCommands), #selector(findTerminal),
@@ -258,6 +264,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   }
 
   func application(_ sender: NSApplication, openFiles filenames: [String]) {
+    guard !terminating else { sender.reply(toOpenOrPrint: .failure); return }
     guard !filenames.isEmpty else {
       sender.reply(toOpenOrPrint: .success)
       return
@@ -265,17 +272,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     if runtime == nil || muxOpening || (windows.isEmpty && herdr != nil) {
       pendingFiles.append(contentsOf: filenames)
       if runtime != nil && !muxOpening { newWindow() }
-      return // Reply after startup has created a destination.
+      sender.reply(toOpenOrPrint: .success)
+      return // Accepted; insertion happens once a destination exists.
     }
     sender.reply(toOpenOrPrint: insertFiles(filenames) ? .success : .failure)
   }
 
   func insertFiles(_ filenames: [String]) -> Bool {
+    guard !terminating else { return false }
     openWindow()
     guard let surface = activeWindow?.session?.view?.surface else { return false }
     let text = ShellInput.paths(filenames)
-    text.withCString { velokit_surface_text(surface, $0, UInt(text.utf8.count)) }
-    return true
+    return text.withCString { velokit_surface_paste(surface, $0, UInt(text.utf8.count)) }
   }
 
   func refreshAppearance() {
@@ -554,7 +562,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   @objc private func showAboutPanel(_ sender: Any?) {
     NSApp.orderFrontStandardAboutPanel(options: [
       .applicationName: "Velocitty",
-      .credits: NSAttributedString(string: "A macOS terminal powered by libghostty."),
+      .credits: NSAttributedString(string: "A macOS terminal powered by libghostty.\nLicensed under GNU GPL version 3."),
     ])
   }
 }
@@ -566,16 +574,17 @@ final class TerminalTab {
   var layout: HerdrClient.Layout?
   var displayTitle: String { title ?? selected.terminalTitle }
   var hasBell: Bool { panes.contains { $0.hasBell } }
-  var herdrID: String? { panes.first?.herdrTerminal?.pane.tab_id }
+  let herdrID: String?
 
   init(_ pane: TerminalSession) {
+    herdrID = pane.herdrTerminal?.pane.tab_id
     panes = [pane]
     selected = pane
     title = pane.tabTitle
   }
 }
 
-final class TerminalNamespace {
+final class TerminalNamespace: NSObject {
   var name: String
   var herdrID: String?
   var subtitle = ""
@@ -587,6 +596,7 @@ final class TerminalNamespace {
     let tab = TerminalTab(session)
     self.tabs = [tab]
     self.selected = tab
+    super.init()
   }
 }
 
@@ -621,9 +631,26 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     namespaces.first { $0.tabs.contains { $0.panes.contains { $0 === tab } } }
   }
   private var pendingTabClosures: [TerminalSession] = []
+  var workspaceWindowID = UUID().uuidString
   var persistenceReady = false
   var persistedNamespaceIDs: Set<String> = []
-  var muxBusy = false
+  private var pendingMuxActions: [() -> Void] = []
+  var hasPendingMuxActions: Bool { !pendingMuxActions.isEmpty }
+  var muxBusy = false { didSet { if !muxBusy { drainMuxActions() } } }
+  private func drainMuxActions() {
+    guard !pendingMuxActions.isEmpty else { return }
+    DispatchQueue.main.async { [weak self] in
+      guard let self, !self.muxBusy, !self.closing, self.owner?.terminating != true,
+        !self.pendingMuxActions.isEmpty else { return }
+      self.pendingMuxActions.removeFirst()()
+      if !self.muxBusy { self.drainMuxActions() }
+    }
+  }
+  private func deferMuxAction(_ action: @escaping () -> Void) -> Bool {
+    guard muxBusy else { return false }
+    pendingMuxActions.append(action)
+    return true
+  }
   var closing = false
   var resizeTimer: Timer?
   var hasResized = false
@@ -805,6 +832,49 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
   }
 
 
+  private func confirmEnding(_ panes: [TerminalSession], checked: Bool = false, action: @escaping () -> Void) {
+    guard !panes.isEmpty, !closing, owner?.terminating != true, let window, window.attachedSheet == nil else { return }
+    if !checked, let client = panes.first(where: { $0.herdrTerminal != nil })?.herdrTerminal?.client {
+      if deferMuxAction({ [weak self] in self?.confirmEnding(panes, action: action) }) { return }
+      let candidates = panes.filter { NativeSettings(config: $0.config).confirmClose != "false" }
+      guard !candidates.isEmpty else { action(); return }
+      if candidates.contains(where: { NativeSettings(config: $0.config).confirmClose == "always" }) {
+        confirmEnding(panes, checked: true, action: action)
+        return
+      }
+      muxBusy = true
+      client.perform({ client in
+        candidates.contains { pane in
+          guard let id = pane.herdrTerminal?.pane.pane_id else { return true }
+          return (try? client.hasRunningTask(paneID: id)) != false
+        }
+      }) { [weak self] result in
+        guard let self else { return }
+        self.muxBusy = false
+        guard !self.closing, self.owner?.terminating != true, self.window?.attachedSheet == nil else { return }
+        if (try? result.get()) == false { action() }
+        else { self.confirmEnding(panes, checked: true, action: action) }
+      }
+      return
+    }
+    let requiresConfirmation = panes.contains { pane in
+      if pane.herdrTerminal != nil { return NativeSettings(config: pane.config).confirmClose != "false" }
+      return pane.surface.map { velokit_surface_needs_confirm_quit($0) } ?? false
+    }
+    guard requiresConfirmation else { action(); return }
+    let alert = NSAlert()
+    alert.messageText = panes.count == 1 ? "End terminal?" : "End \(panes.count) terminals?"
+    alert.informativeText = "This ends these terminals and their running processes.\n\n"
+      + panes.prefix(8).map(\.displayTitle).joined(separator: "\n")
+      + (panes.count > 8 ? "\n…and \(panes.count - 8) more" : "")
+    alert.addButton(withTitle: "Cancel")
+    alert.addButton(withTitle: "End")
+    alert.beginSheetModal(for: window) { [weak self] response in
+      guard let self, !self.closing, self.owner?.terminating != true else { return }
+      if response == .alertSecondButtonReturn { action() }
+    }
+  }
+
   func confirmClose(of target: TerminalSession? = nil) -> Bool {
     guard let target else {
       // Closing a window or quitting only detaches herdr clients.
@@ -836,6 +906,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     owner?.scheduleWorkspaceSave(self)
     owner?.flushWorkspaceSave()
     persistenceReady = false
+    pendingMuxActions.removeAll()
     passwordInput = false
     manualSecureInput = false
     readonly = false
@@ -938,7 +1009,9 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     window.makeFirstResponder(session?.view)
     applyBackground()
   }
+  func windowDidMove(_ notification: Notification) { owner?.scheduleWorkspaceSave(self) }
   func windowDidResize(_ notification: Notification) {
+    owner?.scheduleWorkspaceSave(self)
     defer { hasResized = true }
     let policy = native.resizeOverlay
     guard policy != "never", policy == "always" || hasResized, window?.inLiveResize == true,
@@ -1129,17 +1202,19 @@ final class TerminalWindow: NSWindow {
 extension TerminalWindowController {
   func newTab(inNewNamespace: Bool = false) {
     guard let session, let client = session.herdrTerminal?.client else { owner?.showMuxWarning(); return }
-    guard let window, window.attachedSheet == nil, !closing, !muxBusy else { return }
+    guard let window, window.attachedSheet == nil, !closing else { return }
+    if deferMuxAction({ [weak self] in self?.newTab(inNewNamespace: inNewNamespace) }) { return }
     let workspace = inNewNamespace ? nil : activeNamespace.herdrID
     let name = "Namespace \(namespaces.count + 1)"
     let directory = native.tabInheritsDirectory ? currentDirectory ?? session.settings.workingDirectory.path
       : session.settings.workingDirectory.path
     let existing = Set((owner?.windows.flatMap(\.allPanes) ?? allPanes).compactMap { $0.herdrTerminal?.pane.terminal_id })
+    let shellEnvironment = client.shellEnvironment(settings: session.settings)
     muxBusy = true
-    client.perform({ try $0.create(workspace: workspace, name: name, directory: directory) }) { [weak self] result in
+    client.perform({ try $0.create(workspace: workspace, name: name, directory: directory, environment: shellEnvironment) }) { [weak self] result in
       guard let self else { return }
       self.muxBusy = false
-      guard !self.closing, self.window != nil else { return }
+      guard !self.closing, self.window != nil, self.owner?.terminating != true else { return }
       do {
         let snapshot = try result.get()
         try self.addHerdrTerminals(snapshot, excluding: existing)
@@ -1177,11 +1252,6 @@ extension TerminalWindowController {
       window.contentResizeIncrements = NSSize(width: max(1, CGFloat(size.cell_width_px) / window.backingScaleFactor),
         height: max(1, CGFloat(size.cell_height_px) / window.backingScaleFactor))
     } else { window.contentResizeIncrements = NSSize(width: 1, height: 1) }
-    if let terminal = pane.herdrTerminal {
-      terminal.client.perform({ _ = try $0.request(["tab", "focus", terminal.pane.tab_id]) }) { result in
-        if case .failure(let error) = result { NSLog("herdr focus: %@", error.localizedDescription) }
-      }
-    }
     refreshTabBars()
     if window.firstResponder !== pane.view { window.makeFirstResponder(pane.view) }
     pane.view?.updateFocus()
@@ -1217,7 +1287,12 @@ extension TerminalWindowController {
     guard let pane = source ?? session, let namespace = namespace(for: pane), let tab = tab(for: pane),
       let index = namespace.tabs.firstIndex(where: { $0 === tab }),
       window?.attachedSheet == nil, !closing else { return }
-    if confirm && !tab.panes.allSatisfy({ confirmClose(of: $0) }) { return }
+    if confirm {
+      confirmEnding(tab.panes) { [weak self, weak pane] in
+        if let pane { self?.closeTab(pane, confirm: false, endSession: endSession) }
+      }
+      return
+    }
     if endSession, pane.herdrTerminal != nil { endHerdrTabs([tab]); return }
     if namespaces.flatMap(\.tabs).count == 1 {
       closing = true
@@ -1248,8 +1323,11 @@ extension TerminalWindowController {
     case GHOSTTY_ACTION_CLOSE_TAB_MODE_RIGHT: targets = Array(namespace.tabs.dropFirst(index + 1))
     default: targets = [tab]
     }
-    guard targets.flatMap(\.panes).allSatisfy({ confirmClose(of: $0) }) else { return }
-    endHerdrTabs(targets)
+    confirmEnding(targets.flatMap(\.panes)) { [weak self, weak pane] in
+      guard let self, let pane else { return }
+      if pane.herdrTerminal == nil { self.closeTab(pane, confirm: false); return }
+      self.endHerdrTabs(targets)
+    }
   }
 
   func renameTab(_ source: TerminalSession? = nil) {
@@ -1268,7 +1346,7 @@ extension TerminalWindowController {
       let value = field.stringValue
       guard let terminal = tab.herdrTerminal else { return }
       terminal.client.perform({ _ = try $0.request(["tab", "rename", terminal.pane.tab_id, value]) }) { [weak self, weak tab] result in
-        guard let self, let tab else { return }
+        guard let self, let tab, !self.closing, self.owner?.terminating != true else { return }
         switch result {
         case .success:
           self.tab(for: tab)?.title = value.isEmpty ? nil : value
@@ -1324,8 +1402,7 @@ extension TerminalWindowController {
   func closeNamespace() {
     guard window?.attachedSheet == nil, !closing else { return }
     let targets = activeNamespace.tabs
-    guard targets.flatMap(\.panes).allSatisfy({ confirmClose(of: $0) }) else { return }
-    endHerdrTabs(targets)
+    confirmEnding(targets.flatMap(\.panes)) { [weak self] in self?.endHerdrTabs(targets) }
   }
 
   func editNamespace() {
@@ -1347,7 +1424,7 @@ extension TerminalWindowController {
       let name = value.isEmpty ? namespace.name : value
       let subtitle = namespace.subtitle
       client.perform({ try $0.rename(workspace: id, name: name, subtitle: subtitle) }) { [weak self] result in
-        guard let self else { return }
+        guard let self, !self.closing, self.owner?.terminating != true else { return }
         switch result {
         case .success: namespace.name = name; namespace.subtitle = subtitle; self.refreshTabBars()
         case .failure(let error): self.owner?.showMuxError(error)
@@ -1367,6 +1444,7 @@ extension AppDelegate {
   }
 
   func showMuxError(_ error: Error) {
+    guard !terminating else { return }
     let alert = NSAlert()
     alert.messageText = "Multiplexing unavailable"
     alert.informativeText = error.localizedDescription
@@ -1382,60 +1460,71 @@ extension AppDelegate {
     quitTimer?.invalidate()
     let attached = Set(windows.flatMap(\.allPanes).compactMap { $0.herdrTerminal?.pane.terminal_id })
     let directory = runtime.settings.workingDirectory
+    let shellEnvironment = client.shellEnvironment(settings: runtime.settings)
     client.perform({ client -> HerdrClient.Snapshot in
       let snapshot = try client.connect(directory: directory)
       if snapshot.panes.contains(where: { !attached.contains($0.terminal_id) }) { return snapshot }
-      return try client.create(workspace: nil, name: "Default", directory: directory.path)
+      return try client.create(workspace: nil, name: "Default", directory: directory.path, environment: shellEnvironment)
     }) { [weak self] result in
       guard let self else { return }
       self.muxOpening = false
       guard !self.terminating else { return }
       defer {
         if !self.pendingFiles.isEmpty {
-          NSApp.reply(toOpenOrPrint: self.insertFiles(self.pendingFiles) ? .success : .failure)
+          if !self.insertFiles(self.pendingFiles) { NSLog("Could not insert queued files.") }
           self.pendingFiles.removeAll()
         }
       }
       do {
         let snapshot = try result.get()
         self.loadWorkspaceState(for: client)
-        let panes = snapshot.panes.filter { !attached.contains($0.terminal_id) }
-        guard let first = panes.first else { throw ConfigurationError("herdr returned no terminals to attach.") }
-        let session = runtime.makeSession()
-        session.herdrTerminal = HerdrClient.Terminal(client: client, pane: first)
-        let controller = TerminalWindowController(session: session, owner: self)
-        controller.activeNamespace.herdrID = first.workspace_id
-        self.windows.append(controller)
-        controller.openWindow(cascadingFrom: self.focusedWindow?.window)
-        guard controller.window != nil else {
-          self.windows.removeAll { $0 === controller }
-          session.close()
-          throw ConfigurationError("Could not create a terminal view. The herdr session is still running.")
+        let live = snapshot.workspaces.map { workspace in
+          WorkspaceState.Namespace(id: workspace.workspace_id,
+            tabs: snapshot.tabs.filter { $0.workspace_id == workspace.workspace_id }.map { tab in
+              WorkspaceState.Tab(id: tab.tab_id, selectedPaneID: snapshot.panes.first { $0.tab_id == tab.tab_id }?.pane_id)
+            }, selectedTabID: snapshot.tabs.first { $0.workspace_id == workspace.workspace_id }?.tab_id)
         }
-        session.currentDirectory = first.cwd ?? directory.path
-        try controller.addHerdrTerminals(snapshot, excluding: attached.union([first.terminal_id]), restoring: true)
-        self.muxError = nil
-        // Restore herdr's selected tab within the first namespace where possible.
-        let namespace = controller.namespaces.first!
-        let selectedID = snapshot.workspaces.first { $0.workspace_id == namespace.herdrID }?.active_tab_id
-        controller.selectTab(namespace.tabs.first { $0.herdrID == selectedID } ?? namespace.selected)
-        if let saved = self.workspaceState {
-          let live = snapshot.workspaces.map { workspace in
-            WorkspaceState.Namespace(id: workspace.workspace_id,
-              tabs: snapshot.tabs.filter { $0.workspace_id == workspace.workspace_id }.map { tab in
-                WorkspaceState.Tab(id: tab.tab_id,
-                  selectedPaneID: snapshot.layouts.first { $0.tab_id == tab.tab_id }?.focused_pane_id)
-              }, selectedTabID: workspace.active_tab_id)
+        let saved = self.workspaceState ?? WorkspaceState()
+        let restored = saved.reconciled(with: live,
+          panesByTab: Dictionary(grouping: snapshot.panes, by: \.tab_id).mapValues { Set($0.map(\.pane_id)) })
+        let attachedNamespaces = Set(self.windows.flatMap(\.namespaces).compactMap(\.herdrID))
+        let available = snapshot.workspaces.map(\.workspace_id).filter { !attachedNamespaces.contains($0) }
+        var groups = (restored.windows ?? []).compactMap { saved -> WorkspaceState.Window? in
+          var window = saved
+          window.namespaceIDs = window.namespaceIDs.filter { available.contains($0) }
+          return window.namespaceIDs.isEmpty ? nil : window
+        }
+        let assigned = Set(groups.flatMap(\.namespaceIDs))
+        let unknown = available.filter { !assigned.contains($0) }
+        if !unknown.isEmpty {
+          if let index = groups.firstIndex(where: { $0.id == restored.activeWindowID }) ?? groups.indices.first {
+            groups[index].namespaceIDs += unknown
+          } else {
+            groups.append(.init(id: UUID().uuidString, namespaceIDs: unknown,
+              selectedNamespaceID: restored.selectedNamespaceID ?? unknown.first, frame: nil, sidebar: restored.sidebar))
           }
-          let panesByTab = Dictionary(grouping: snapshot.panes, by: \.tab_id).mapValues { Set($0.map(\.pane_id)) }
-          let restored = saved.reconciled(with: live, panesByTab: panesByTab)
-          controller.restoreWorkspaceState(restored)
-          self.workspaceNeedsSave = self.workspaceNeedsSave || saved != restored
-          self.workspaceState = restored
         }
-        controller.persistenceReady = self.workspaceStore != nil
-        controller.persistedNamespaceIDs = Set(controller.namespaces.compactMap(\.herdrID))
-        self.scheduleWorkspaceSave(controller)
+        self.restoringWorkspace = true
+        var opened: [TerminalWindowController] = []
+        do {
+          for group in groups { opened.append(try self.attachHerdrWindow(snapshot, client: client, presentation: group, state: restored)) }
+        } catch {
+          for controller in opened { controller.closing = true; controller.window?.close() }
+          self.restoringWorkspace = false
+          throw error
+        }
+        self.workspaceState = self.workspaceStore == nil ? nil : restored
+        self.restoringWorkspace = false
+        for controller in opened {
+          controller.persistenceReady = self.workspaceStore != nil
+          controller.persistedNamespaceIDs = Set(controller.namespaces.compactMap(\.herdrID))
+          self.scheduleWorkspaceSave(controller)
+        }
+        if let selected = opened.first(where: { $0.workspaceWindowID == restored.activeWindowID }) {
+          selected.window?.makeKeyAndOrderFront(nil)
+        }
+        self.observeHerdr(client, snapshot: snapshot)
+        self.muxError = nil
       } catch {
         self.muxError = error.localizedDescription
         if self.windows.isEmpty { self.newLocalWindow() }
@@ -1443,25 +1532,160 @@ extension AppDelegate {
       }
     }
   }
+  func observeHerdr(_ client: HerdrClient, snapshot: HerdrClient.Snapshot) {
+    client.onWorkspaceEvent = { [weak self, weak client] in
+      guard let self, let client, !self.terminating else { return }
+      self.eventRefresh?.invalidate()
+      self.eventRefresh = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self, weak client] _ in
+        guard let self, let client, !self.eventRefreshRunning, !self.terminating else { return }
+        self.eventRefreshRunning = true
+        client.perform({ try $0.snapshot(timeout: 1) }) { [weak self, weak client] result in
+          guard let self, let client else { return }
+          self.eventRefreshRunning = false
+          if case .success(let snapshot) = result { self.synchronizeHerdr(snapshot, client: client) }
+        }
+      }
+    }
+    client.observeEvents(panes: snapshot.panes)
+  }
+
+  func synchronizeHerdr(_ serverSnapshot: HerdrClient.Snapshot, client: HerdrClient) {
+    let targets = windows.filter { $0.session?.herdrTerminal?.client === client && !$0.closing }
+    guard !terminating, !muxOpening, !restoringWorkspace, !synchronizingWorkspace, !targets.isEmpty,
+      targets.allSatisfy({ !$0.muxBusy && !$0.hasPendingMuxActions && $0.window?.attachedSheet == nil }) else { return }
+    observeHerdr(client, snapshot: serverSnapshot)
+    let visibleNamespaces = Set(targets.flatMap(\.namespaces).compactMap(\.herdrID))
+    let detached = Set((workspaceState?.windows ?? []).flatMap(\.namespaceIDs)).subtracting(visibleNamespaces)
+    let snapshot = serverSnapshot.filtered(namespaceIDs: Set(serverSnapshot.workspaces.map(\.workspace_id)).subtracting(detached))
+    let currentRecords = targets.flatMap(\.allPanes).compactMap { $0.herdrTerminal?.pane }
+    let structureMatches = Set(currentRecords.map(\.terminal_id)) == Set(snapshot.panes.map(\.terminal_id))
+      && currentRecords.allSatisfy { old in snapshot.panes.contains { $0.terminal_id == old.terminal_id && $0.tab_id == old.tab_id && $0.workspace_id == old.workspace_id } }
+    if var saved = workspaceState {
+      let live = serverSnapshot.workspaces.map { workspace in
+        WorkspaceState.Namespace(id: workspace.workspace_id,
+          tabs: serverSnapshot.tabs.filter { $0.workspace_id == workspace.workspace_id }.map { .init(id: $0.tab_id, selectedPaneID: nil) }, selectedTabID: nil)
+      }
+      saved = saved.reconciled(with: live, panesByTab: Dictionary(grouping: serverSnapshot.panes, by: \.tab_id).mapValues { Set($0.map(\.pane_id)) })
+      workspaceNeedsSave = workspaceNeedsSave || saved != workspaceState
+      workspaceState = saved
+    }
+    if structureMatches {
+      for controller in targets { controller.updateHerdrLabels(snapshot) }
+      if workspaceNeedsSave { flushWorkspaceSave() }
+      return
+    }
+    synchronizingWorkspace = true
+    restoringWorkspace = true
+    defer { restoringWorkspace = false; synchronizingWorkspace = false }
+    let oldPanes = targets.flatMap(\.allPanes)
+    var sessions = Dictionary(uniqueKeysWithValues: oldPanes.compactMap { pane in
+      pane.herdrTerminal.map { ($0.pane.terminal_id, pane) }
+    })
+    var created: [TerminalSession] = []
+    do {
+      // Prepare before touching any existing window, so failures are atomic.
+      for record in snapshot.panes where sessions[record.terminal_id] == nil {
+        guard let runtime else { return }
+        let pane = runtime.makeSession()
+        pane.herdrTerminal = .init(client: client, pane: record)
+        pane.currentDirectory = record.cwd
+        pane.surfaceContext = GHOSTTY_SURFACE_CONTEXT_SPLIT
+        created.append(pane)
+        guard let view = pane.createView() else { throw ConfigurationError("Could not attach an external terminal.") }
+        pane.chrome = TerminalChrome(view)
+        sessions[record.terminal_id] = pane
+      }
+    } catch {
+      created.forEach { $0.close() }
+      NSLog("Workspace synchronization: %@", error.localizedDescription)
+      return
+    }
+    let destination = targets.first { $0 === focusedWindow } ?? targets[0]
+    var owners: [String: TerminalWindowController] = [:]
+    for controller in targets {
+      for namespace in controller.namespaces { if let id = namespace.herdrID { owners[id] = controller } }
+    }
+    for workspace in snapshot.workspaces where owners[workspace.workspace_id] == nil { owners[workspace.workspace_id] = destination }
+    for controller in targets {
+      let ids = snapshot.workspaces.map(\.workspace_id).filter { owners[$0] === controller }
+      controller.reconcileHerdr(snapshot, namespaceIDs: ids, sessions: sessions)
+    }
+    let liveIDs = Set(snapshot.panes.map(\.terminal_id))
+    for pane in oldPanes where !liveIDs.contains(pane.herdrTerminal?.pane.terminal_id ?? "") { pane.close() }
+    restoringWorkspace = false
+    for controller in targets where !controller.closing { scheduleWorkspaceSave(controller) }
+  }
+
+  private func attachHerdrWindow(_ snapshot: HerdrClient.Snapshot, client: HerdrClient,
+    presentation: WorkspaceState.Window, state: WorkspaceState) throws -> TerminalWindowController {
+    guard let runtime, let first = snapshot.panes.first(where: { presentation.namespaceIDs.contains($0.workspace_id) }) else {
+      throw ConfigurationError("herdr returned no terminals to attach.")
+    }
+    let session = runtime.makeSession()
+    session.herdrTerminal = .init(client: client, pane: first)
+    let controller = TerminalWindowController(session: session, owner: self)
+    controller.workspaceWindowID = presentation.id
+    controller.activeNamespace.herdrID = first.workspace_id
+    windows.append(controller)
+    controller.openWindow(cascadingFrom: focusedWindow?.window)
+    do {
+      guard let window = controller.window else { throw ConfigurationError("Could not create terminal window.") }
+      let excluded = Set(snapshot.panes.filter { !presentation.namespaceIDs.contains($0.workspace_id) }.map(\.terminal_id))
+      try controller.addHerdrTerminals(snapshot, excluding: excluded, restoring: true)
+      var selection = state
+      selection.selectedNamespaceID = presentation.selectedNamespaceID
+      selection.sidebar = presentation.sidebar
+      controller.restoreWorkspaceState(selection)
+      if let saved = presentation.frame {
+        var frame = NSRect(x: saved.x, y: saved.y, width: saved.width, height: saved.height)
+        let screen = NSScreen.screens.first { $0.visibleFrame.intersects(frame) } ?? NSScreen.main
+        if let bounds = screen?.visibleFrame {
+          frame.size.width = min(max(window.minSize.width, frame.width), bounds.width)
+          frame.size.height = min(max(window.minSize.height, frame.height), bounds.height)
+          frame.origin.x = min(max(frame.minX, bounds.minX), bounds.maxX - frame.width)
+          frame.origin.y = min(max(frame.minY, bounds.minY), bounds.maxY - frame.height)
+        }
+        window.setFrame(frame, display: true)
+      }
+      return controller
+    } catch {
+      controller.closing = true
+      controller.window?.close()
+      windows.removeAll { $0 === controller }
+      session.close()
+      throw error
+    }
+  }
+
 }
 
 extension TerminalWindowController {
   func addHerdrTerminals(_ snapshot: HerdrClient.Snapshot, excluding excluded: Set<String>, restoring: Bool = false) throws {
     guard let client = session?.herdrTerminal?.client, let runtime = session?.runtime else { return }
+    let attached = Set((owner?.windows.flatMap(\.allPanes) ?? allPanes).compactMap { $0.herdrTerminal?.pane.terminal_id })
+    let excluded = excluded.union(attached)
+    var prepared: [String: TerminalSession] = [:]
+    do {
+      for pane in snapshot.panes where !excluded.contains(pane.terminal_id) {
+        guard prepared[pane.terminal_id] == nil else { throw ConfigurationError("herdr returned duplicate terminal IDs.") }
+        let terminal = runtime.makeSession()
+        terminal.herdrTerminal = HerdrClient.Terminal(client: client, pane: pane)
+        terminal.surfaceContext = GHOSTTY_SURFACE_CONTEXT_SPLIT
+        terminal.windowController = self
+        prepared[pane.terminal_id] = terminal
+        guard let view = terminal.createView() else { throw ConfigurationError("Could not attach the terminal view. Its herdr session is still running.") }
+        terminal.chrome = TerminalChrome(view)
+        terminal.currentDirectory = pane.cwd
+      }
+    } catch {
+      prepared.values.forEach { $0.close() }
+      throw error
+    }
     var newest: TerminalSession?
     for workspace in snapshot.workspaces {
       for record in snapshot.tabs where record.workspace_id == workspace.workspace_id {
         for pane in snapshot.panes where pane.tab_id == record.tab_id && !excluded.contains(pane.terminal_id) {
-          let terminal = runtime.makeSession()
-          terminal.herdrTerminal = HerdrClient.Terminal(client: client, pane: pane)
-          terminal.surfaceContext = GHOSTTY_SURFACE_CONTEXT_SPLIT
-          terminal.windowController = self
-          guard let view = terminal.createView() else {
-            terminal.close()
-            throw ConfigurationError("Could not attach the terminal view. Its herdr session is still running.")
-          }
-          terminal.chrome = TerminalChrome(view)
-          terminal.currentDirectory = pane.cwd
+          guard let terminal = prepared.removeValue(forKey: pane.terminal_id) else { continue }
           if let namespace = namespaces.first(where: { $0.herdrID == workspace.workspace_id }) {
             if let tab = namespace.tabs.first(where: { $0.herdrID == record.tab_id }) {
               tab.panes.append(terminal)
@@ -1480,41 +1704,94 @@ extension TerminalWindowController {
         }
       }
     }
+    prepared.values.forEach { $0.close() }
     updateHerdrLabels(snapshot)
-    if restoring {
-      for namespace in namespaces {
-        let selectedID = snapshot.workspaces.first { $0.workspace_id == namespace.herdrID }?.active_tab_id
-        if let selected = namespace.tabs.first(where: { $0.herdrID == selectedID }) { namespace.selected = selected }
-        for tab in namespace.tabs {
-          if let pane = tab.panes.first(where: { $0.herdrTerminal?.pane.pane_id == tab.layout?.focused_pane_id }) { tab.selected = pane }
-        }
-      }
-    } else if let newest { selectTab(newest) }
+    if !restoring, let newest { selectTab(newest) }
     workspaceView.present()
+  }
+
+  func reconcileHerdr(_ snapshot: HerdrClient.Snapshot, namespaceIDs: [String], sessions: [String: TerminalSession]) {
+    let previousPane = session
+    let previousNamespace = activeNamespace.herdrID
+    let responder = window?.firstResponder
+    let oldNamespaces = namespaces
+    var rebuilt: [TerminalNamespace] = []
+    let ordered = oldNamespaces.compactMap(\.herdrID).filter(namespaceIDs.contains)
+      + namespaceIDs.filter { id in !oldNamespaces.contains { $0.herdrID == id } }
+    for id in ordered {
+      guard let workspace = snapshot.workspaces.first(where: { $0.workspace_id == id }) else { continue }
+      let records = snapshot.tabs.filter { $0.workspace_id == id }
+      let oldNamespace = oldNamespaces.first { $0.herdrID == id }
+      let oldTabs = oldNamespace?.tabs ?? []
+      let order = oldTabs.compactMap(\.herdrID).filter { id in records.contains { $0.tab_id == id } }
+        + records.map(\.tab_id).filter { id in !oldTabs.contains { $0.herdrID == id } }
+      var tabs: [TerminalTab] = []
+      for tabID in order {
+        let panes = snapshot.panes.filter { $0.tab_id == tabID }.compactMap { record -> TerminalSession? in
+          guard let pane = sessions[record.terminal_id] else { return nil }
+          pane.herdrTerminal = .init(client: pane.herdrTerminal!.client, pane: record)
+          pane.windowController = self
+          return pane
+        }
+        guard let first = panes.first else { continue }
+        let tab = oldTabs.first { $0.herdrID == tabID } ?? TerminalTab(first)
+        tab.panes = panes
+        if !panes.contains(where: { $0 === tab.selected }) { tab.selected = first }
+        tabs.append(tab)
+      }
+      guard let first = tabs.first else { continue }
+      let namespace = oldNamespace ?? TerminalNamespace(name: workspace.label, session: first.selected)
+      namespace.herdrID = id
+      namespace.tabs = tabs
+      if !tabs.contains(where: { $0 === namespace.selected }) { namespace.selected = first }
+      rebuilt.append(namespace)
+    }
+    namespaces = rebuilt
+    guard let first = rebuilt.first else {
+      persistenceReady = false
+      closing = true
+      window?.close()
+      return
+    }
+    activeNamespace = rebuilt.first { $0.herdrID == previousNamespace } ?? first
+    let selected = previousPane.flatMap { pane in allPanes.contains { $0 === pane } ? pane : nil } ?? activeNamespace.selected.selected
+    session = nil
+    updateHerdrLabels(snapshot)
+    selectTab(selected)
+    if previousPane === selected, let responder { window?.makeFirstResponder(responder) }
   }
 
   func updateHerdrLabels(_ snapshot: HerdrClient.Snapshot) {
     workspaceView.updateAgents(snapshot)
+    var changed = false
     for namespace in namespaces {
       if let record = snapshot.workspaces.first(where: { $0.workspace_id == namespace.herdrID }) {
+        changed = changed || namespace.name != record.label || namespace.subtitle != (record.tokens?["subtitle"] ?? "")
         namespace.name = record.label
         namespace.subtitle = record.tokens?["subtitle"] ?? ""
       }
       for tab in namespace.tabs {
-        tab.layout = snapshot.layouts.first { $0.tab_id == tab.herdrID }
+        let layout = snapshot.layouts.first { $0.tab_id == tab.herdrID }
+        changed = changed || tab.layout != layout
+        tab.layout = layout
         if let record = snapshot.tabs.first(where: { $0.tab_id == tab.herdrID }) {
           let position = snapshot.tabs.filter { $0.workspace_id == record.workspace_id }.firstIndex { $0.tab_id == record.tab_id }.map { $0 + 1 }
           let defaultLabel = String(position ?? record.number ?? 1)
-          tab.title = record.label == defaultLabel ? nil : record.label
+          let title = record.label == defaultLabel ? nil : record.label
+          changed = changed || tab.title != title
+          tab.title = title
           for pane in tab.panes { pane.tabTitle = tab.title }
         }
       }
     }
-    workspaceView.present()
+    if changed { workspaceView.present() }
   }
 
   func endHerdrTabs(_ targets: [TerminalTab]) {
-    guard !muxBusy, let client = targets.first?.selected.herdrTerminal?.client else { return }
+    guard !closing, owner?.terminating != true else { return }
+    if deferMuxAction({ [weak self] in self?.endHerdrTabs(targets) }) { return }
+    let targets = targets.filter { tab in namespaces.contains { $0.tabs.contains { $0 === tab } } }
+    guard let client = targets.first?.selected.herdrTerminal?.client else { return }
     muxBusy = true
     let ids = targets.compactMap(\.herdrID)
     client.perform({ client -> ([String], Error?) in
@@ -1527,6 +1804,7 @@ extension TerminalWindowController {
     }) { [weak self] result in
       guard let self else { return }
       self.muxBusy = false
+      guard !self.closing, self.owner?.terminating != true else { return }
       switch result {
       case .success(let (closed, error)):
         for tab in targets where closed.contains(tab.herdrID ?? "") {
@@ -1542,16 +1820,18 @@ extension TerminalWindowController {
 extension TerminalWindowController {
   func splitPane(_ direction: String, from source: TerminalSession? = nil) {
     guard let pane = source ?? session, let terminal = pane.herdrTerminal else { owner?.showMuxWarning(); return }
-    guard !muxBusy, !closing, window?.attachedSheet == nil else { return }
+    guard !closing, window?.attachedSheet == nil else { return }
+    if deferMuxAction({ [weak self, weak pane] in if let pane { self?.splitPane(direction, from: pane) } }) { return }
     let existing = Set((owner?.windows.flatMap(\.allPanes) ?? allPanes).compactMap { $0.herdrTerminal?.pane.terminal_id })
+    let shellEnvironment = terminal.client.shellEnvironment(settings: pane.settings)
     muxBusy = true
     terminal.client.perform({ client in
-      _ = try client.request(["pane", "split", terminal.pane.pane_id, "--direction", direction, "--no-focus"])
+      _ = try client.request(["pane", "split", terminal.pane.pane_id, "--direction", direction, "--no-focus"] + HerdrClient.environmentArguments(shellEnvironment))
       return try client.snapshot()
     }) { [weak self] result in
       guard let self else { return }
       self.muxBusy = false
-      guard !self.closing, self.window != nil else { return }
+      guard !self.closing, self.window != nil, self.owner?.terminating != true else { return }
       do { try self.addHerdrTerminals(result.get(), excluding: existing) }
       catch { self.owner?.showMuxError(error) }
     }
@@ -1583,7 +1863,8 @@ extension TerminalWindowController {
 
   func resizePane(_ direction: String, amount: Double = 0.05, from source: TerminalSession? = nil) {
     guard let pane = source ?? session, let terminal = pane.herdrTerminal,
-      tab(for: pane)?.panes.count ?? 0 > 1, !muxBusy, !closing, window?.attachedSheet == nil else { return }
+      tab(for: pane)?.panes.count ?? 0 > 1, !closing, window?.attachedSheet == nil else { return }
+    if deferMuxAction({ [weak self, weak pane] in if let pane { self?.resizePane(direction, amount: amount, from: pane) } }) { return }
     muxBusy = true
     terminal.client.perform({ client in
       _ = try client.request(["pane", "resize", "--pane", terminal.pane.pane_id,
@@ -1592,7 +1873,7 @@ extension TerminalWindowController {
     }) { [weak self] result in
       guard let self else { return }
       self.muxBusy = false
-      guard !self.closing else { return }
+      guard !self.closing, self.owner?.terminating != true else { return }
       switch result {
       case .success(let snapshot): self.updateHerdrLabels(snapshot)
       case .failure(let error): self.owner?.showMuxError(error)
@@ -1604,9 +1885,14 @@ extension TerminalWindowController {
     guard let pane = source ?? session, let tab = tab(for: pane),
       !closing, window?.attachedSheet == nil else { return }
     if tab.panes.count == 1 { closeTab(pane, confirm: confirm, endSession: endSession); return }
-    if confirm && !confirmClose(of: pane) { return }
+    if confirm {
+      confirmEnding([pane]) { [weak self, weak pane] in
+        if let pane { self?.closePane(pane, confirm: false, endSession: endSession) }
+      }
+      return
+    }
     if endSession, let terminal = pane.herdrTerminal {
-      guard !muxBusy else { return }
+      if deferMuxAction({ [weak self, weak pane] in if let pane { self?.closePane(pane, confirm: false) } }) { return }
       muxBusy = true
       terminal.client.perform({ client in
         _ = try client.request(["pane", "close", terminal.pane.pane_id])
@@ -1614,6 +1900,7 @@ extension TerminalWindowController {
       }) { [weak self, weak pane] result in
         guard let self else { return }
         self.muxBusy = false
+        guard !self.closing, self.owner?.terminating != true else { return }
         switch result {
         case .success(let snapshot):
           if let pane { self.closePane(pane, confirm: false, endSession: false) }
@@ -1653,7 +1940,7 @@ extension AppDelegate {
   }
 
   func scheduleWorkspaceSave(_ controller: TerminalWindowController) {
-    guard controller.persistenceReady, workspaceStore != nil, var state = workspaceState else { return }
+    guard !restoringWorkspace, controller.persistenceReady, workspaceStore != nil, var state = workspaceState else { return }
     let current = controller.namespaces.compactMap { namespace -> WorkspaceState.Namespace? in
       guard let id = namespace.herdrID else { return nil }
       return WorkspaceState.Namespace(id: id, tabs: namespace.tabs.compactMap { tab in
@@ -1663,7 +1950,23 @@ extension AppDelegate {
     }
     state.update(current, replacing: controller.persistedNamespaceIDs)
     controller.persistedNamespaceIDs = Set(current.map(\.id))
+    let frame = controller.normalFrame ?? controller.window?.frame
+    let presentation = WorkspaceState.Window(id: controller.workspaceWindowID,
+      namespaceIDs: current.map(\.id), selectedNamespaceID: controller.activeNamespace.herdrID,
+      frame: frame.map { .init(x: $0.minX, y: $0.minY, width: $0.width, height: $0.height) },
+      sidebar: controller.workspaceView.savedSidebarState)
+    var savedWindows = state.windows ?? []
+    // A namespace has one presentation owner, even after a cross-window move.
+    for index in savedWindows.indices where savedWindows[index].id != presentation.id {
+      savedWindows[index].namespaceIDs.removeAll { presentation.namespaceIDs.contains($0) }
+    }
+    if let index = savedWindows.firstIndex(where: { $0.id == presentation.id }) { savedWindows[index] = presentation }
+    else if !presentation.namespaceIDs.isEmpty { savedWindows.append(presentation) }
+    savedWindows.removeAll { $0.namespaceIDs.isEmpty }
+    state.windows = savedWindows
+    state.version = 2
     if focusedWindow == nil || focusedWindow === controller {
+      state.activeWindowID = controller.workspaceWindowID
       state.selectedNamespaceID = controller.activeNamespace.herdrID
       state.sidebar = controller.workspaceView.savedSidebarState
     }

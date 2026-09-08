@@ -684,7 +684,7 @@ if let executable = HerdrClient.discover() {
   delegate.herdr = client
   func waitMux(_ controller: TerminalWindowController? = nil) {
     let deadline = Date(timeIntervalSinceNow: 10)
-    while (delegate.muxOpening || controller?.muxBusy == true) && Date() < deadline { drain() }
+    while (delegate.muxOpening || (controller?.muxBusy == true || controller?.hasPendingMuxActions == true)) && Date() < deadline { drain() }
     precondition(!delegate.muxOpening && controller?.muxBusy != true)
   }
   delegate.newWindow()
@@ -1380,6 +1380,15 @@ func runWorkspacePersistenceCheck() throws {
   guard let executable = HerdrClient.discover() else { fatalError("herdr is required for this check") }
   let directory = FileManager.default.temporaryDirectory.appendingPathComponent("velocitty-state-" + UUID().uuidString)
   let file = directory.appendingPathComponent("workspace.json")
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  let herdrConfig = directory.appendingPathComponent("herdr.toml")
+  try Data("[terminal]\ndefault_shell='/bin/zsh'\n".utf8).write(to: herdrConfig)
+  let previousConfig = ProcessInfo.processInfo.environment["HERDR_CONFIG_PATH"]
+  setenv("HERDR_CONFIG_PATH", herdrConfig.path, 1)
+  defer {
+    if let previousConfig { setenv("HERDR_CONFIG_PATH", previousConfig, 1) }
+    else { unsetenv("HERDR_CONFIG_PATH") }
+  }
   let client = HerdrClient(executable: executable, sessionName: "velocitty-test-" + UUID().uuidString.lowercased())
   defer {
     _ = try? client.run(["server", "stop"])
@@ -1396,7 +1405,7 @@ func runWorkspacePersistenceCheck() throws {
   }
   func wait(_ owner: AppDelegate, _ controller: TerminalWindowController? = nil) {
     let deadline = Date(timeIntervalSinceNow: 10)
-    while (owner.muxOpening || controller?.muxBusy == true) && Date() < deadline {
+    while (owner.muxOpening || (controller?.muxBusy == true || controller?.hasPendingMuxActions == true)) && Date() < deadline {
       pumpEvents(until: Date(timeIntervalSinceNow: 0.02))
     }
     precondition(!owner.muxOpening && controller?.muxBusy != true)
@@ -1404,6 +1413,25 @@ func runWorkspacePersistenceCheck() throws {
   let first = try makeOwner()
   first.newWindow(); wait(first)
   let window = first.windows.last!
+  let integrationMarker = directory.appendingPathComponent("integration")
+  pumpEvents(until: Date(timeIntervalSinceNow: 0.5))
+  let integrationCommand = "(( $+_ghostty_state )) && printf ok > " + HerdrClient.quote(integrationMarker.path) + "\n"
+  integrationCommand.withCString { velokit_surface_text(window.session!.surface!, $0, UInt(integrationCommand.utf8.count)) }
+  let shellDeadline = Date(timeIntervalSinceNow: 5)
+  while !FileManager.default.fileExists(atPath: integrationMarker.path) && Date() < shellDeadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.02)) }
+  precondition(FileManager.default.fileExists(atPath: integrationMarker.path), "New herdr shells must load integration")
+  let running = try client.hasRunningTask(paneID: window.session!.herdrTerminal!.pane.pane_id)
+  precondition(running == false, "An idle shell should not prompt to close")
+  window.newTab()
+  window.newTab()
+  wait(first, window)
+  precondition(window.tabs.count == 3, "Busy mux actions must queue instead of disappearing")
+  let beforeSelection = try client.snapshot().workspaces.map(\.active_tab_id)
+  window.selectTab(window.tabs[0])
+  window.selectTab(window.tabs[2])
+  wait(first, window)
+  let afterSelection = try client.snapshot().workspaces.map(\.active_tab_id)
+  precondition(afterSelection == beforeSelection, "Velocitty navigation must not change herdr focus")
   window.splitPane("right"); wait(first, window)
   let selectedPane = window.session!.herdrTerminal!.pane.pane_id
   let splitTabID = window.activeTab.herdrID!
@@ -1431,7 +1459,47 @@ func runWorkspacePersistenceCheck() throws {
   let split = restored.namespaces[0].tabs.first { $0.herdrID == splitTabID }!
   precondition(split.selected.herdrTerminal!.pane.pane_id == selectedPane)
   precondition(restored.workspaceView.savedSidebarState == .init(width: 276, compact: true))
+  // External changes must attach exactly once without importing backend focus.
+  let localSelection = restored.session!
+  let previousTabs = Set(restored.namespaces.flatMap(\.tabs).compactMap(\.herdrID))
+  var eventReceived = false
+  let eventHandler = client.onWorkspaceEvent
+  client.onWorkspaceEvent = { eventReceived = true; eventHandler?() }
+  let external = try client.create(workspace: selectedNamespace, name: "External", directory: directory.path)
+  let added = external.panes.first { !previousTabs.contains($0.tab_id) }!
+  let beforeRollback = restored.allPanes.count
+  let invalid = HerdrClient.Snapshot(layouts: external.layouts, workspaces: external.workspaces, tabs: external.tabs, panes: [added, added])
+  do { try restored.addHerdrTerminals(invalid, excluding: []); preconditionFailure("Expected duplicate rejection") }
+  catch { precondition(restored.allPanes.count == beforeRollback, "A failed attachment must roll back prepared views") }
+  let eventDeadline = Date(timeIntervalSinceNow: 3)
+  while !eventReceived && Date() < eventDeadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.02)) }
+  precondition(client.eventsConnected && eventReceived, "Structural events must arrive over the read-only API")
+  second.synchronizeHerdr(external, client: client)
+  let count = restored.allPanes.count
+  second.synchronizeHerdr(external, client: client)
+  precondition(restored.allPanes.count == count && restored.session === localSelection)
+  let externalTab = external.tabs.first { !previousTabs.contains($0.tab_id) }!
+  _ = try client.request(["tab", "close", externalTab.tab_id])
+  second.synchronizeHerdr(try client.snapshot(), client: client)
+  precondition(restored.allPanes.count == count - 1 && restored.session === localSelection)
+  // A second window has independent ownership and geometry across relaunch.
+  second.newWindow(); wait(second)
+  let extra = second.windows.first { $0 !== restored }!
+  let extraID = extra.workspaceWindowID
+  let extraNamespace = extra.activeNamespace.herdrID
+  extra.window?.setFrame(NSRect(x: 100, y: 100, width: 850, height: 650), display: true)
+  second.scheduleWorkspaceSave(extra); second.flushWorkspaceSave()
+  extra.window?.performClose(nil)
+  second.synchronizeHerdr(try client.snapshot(), client: client)
+  precondition(!restored.namespaces.contains { $0.herdrID == extraNamespace }, "Detached windows must stay detached")
   restored.window?.performClose(nil)
+  let third = try makeOwner()
+  third.newWindow(); wait(third)
+  precondition(third.windows.count == 2, "Window assignments must survive relaunch")
+  let extraRestored = third.windows.first { $0.workspaceWindowID == extraID }!
+  precondition(extraRestored.activeNamespace.herdrID == extraNamespace)
+  precondition(extraRestored.window!.frame.width == 850)
+  for controller in Array(third.windows) { controller.window?.performClose(nil) }
   print("Workspace persistence tests passed.")
 }
 

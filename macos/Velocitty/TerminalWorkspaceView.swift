@@ -23,11 +23,11 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     return defaults.merging(controller?.session?.settings.interface ?? [:]) { _, custom in custom }
   }
   func chromeColor(_ key: String) -> NSColor {
-    let hex = UInt32(appearanceValues[key]!.dropFirst(), radix: 16)!
+    let hex = UInt32((appearanceValues[key] ?? NamespaceAppearance.defaults[key] ?? "#000000").dropFirst(), radix: 16) ?? 0
     return NSColor(srgbRed: CGFloat((hex >> 16) & 255) / 255,
       green: CGFloat((hex >> 8) & 255) / 255, blue: CGFloat(hex & 255) / 255, alpha: 1)
   }
-  func metric(_ key: String) -> CGFloat { CGFloat(Double(appearanceValues[key]!)!) }
+  func metric(_ key: String) -> CGFloat { CGFloat(Double(appearanceValues[key] ?? "") ?? Double(NamespaceAppearance.defaults[key] ?? "") ?? 0) }
   private let splitView = WorkspaceSplitView()
   private let sidebar = NSVisualEffectView()
   private let content = NSView()
@@ -48,8 +48,13 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   private var paneDirectories: [String: String] = [:]
   private var branches: [String: String] = [:]
   private var pollingBranches = false
+  private var branchPaths: Set<String> = []
+  private var branchesCheckedAt = -Double.infinity
+  private var gitWatchers: [String: DispatchSourceFileSystemObject] = [:]
+  private var gitRefresh: Timer?
   private var agentTimer: Timer?
   private var pollingAgents = false
+  private var lastAgentPoll = -Double.infinity
 
   var tabHeight: CGFloat { muxEnabled ? 34 : 0 }
   let namespaceScroll = NSScrollView()
@@ -115,6 +120,8 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     toggleSidebar.image = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "Toggle Sidebar")
     toggleSidebar.target = self
     toggleSidebar.action = #selector(toggleNamespaceSidebar)
+    toggleSidebar.refusesFirstResponder = true
+    addTab.refusesFirstResponder = true
     toggleSidebar.toolTip = "Compact Sidebar"
     content.addSubview(toggleSidebar)
     for button in [addTab, toggleSidebar] {
@@ -124,7 +131,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   }
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-  deinit { agentTimer?.invalidate(); sidebarAnimation?.invalidate() }
+  deinit { agentTimer?.invalidate(); sidebarAnimation?.invalidate(); gitRefresh?.invalidate(); gitWatchers.values.forEach { $0.cancel() } }
 
   override func viewDidMoveToWindow() {
     super.viewDidMoveToWindow()
@@ -140,12 +147,19 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     guard !pollingAgents, let controller, !controller.muxBusy,
       window?.isVisible == true, NSApp.isActive,
       let client = controller.session?.herdrTerminal?.client else { return }
+    let now = ProcessInfo.processInfo.systemUptime
+    guard now - lastAgentPoll >= (client.eventsConnected ? 10 : 2) else { return }
+    lastAgentPoll = now
     pollingAgents = true
-    client.perform({ try $0.snapshot() }) { [weak self] result in
+    client.perform({ try $0.statusSnapshot() }) { [weak self] result in
       guard let self else { return }
       self.pollingAgents = false
       switch result {
-      case .success(let snapshot): self.updateAgents(snapshot)
+      case .success(let snapshot):
+        guard self.controller?.closing == false, self.controller?.owner?.terminating != true else { return }
+        if let client = self.controller?.session?.herdrTerminal?.client { self.controller?.owner?.synchronizeHerdr(snapshot, client: client) }
+        self.updateAgents(snapshot)
+        self.applyPolledLayouts(snapshot)
       case .failure:
         let stale = self.agents.mapValues { Agent(name: $0.name, status: "unknown") }
         if stale != self.agents { self.agents = stale; self.refreshTabs() }
@@ -168,10 +182,12 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     }
     pollBranches(directories: directories)
     guard updated != agents || titles != paneTitles || directories != paneDirectories else { return }
+    let previousTitles = controller?.tabs.map { title(for: $0) }
     paneTitles = titles
     paneDirectories = directories
     agents = updated
-    refreshTabs()
+    if previousTitles != controller?.tabs.map({ title(for: $0) }) { refreshTabs() }
+    else if let controller { refreshNamespaces(controller) }
   }
 
   private func directory(for namespace: TerminalNamespace) -> String {
@@ -185,9 +201,14 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     let paths = Set(controller.namespaces.map { namespace in
       directories[namespace.selected.selected.herdrTerminal?.pane.pane_id ?? ""] ?? directory(for: namespace)
     })
+    let now = ProcessInfo.processInfo.systemUptime
+    guard paths != branchPaths || now - branchesCheckedAt >= 60 else { return }
+    branchPaths = paths
+    branchesCheckedAt = now
     pollingBranches = true
     DispatchQueue.global(qos: .utility).async { [weak self] in
       var results: [String: String] = [:]
+      var metadataPaths: Set<String> = []
       for path in paths {
         func git(_ arguments: [String]) -> String? {
           let process = Process()
@@ -199,7 +220,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
           process.standardError = FileHandle.nullDevice
           process.standardInput = FileHandle.nullDevice
           do { try process.run() } catch { return nil }
-          let timeout = DispatchWorkItem { if process.isRunning { process.terminate() } }
+          let timeout = DispatchWorkItem { if process.isRunning { kill(process.processIdentifier, SIGKILL) } }
           DispatchQueue.global().asyncAfter(deadline: .now() + 2, execute: timeout)
           let data = output.fileHandleForReading.readDataToEndOfFile()
           process.waitUntilExit()
@@ -208,19 +229,60 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
           let value = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
           return value.isEmpty ? nil : value
         }
+        if let directory = git(["rev-parse", "--absolute-git-dir"]) { metadataPaths.insert(directory) }
+        else { metadataPaths.insert(path) }
         if let branch = git(["symbolic-ref", "--quiet", "--short", "HEAD"]) { results[path] = branch }
         else if let commit = git(["rev-parse", "--short", "HEAD"]) { results[path] = "Detached · " + commit }
       }
       let updated = results
+      let watched = metadataPaths
       DispatchQueue.main.async { [weak self] in
         guard let self else { return }
         self.pollingBranches = false
+        self.watchGitMetadata(watched)
         if self.branches != updated {
           self.branches = updated
           if let controller = self.controller { self.refreshNamespaces(controller) }
         }
       }
     }
+  }
+
+  private func watchGitMetadata(_ paths: Set<String>) {
+    for path in Array(gitWatchers.keys) where !paths.contains(path) { gitWatchers.removeValue(forKey: path)?.cancel() }
+    for path in paths where gitWatchers[path] == nil {
+      let fd = open(path, O_EVTONLY)
+      guard fd >= 0 else { continue }
+      let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .rename, .delete], queue: .main)
+      source.setCancelHandler { Darwin.close(fd) }
+      source.setEventHandler { [weak self] in
+        guard let self else { return }
+        if self.gitWatchers[path]?.data.contains(.rename) == true || self.gitWatchers[path]?.data.contains(.delete) == true {
+          self.gitWatchers.removeValue(forKey: path)?.cancel()
+        }
+        self.gitRefresh?.invalidate()
+        self.gitRefresh = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: false) { [weak self] _ in
+          guard let self else { return }
+          self.branchesCheckedAt = -Double.infinity
+          self.pollBranches(directories: self.paneDirectories)
+        }
+      }
+      gitWatchers[path] = source
+      source.resume()
+    }
+  }
+
+  private func applyPolledLayouts(_ snapshot: HerdrClient.Snapshot) {
+    guard let controller, !controller.muxBusy else { return }
+    var changed = false
+    for tab in controller.namespaces.flatMap(\.tabs) {
+      guard let layout = snapshot.layouts.first(where: { $0.tab_id == tab.herdrID }),
+        Set(layout.panes.map(\.pane_id)) == Set(tab.panes.compactMap { $0.herdrTerminal?.pane.pane_id }),
+        layout != tab.layout else { continue }
+      tab.layout = layout
+      changed = true
+    }
+    if changed { needsLayout = true }
   }
 
   func agent(for pane: TerminalSession) -> Agent? {
@@ -258,6 +320,8 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
       configuredWidth = requestedWidth
       splitView.setPosition(sidebarCompact ? 56 : min(restoredWidth, max(160, bounds.width - 320)), ofDividerAt: 0)
     }
+    toggleSidebar.refusesFirstResponder = true
+    addTab.refusesFirstResponder = true
     toggleSidebar.toolTip = sidebarCompact ? "Expand Sidebar" : "Compact Sidebar"
     toggleSidebar.setAccessibilityLabel(toggleSidebar.toolTip)
     let width = content.bounds.width
@@ -274,9 +338,16 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     namespaceScroll.frame = sidebar.bounds
     panes.frame = NSRect(x: 0, y: 0, width: width, height: max(0, height - tabHeight))
     guard let tab = controller?.activeTab else { return }
-    for pane in tab.panes {
-      var frame = panes.bounds
-      if let layout = tab.layout, tab.panes.count > 1,
+    let completeLayout = tab.layout.map { layout in
+      layout.area.width > 0 && layout.area.height > 0 && tab.panes.allSatisfy { pane in
+        layout.panes.contains { $0.pane_id == pane.herdrTerminal?.pane.pane_id && $0.rect.width > 0 && $0.rect.height > 0 }
+      }
+    } ?? false
+    for (index, pane) in tab.panes.enumerated() {
+      // A missing snapshot must never stack interactive terminals on top of one another.
+      var frame = NSRect(x: CGFloat(index) * panes.bounds.width / CGFloat(tab.panes.count), y: 0,
+        width: panes.bounds.width / CGFloat(tab.panes.count), height: panes.bounds.height)
+      if completeLayout, let layout = tab.layout, tab.panes.count > 1,
         let rect = layout.panes.first(where: { $0.pane_id == pane.herdrTerminal?.pane.pane_id })?.rect {
         let sx = panes.bounds.width / max(1, CGFloat(layout.area.width))
         let sy = panes.bounds.height / max(1, CGFloat(layout.area.height))
@@ -387,12 +458,12 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
     item == nil ? controller?.namespaces.count ?? 0 : 0
   }
-  func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any { NSNumber(value: index) }
+  func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any { controller!.namespaces[index] }
   func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool { false }
   private func namespace(for item: Any) -> TerminalNamespace? {
-    guard let index = (item as? NSNumber)?.intValue, let controller,
-      controller.namespaces.indices.contains(index) else { return nil }
-    return controller.namespaces[index]
+    guard let namespace = item as? TerminalNamespace,
+      controller?.namespaces.contains(where: { $0 === namespace }) == true else { return nil }
+    return namespace
   }
   func outlineView(_ outlineView: NSOutlineView, shouldShowOutlineCellForItem item: Any) -> Bool { false }
   func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? { NamespaceHoverRow() }
@@ -406,7 +477,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
     guard let namespace = namespace(for: item) else { return nil }
     let cell = NSTableCellView()
-    let number = ((item as? NSNumber)?.intValue ?? 0) + 1
+    let number = (controller?.namespaces.firstIndex { $0 === namespace } ?? 0) + 1
     let title = NSTextField(labelWithString: sidebarCompact ? String(number) : namespace.name)
     title.alignment = sidebarCompact ? .center : .left
     title.setAccessibilityLabel(sidebarCompact ? "Namespace \(number): \(namespace.name)" : namespace.name)
@@ -480,8 +551,8 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   }
   func outlineViewSelectionDidChange(_ notification: Notification) {
     guard !refreshingNamespaces, namespaceList.selectedRow >= 0 else { return }
-    let keyboardFocus = window?.firstResponder === namespaceList
-    controller?.selectNamespace(at: namespaceList.selectedRow)
+    let keyboardFocus = NSApp.currentEvent?.type == .keyDown && window?.firstResponder === namespaceList
+    if let namespace = namespaceList.item(atRow: namespaceList.selectedRow) as? TerminalNamespace { controller?.selectTab(namespace.selected) }
     if keyboardFocus { window?.makeFirstResponder(namespaceList) }
   }
   func splitView(_ splitView: NSSplitView, shouldAdjustSizeOfSubview view: NSView) -> Bool { view === content }
@@ -573,6 +644,7 @@ private final class AgentIconButton: NSButton {
     super.init(frame: .zero)
     title = ""
     isBordered = false
+    refusesFirstResponder = true
     wantsLayer = true
     layer?.addSublayer(border)
     agentImage.image = AgentIconCatalog.image(for: agent.name)
@@ -588,16 +660,16 @@ private final class AgentIconButton: NSButton {
   override func layout() {
     super.layout()
     agentImage.frame = bounds.insetBy(dx: 4, dy: 4)
-    let width = CGFloat(Double(values["agent_border_width"]!)!)
+    let width = CGFloat(Double(values["agent_border_width"] ?? "") ?? 1)
     let rect = bounds.insetBy(dx: width / 2 + 1, dy: width / 2 + 1)
     border.frame = bounds
     border.path = CGPath(roundedRect: rect, cornerWidth: 5, cornerHeight: 5, transform: nil)
     border.fillColor = nil
     border.lineWidth = width
-    let hex = UInt32(values[statusKey + "_color"]!.dropFirst(), radix: 16)!
+    let hex = UInt32((values[statusKey + "_color"] ?? "#666666").dropFirst(), radix: 16) ?? 0x666666
     border.strokeColor = NSColor(srgbRed: CGFloat((hex >> 16) & 255) / 255,
       green: CGFloat((hex >> 8) & 255) / 255, blue: CGFloat(hex & 255) / 255, alpha: 1).cgColor
-    let style = values[statusKey + "_style"]!
+    let style = values[statusKey + "_style"] ?? "solid"
     border.isHidden = style == "none"
     border.removeAnimation(forKey: "activity")
     border.lineDashPattern = nil
@@ -609,7 +681,7 @@ private final class AgentIconButton: NSButton {
       let animation = CABasicAnimation(keyPath: "lineDashPhase")
       animation.fromValue = 0
       animation.toValue = -perimeter
-      animation.duration = Double(values["agent_animation_duration"]!)!
+      animation.duration = Double(values["agent_animation_duration"] ?? "") ?? 1.6
       animation.repeatCount = .infinity
       border.add(animation, forKey: "activity")
     }

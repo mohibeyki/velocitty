@@ -22,7 +22,26 @@ public struct WorkspaceState: Codable, Equatable, Sendable {
     public var compact: Bool
     public init(width: Double, compact: Bool) { self.width = width; self.compact = compact }
   }
-  public var version = 1
+  public struct Frame: Codable, Equatable, Sendable {
+    public var x: Double, y: Double, width: Double, height: Double
+    public init(x: Double, y: Double, width: Double, height: Double) {
+      self.x = x; self.y = y; self.width = width; self.height = height
+    }
+  }
+  public struct Window: Codable, Equatable, Sendable {
+    public var id: String
+    public var namespaceIDs: [String]
+    public var selectedNamespaceID: String?
+    public var frame: Frame?
+    public var sidebar: Sidebar?
+    public init(id: String, namespaceIDs: [String], selectedNamespaceID: String?, frame: Frame?, sidebar: Sidebar?) {
+      self.id = id; self.namespaceIDs = namespaceIDs; self.selectedNamespaceID = selectedNamespaceID
+      self.frame = frame; self.sidebar = sidebar
+    }
+  }
+  public var windows: [Window]?
+  public var activeWindowID: String?
+  public var version = 2
   public var namespaces: [Namespace] = []
   public var selectedNamespaceID: String?
   public var sidebar: Sidebar?
@@ -55,6 +74,21 @@ public struct WorkspaceState: Codable, Equatable, Sendable {
     if !result.namespaces.contains(where: { $0.id == selectedNamespaceID }) {
       result.selectedNamespaceID = result.namespaces.first?.id
     }
+    if var windows = result.windows {
+      let liveIDs = Set(result.namespaces.map(\.id))
+      var assigned: Set<String> = []
+      for index in windows.indices {
+        windows[index].namespaceIDs = windows[index].namespaceIDs.filter { liveIDs.contains($0) && assigned.insert($0).inserted }
+        if !windows[index].namespaceIDs.contains(windows[index].selectedNamespaceID ?? "") {
+          windows[index].selectedNamespaceID = windows[index].namespaceIDs.first
+        }
+      }
+      result.windows = windows.filter { !$0.namespaceIDs.isEmpty }
+      if result.windows?.contains(where: { $0.id == result.activeWindowID }) != true {
+        result.activeWindowID = result.windows?.first?.id
+      }
+    }
+    result.version = 2
     return result
   }
 
@@ -83,7 +117,7 @@ public struct WorkspaceStateStore {
     do { data = try Data(contentsOf: url) }
     catch let error as CocoaError where error.code == .fileReadNoSuchFile { return WorkspaceState() }
     let state = try JSONDecoder().decode(WorkspaceState.self, from: data)
-    guard state.version == 1 else { throw ConfigurationError("Unsupported workspace state version: \(state.version)") }
+    guard (1...2).contains(state.version) else { throw ConfigurationError("Unsupported workspace state version: \(state.version)") }
     // Reject malformed state rather than overwriting it during this run.
     let namespaces = state.namespaces.map(\.id)
     let tabs = state.namespaces.flatMap(\.tabs).map(\.id)
@@ -91,6 +125,15 @@ public struct WorkspaceStateStore {
       namespaces.allSatisfy({ !$0.isEmpty }), tabs.allSatisfy({ !$0.isEmpty }),
       state.sidebar.map({ $0.width.isFinite && (160...400).contains($0.width) }) ?? true
     else { throw ConfigurationError("Invalid workspace state.") }
+    if let windows = state.windows {
+      guard Set(windows.map(\.id)).count == windows.count,
+        Set(windows.flatMap(\.namespaceIDs)).count == windows.flatMap(\.namespaceIDs).count,
+        windows.allSatisfy({ window in
+          !window.id.isEmpty && window.namespaceIDs.allSatisfy { namespaces.contains($0) }
+            && (window.sidebar.map { $0.width.isFinite && (160...400).contains($0.width) } ?? true)
+            && (window.frame.map { [$0.x, $0.y, $0.width, $0.height].allSatisfy(\.isFinite) && $0.width > 0 && $0.height > 0 } ?? true)
+        }) else { throw ConfigurationError("Invalid workspace window state.") }
+    }
     return state
   }
 
