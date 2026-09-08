@@ -57,7 +57,15 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   private var pollingAgents = false
   private var lastAgentPoll = -Double.infinity
 
-  var tabHeight: CGFloat { muxEnabled ? 34 : 0 }
+  var showsTabBar: Bool {
+    guard muxEnabled else { return false }
+    switch controller?.native.tabBarVisibility ?? "auto" {
+    case "never": return false
+    case "always": return true
+    default: return (controller?.tabs.count ?? 0) > 1
+    }
+  }
+  var tabHeight: CGFloat { showsTabBar ? 34 : 0 }
   let namespaceScroll = NSScrollView()
   let namespaceList = NSOutlineView()
   private let tabMaterial = NSVisualEffectView()
@@ -303,7 +311,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
 
   override func layout() {
     super.layout()
-    for view in [tabMaterial, tabScroll, addTab, toggleSidebar] { view.isHidden = !muxEnabled }
+    for view in [tabMaterial, tabScroll, addTab, toggleSidebar] { view.isHidden = !showsTabBar }
     let hideSidebar = !muxEnabled
     if sidebar.isHidden != hideSidebar {
       sidebar.isHidden = hideSidebar
@@ -376,6 +384,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
       let vertical = direction == "right"
       var firstFrame = frame, secondFrame = frame
       let divider = PaneDivider()
+      divider.color = controller?.native.dividerColor ?? .separatorColor
       divider.vertical = vertical
       divider.ratio = Double(ratio)
       divider.container = frame
@@ -616,7 +625,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     configuredWidth = 0
     needsLayout = true
   }
-  @objc private func toggleNamespaceSidebar() {
+  @objc func toggleNamespaceSidebar() {
     sidebarAnimation?.invalidate()
     sidebarAnimation = nil
     let startWidth = sidebar.frame.width
@@ -821,6 +830,7 @@ private final class AgentImageView: NSImageView {
 
 // A divider previews its position locally and commits one explicit ratio on release.
 private final class PaneDivider: NSView {
+  var color = NSColor.separatorColor
   var vertical = true
   var ratio = 0.5
   var container = NSRect.zero
@@ -839,7 +849,7 @@ private final class PaneDivider: NSView {
   }
   override func mouseUp(with event: NSEvent) { dragging = false; onCommit?(ratio) }
   override func draw(_ dirtyRect: NSRect) {
-    (dragging ? NSColor.controlAccentColor : NSColor.separatorColor).setFill()
+    (dragging ? NSColor.controlAccentColor : color).setFill()
     bounds.insetBy(dx: vertical ? 2 : 0, dy: vertical ? 0 : 2).fill()
   }
 }

@@ -56,6 +56,9 @@ final class TerminalView: NSView, NSTextInputClient {
     (superview as? TerminalChrome)?.revealScroller()
   }
   override func mouseEntered(with event: NSEvent) {
+    if NativeSettings(config: config).focusFollowsMouse, window?.attachedSheet == nil, let session {
+      session.windowController?.selectTab(session)
+    }
     mousePosition(event)
     pointer.set()
   }

@@ -6,6 +6,15 @@ import VeloKit
 struct NativeSettings {
   let config: ghostty_config_t?
 
+  var focusFollowsMouse: Bool { bool("focus-follows-mouse", false) }
+  var splitInheritsDirectory: Bool { bool("split-inherit-working-directory", true) }
+  var windowInheritsDirectory: Bool { bool("window-inherit-working-directory", true) }
+  var windowInheritsFontSize: Bool { bool("window-inherit-font-size", true) }
+  var preserveZoomNavigation: Bool { uint32("split-preserve-zoom", 0) & 1 != 0 }
+  var tabBarVisibility: String { string("window-show-tab-bar", "auto") }
+  var unfocusedOpacity: Double { double("unfocused-split-opacity", 0.7) }
+  var unfocusedFill: NSColor { color("unfocused-split-fill") ?? background }
+  var dividerColor: NSColor { color("split-divider-color") ?? .separatorColor }
   var confirmClose: String { string("confirm-close-surface", "true") }
   var tabInheritsDirectory: Bool { bool("tab-inherit-working-directory", true) }
   var newTabPosition: String { string("window-new-tab-position", "current") }

@@ -16,6 +16,7 @@ final class TerminalSession {
   private var closed = false
   var herdrTerminal: HerdrClient.Terminal?
   var initialDirectory: URL?
+  var initialFontSize: Float = 0
   var surfaceContext = GHOSTTY_SURFACE_CONTEXT_WINDOW
   var chrome: TerminalChrome?
   var terminalTitle = "Velocitty"
@@ -53,6 +54,7 @@ final class TerminalSession {
     options.platform = ghostty_platform_u(macos: ghostty_platform_macos_s(nsview: pointer))
     options.scale_factor = Double(NSScreen.main?.backingScaleFactor ?? 2)
     options.context = surfaceContext
+    options.font_size = initialFontSize
     surface = (initialDirectory ?? settings.workingDirectory).path.withCString {
       options.working_directory = $0
       if let command = herdrTerminal?.command {

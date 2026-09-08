@@ -7,6 +7,16 @@ public enum TerminalSettings {
     $0.hasPrefix("gtk-") || $0.hasPrefix("linux-cgroup") || ["class", "x11-instance-name", "freetype-load-flags"].contains($0)
   })
   public static let supported: Set<String> = [
+    "focus-follows-mouse",
+    "split-divider-color",
+    "split-inherit-working-directory",
+    "split-preserve-zoom",
+    "unfocused-split-fill",
+    "unfocused-split-opacity",
+    "window-inherit-font-size",
+    "window-inherit-working-directory",
+    "window-show-tab-bar",
+
     "abnormal-command-exit-runtime",
     "adjust-box-thickness",
     "adjust-cell-height",
@@ -200,7 +210,6 @@ public enum TerminalSettings {
       "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
     "config-default-files":
       "Uses the upstream configuration-file format and search policy; Velocitty loads its own TOML file.",
-    "focus-follows-mouse": "Not implemented for the herdr-backed pane and tab interface.",
     "freetype-load-flags":
       "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
     "gtk-custom-css":
@@ -253,15 +262,7 @@ public enum TerminalSettings {
     "quick-terminal-screen": "Excluded; there is no quick-terminal window.",
     "quick-terminal-size": "Excluded; there is no quick-terminal window.",
     "quick-terminal-space-behavior": "Excluded; there is no quick-terminal window.",
-    "split-divider-color": "Not implemented for the herdr-backed pane and tab interface.",
-    "split-inherit-working-directory": "Not implemented for the herdr-backed pane and tab interface.",
-    "split-preserve-zoom": "Not implemented for the herdr-backed pane and tab interface.",
     "undo-timeout": "Deferred until terminal session restoration is implemented.",
-    "unfocused-split-fill": "Not implemented for the herdr-backed pane and tab interface.",
-    "unfocused-split-opacity": "Not implemented for the herdr-backed pane and tab interface.",
-    "window-inherit-font-size": "Not implemented for the herdr-backed pane and tab interface.",
-    "window-inherit-working-directory": "Not implemented for the herdr-backed pane and tab interface.",
-    "window-show-tab-bar": "Not implemented for the herdr-backed pane and tab interface.",
     "x11-instance-name":
       "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
   ]

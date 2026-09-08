@@ -1446,7 +1446,10 @@ func runWorkspacePersistenceCheck() throws {
   wait(first, window)
   let afterSelection = try client.snapshot().workspaces.map(\.active_tab_id)
   precondition(afterSelection == beforeSelection, "Velocitty navigation must not change herdr focus")
+  window.session?.view?.performSurfaceAction("increase_font_size:2")
+  let inheritedFont = velokit_surface_font_size(window.session!.surface!)
   window.splitPane("right"); wait(first, window)
+  precondition(abs(velokit_surface_font_size(window.session!.surface!) - inheritedFont) < 0.01, "Split must inherit the current font size")
   let splitTabID = window.activeTab.herdrID!
   window.setSplitRatio(tabID: splitTabID, path: [], ratio: 0.3); wait(first, window)
   let resizedTree = try client.layoutTree(tabID: splitTabID)

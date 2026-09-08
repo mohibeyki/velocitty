@@ -23,3 +23,5 @@ Progress:
 - Step 3 moves validated and complete: split-tab moves across namespaces and pane detachment preserve terminal IDs/processes; focused GUI test passed. Mixed-namespace simultaneous presentation remains to be addressed with endpoint presentation in step 7.
 
 - Step 4 validated: native centered search and Cmd-P, live results across windows, and selection into the existing pane passed the focused GUI test.
+
+- Step 5 pane/window settings validated: 27 configuration tests and focused GUI checks passed, including live font-size inheritance. Close undo/redo and Dock drop policy remain separate work within this step.

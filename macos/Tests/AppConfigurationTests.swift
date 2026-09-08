@@ -356,6 +356,22 @@ final class AppConfigurationTests: XCTestCase {
     XCTAssertEqual(config.workingDirectory, AppConfiguration.defaults().workingDirectory)
   }
 
+  func testPaneAndWindowOptionsAreAvailable() throws {
+    let config = try parse("""
+      [terminal]
+      focus_follows_mouse = true
+      unfocused_split_opacity = 0.55
+      split_divider_color = "#112233"
+      split_preserve_zoom = "navigation"
+      split_inherit_working_directory = false
+      window_inherit_working_directory = false
+      window_inherit_font_size = false
+      window_show_tab_bar = "always"
+      """)
+    XCTAssertTrue(config.diagnostics.isEmpty)
+    XCTAssertEqual(config.options.count, 8)
+  }
+
   func testUnavailableOptionsExplainMissingBehavior() throws {
     for (key, reason) in TerminalSettings.unavailable {
       let config = try parse("[terminal]\n\(key) = ''")

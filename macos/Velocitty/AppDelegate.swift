@@ -125,6 +125,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
       if runtime == nil { runtime = try TerminalRuntime(settings: AppConfiguration.load()) }
       guard let runtime else { return }
       let session = runtime.makeSession()
+      if let source = activeWindow?.session {
+        let native = NativeSettings(config: source.config)
+        if native.windowInheritsDirectory, let path = source.currentDirectory ?? activeWindow?.currentDirectory { session.initialDirectory = URL(fileURLWithPath: path) }
+        if native.windowInheritsFontSize, let surface = source.surface { session.initialFontSize = velokit_surface_font_size(surface) }
+      }
       let previousWindow = activeWindow?.window
       let controller = TerminalWindowController(session: session, owner: self)
       windows.append(controller)
@@ -1104,9 +1109,17 @@ final class TerminalWindowController: NSObject, NSWindowDelegate, NSToolbarDeleg
     showWorkspaceSearch(query: text)
   }
 
-  func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { [.flexibleSpace, .init("workspaceSearch")] }
-  func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { [.flexibleSpace, .init("workspaceSearch"), .flexibleSpace] }
+  func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { [.flexibleSpace, .init("workspaceSearch"), .init("namespaceSidebar")] }
+  func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { [.init("namespaceSidebar"), .flexibleSpace, .init("workspaceSearch"), .flexibleSpace] }
   func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+    if identifier.rawValue == "namespaceSidebar" {
+      let item = NSToolbarItem(itemIdentifier: identifier)
+      item.label = "Compact Namespaces"
+      item.image = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "Toggle compact namespaces")
+      item.target = workspaceView
+      item.action = #selector(TerminalWorkspaceView.toggleNamespaceSidebar)
+      return item
+    }
     guard identifier.rawValue == "workspaceSearch" else { return nil }
     let item = NSSearchToolbarItem(itemIdentifier: identifier)
     item.searchField.placeholderString = "Search namespaces, tabs, agents…"
@@ -1312,7 +1325,7 @@ extension TerminalWindowController {
       session?.view?.updateFocus(forceOff: true)
       activeNamespace = namespace
       namespace.selected = tab
-      if tab.selected !== pane { tab.zoomed = false }
+      if tab.selected !== pane && !NativeSettings(config: pane.config).preserveZoomNavigation { tab.zoomed = false }
       tab.selected = pane
       session = pane
       workspaceView.present()
@@ -1321,6 +1334,7 @@ extension TerminalWindowController {
       applySizeLimit(for: pane)
     }
     for terminal in allPanes {
+      terminal.chrome?.needsLayout = true
       if let surface = terminal.surface {
         velokit_surface_set_occlusion(surface,
           tab.panes.contains { $0 === terminal } && (!tab.zoomed || terminal === tab.selected) && window.occlusionState.contains(.visible))
@@ -1538,7 +1552,8 @@ extension AppDelegate {
     muxOpening = true
     quitTimer?.invalidate()
     let attached = Set(windows.flatMap(\.allPanes).compactMap { $0.herdrTerminal?.pane.terminal_id })
-    let directory = runtime.settings.workingDirectory
+    let inheritedDirectory = activeWindow.flatMap { $0.native.windowInheritsDirectory ? $0.currentDirectory : nil }
+    let directory = inheritedDirectory.map { URL(fileURLWithPath: $0) } ?? runtime.settings.workingDirectory
     let shellEnvironment = client.shellEnvironment(settings: runtime.settings)
     client.perform({ client -> HerdrClient.Snapshot in
       let snapshot = try client.connect(directory: directory)
@@ -1701,6 +1716,7 @@ extension AppDelegate {
       throw ConfigurationError("herdr returned no terminals to attach.")
     }
     let session = runtime.makeSession()
+    if presentation.frame == nil, let source = activeWindow?.session, NativeSettings(config: source.config).windowInheritsFontSize, let surface = source.surface { session.initialFontSize = velokit_surface_font_size(surface) }
     session.herdrTerminal = .init(client: client, pane: first)
     let controller = TerminalWindowController(session: session, owner: self)
     controller.workspaceWindowID = presentation.id
@@ -1750,6 +1766,7 @@ extension TerminalWindowController {
         let terminal = runtime.makeSession()
         terminal.herdrTerminal = HerdrClient.Terminal(client: client, pane: pane)
         terminal.surfaceContext = GHOSTTY_SURFACE_CONTEXT_SPLIT
+        if !restoring, native.windowInheritsFontSize, let surface = session?.surface { terminal.initialFontSize = velokit_surface_font_size(surface) }
         terminal.windowController = self
         prepared[pane.terminal_id] = terminal
         guard let view = terminal.createView() else { throw ConfigurationError("Could not attach the terminal view. Its herdr session is still running.") }
@@ -2027,10 +2044,11 @@ extension TerminalWindowController {
     if deferMuxAction({ [weak self, weak pane] in if let pane { self?.splitPane(direction, from: pane) } }) { return }
     let existing = Set((owner?.windows.flatMap(\.allPanes) ?? allPanes).compactMap { $0.herdrTerminal?.pane.terminal_id })
     let shellEnvironment = terminal.client.shellEnvironment(settings: pane.settings)
+    let directory = NativeSettings(config: pane.config).splitInheritsDirectory ? pane.currentDirectory ?? currentDirectory ?? pane.settings.workingDirectory.path : pane.settings.workingDirectory.path
     muxBusy = true
     terminal.client.perform({ client in
       let backendDirection = direction == "left" ? "right" : direction == "up" ? "down" : direction
-      let response = try client.request(["pane", "split", terminal.pane.pane_id, "--direction", backendDirection, "--no-focus"] + HerdrClient.environmentArguments(shellEnvironment))
+      let response = try client.request(["pane", "split", terminal.pane.pane_id, "--direction", backendDirection, "--cwd", directory, "--no-focus"] + HerdrClient.environmentArguments(shellEnvironment))
       if direction == "left" || direction == "up", let newPane = response["pane"] as? [String: Any], let id = newPane["pane_id"] as? String {
         // Herdr creates right/down only. Swapping preserves both processes;
         // its incidental backend selection is never imported into Velocitty.

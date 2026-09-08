@@ -1591,6 +1591,10 @@ pub const CAPI = struct {
         return surface.core_surface.child_exited;
     }
 
+    export fn velokit_surface_font_size(surface: *Surface) f32 {
+        return surface.core_surface.font_size.points;
+    }
+
     export fn velokit_surface_size(surface: *Surface) SurfaceSize {
         const grid_size = surface.core_surface.size.grid();
         return .{

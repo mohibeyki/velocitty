@@ -1125,6 +1125,7 @@ bool velokit_app_key(ghostty_app_t, ghostty_input_key_s);
 bool velokit_app_has_global_keybinds(ghostty_app_t);
 bool velokit_surface_needs_confirm_quit(ghostty_surface_t);
 bool velokit_surface_process_exited(ghostty_surface_t);
+float velokit_surface_font_size(ghostty_surface_t);
 ghostty_surface_size_s velokit_surface_size(ghostty_surface_t);
 void velokit_surface_set_color_scheme(ghostty_surface_t, int);
 int velokit_surface_key_translation_mods(ghostty_surface_t, int);

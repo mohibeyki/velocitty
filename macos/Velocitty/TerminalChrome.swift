@@ -6,6 +6,7 @@ import VelocittyConfiguration
 
 // Search and scrolling are native controls; the engine owns matches and viewport state.
 final class TerminalChrome: NSView, NSSearchFieldDelegate {
+  private let dim = TerminalDimView()
   let connectionStatus = NSTextField(labelWithString: "")
   let retryConnection = NSButton(title: "Retry", target: nil, action: nil)
   let progress = TerminalProgress()
@@ -32,6 +33,8 @@ final class TerminalChrome: NSView, NSSearchFieldDelegate {
     wantsLayer = true
     layer?.masksToBounds = true
     addSubview(terminal)
+    dim.wantsLayer = true
+    addSubview(dim)
     for view in [search, count, previous, next, close, scroller, secure, resizeLabel, dragHandle, progress] {
       addSubview(view)
     }
@@ -96,6 +99,12 @@ final class TerminalChrome: NSView, NSSearchFieldDelegate {
     resizeLabel.frame = NSRect(x: overlayX, y: overlayY, width: 140, height: 32)
     secure.frame = NSRect(x: max(8, contentWidth - 210), y: 5, width: 205, height: 18)
     terminal.frame = NSRect(x: 0, y: 0, width: max(0, contentWidth - width), height: max(0, bounds.height - height))
+    dim.frame = terminal.frame
+    let native = NativeSettings(config: terminal.config)
+    let owner = terminal.session?.windowController
+    dim.isHidden = owner?.session === terminal.session || (owner?.activeTab.panes.count ?? 0) < 2
+    dim.layer?.backgroundColor = native.unfocusedFill.cgColor
+    dim.alphaValue = max(0, min(1, 1 - native.unfocusedOpacity))
     progress.frame = NSRect(x: 0, y: terminal.frame.maxY - 2, width: terminal.frame.width, height: 2)
     scroller.frame = NSRect(
       x: contentWidth - 14, y: 0, width: 14, height: bounds.height - height)
@@ -215,4 +224,8 @@ final class TerminalDragHandle: NSView {
       yRadius: 1.5
     ).fill()
   }
+}
+
+private final class TerminalDimView: NSView {
+  override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
