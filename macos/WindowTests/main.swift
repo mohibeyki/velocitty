@@ -1559,7 +1559,12 @@ func runWorkspacePersistenceCheck() throws {
   searchPanel.table.selectRowIndexes(IndexSet(integer: searchRow), byExtendingSelection: false)
   searchPanel.runSelected()
   precondition(sourceWindow.session === searchTarget && !searchPanel.isVisible)
-  for controller in Array(third.windows) { controller.window?.performClose(nil) }
+  let countBeforeDrop = third.windows.flatMap(\.allPanes).count
+  third.application(app, openFiles: [directory.path])
+  let dropDeadline = Date(timeIntervalSinceNow: 8)
+  while third.windows.flatMap(\.allPanes).count == countBeforeDrop && Date() < dropDeadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.05)) }
+  precondition(third.windows.flatMap(\.allPanes).count == countBeforeDrop + 1, "A directory drop creates a terminal")
+  for controller in Array(third.windows) { controller.closing = true; controller.window?.close() }
   print("Workspace persistence tests passed.")
 }
 

@@ -34,3 +34,5 @@ Progress:
 - Step 3 presentation validated: existing tabs from different servers can appear alongside one another, with local focus and outer divider, preserved terminal IDs and saved composition. Startup preserves offline companions and remote window ownership.
 
 - Close undo validated over SSH: retained native surface identity, authoritative live-terminal validation, redo deadline, and backend destruction pass. Pending explicit closes are persisted and flushed with a bounded quit flow; window detach undo never destroys herdr sessions.
+
+- Dock destinations validated: directory drops create a terminal and the full workspace check passes. Files require execution confirmation; local drops never run on a selected remote host.

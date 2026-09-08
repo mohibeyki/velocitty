@@ -8,6 +8,7 @@ public enum TerminalSettings {
   })
   public static let supported: Set<String> = [
     "undo-timeout",
+    "macos-dock-drop-behavior",
     "focus-follows-mouse",
     "split-divider-color",
     "split-inherit-working-directory",
@@ -249,8 +250,6 @@ public enum TerminalSettings {
       "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
     "macos-applescript": "Excluded from the application.",
     "macos-custom-icon": "Excluded; the app uses fixed artwork.",
-    "macos-dock-drop-behavior":
-      "Velocitty inserts dropped paths into the selected terminal; configurable drop destinations are not implemented.",
     "macos-icon": "Excluded; the app uses fixed artwork.",
     "macos-icon-frame": "Excluded; the app uses fixed artwork.",
     "macos-icon-ghost-color": "Excluded; the app uses fixed artwork.",

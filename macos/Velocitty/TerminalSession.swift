@@ -16,6 +16,7 @@ final class TerminalSession {
   private var closed = false
   var herdrTerminal: HerdrClient.Terminal?
   var initialDirectory: URL?
+  var initialInput: String?
   var initialFontSize: Float = 0
   var surfaceContext = GHOSTTY_SURFACE_CONTEXT_WINDOW
   var chrome: TerminalChrome?
@@ -55,6 +56,9 @@ final class TerminalSession {
     options.scale_factor = Double(NSScreen.main?.backingScaleFactor ?? 2)
     options.context = surfaceContext
     options.font_size = initialFontSize
+    let input = initialInput.flatMap { strdup($0) }
+    defer { free(input) }
+    options.initial_input = input.map { UnsafePointer($0) }
     surface = (initialDirectory ?? settings.workingDirectory).path.withCString {
       options.working_directory = $0
       if let command = herdrTerminal?.command {

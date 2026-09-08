@@ -41,6 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   var shortcuts: GlobalShortcuts?
   var quitTimer: Timer?
   var pendingFiles: [String] = []
+  private var openingDroppedFile = false
   var terminating = false
   var herdr: HerdrClient?
   private var remoteClients: [String: HerdrClient] = [:]
@@ -113,8 +114,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     if native.initialWindow && windows.isEmpty { newWindow() }
     if herdr == nil { showMuxWarning() }
     if !pendingFiles.isEmpty && !muxOpening {
-      if !insertFiles(pendingFiles) { NSLog("Could not insert queued files.") }
-      pendingFiles.removeAll()
+      drainDockFiles()
     }
     scheduleQuitIfNeeded()
     if native.hiddenPolicy == "always" { NSApp.hide(nil) }
@@ -129,7 +129,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     newLocalWindow()
   }
 
-  func newLocalWindow() {
+  func newLocalWindow(directory: URL? = nil, initialInput: String? = nil) {
     quitTimer?.invalidate()
     quitTimer = nil
     do {
@@ -141,6 +141,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if native.windowInheritsDirectory, let path = source.currentDirectory ?? activeWindow?.currentDirectory { session.initialDirectory = URL(fileURLWithPath: path) }
         if native.windowInheritsFontSize, let surface = source.surface { session.initialFontSize = velokit_surface_font_size(surface) }
       }
+      if let directory { session.initialDirectory = directory }
+      session.initialInput = initialInput
       let previousWindow = activeWindow?.window
       let controller = TerminalWindowController(session: session, owner: self)
       windows.append(controller)
@@ -297,13 +299,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
       sender.reply(toOpenOrPrint: .success)
       return
     }
-    if runtime == nil || muxOpening || (windows.isEmpty && herdr != nil) {
-      pendingFiles.append(contentsOf: filenames)
-      if runtime != nil && !muxOpening { newWindow() }
-      sender.reply(toOpenOrPrint: .success)
-      return // Accepted; insertion happens once a destination exists.
+    pendingFiles.append(contentsOf: filenames)
+    drainDockFiles()
+    sender.reply(toOpenOrPrint: .success)
+  }
+
+  private func drainDockFiles() {
+    guard runtime != nil, !terminating, !muxOpening, !openingDroppedFile, !pendingFiles.isEmpty else { return }
+    let path = pendingFiles.removeFirst()
+    var directoryFlag: ObjCBool = false
+    guard FileManager.default.fileExists(atPath: path, isDirectory: &directoryFlag) else {
+      showMuxError(ConfigurationError("The dropped path no longer exists: " + path))
+      drainDockFiles(); return
     }
-    sender.reply(toOpenOrPrint: insertFiles(filenames) ? .success : .failure)
+    let url = URL(fileURLWithPath: path)
+    let directory = directoryFlag.boolValue ? url : url.deletingLastPathComponent()
+    let input: String?
+    if directoryFlag.boolValue { input = nil }
+    else {
+      let alert = NSAlert()
+      alert.messageText = "Allow Velocitty to execute “" + url.lastPathComponent + "”?"
+      alert.informativeText = path
+      alert.addButton(withTitle: "Allow"); alert.addButton(withTitle: "Cancel")
+      guard alert.runModal() == .alertFirstButtonReturn else { drainDockFiles(); return }
+      // Leave the interactive shell open so short scripts don't lose their output.
+      input = HerdrClient.quote(path)
+    }
+    guard let client = herdr else {
+      newLocalWindow(directory: directory, initialInput: input.map { $0 + "\n" })
+      drainDockFiles(); return
+    }
+    let destination = native.dockDropBehavior == "new-tab" ? activeWindow.flatMap { $0.session?.herdrTerminal?.client === client ? $0 : nil } : nil
+    let workspace = destination?.activeNamespace.herdrID
+    let environment = client.shellEnvironment(settings: runtime!.settings)
+    openingDroppedFile = true
+    client.perform({ client -> (HerdrClient.Snapshot, Set<String>) in
+      let before = try client.connect(directory: directory)
+      let old = Set(before.panes.map(\.terminal_id))
+      let after = try client.create(workspace: workspace, name: directory.lastPathComponent, directory: directory.path, environment: environment)
+      if let input, let pane = after.panes.first(where: { !old.contains($0.terminal_id) }) {
+        _ = try client.api("pane.send_input", ["pane_id": pane.pane_id, "text": input, "keys": ["Enter"]])
+      }
+      return (after, old)
+    }) { [weak self, weak destination] result in
+      guard let self else { return }
+      self.openingDroppedFile = false
+      defer { self.drainDockFiles() }
+      guard !self.terminating else { return }
+      do {
+        let (snapshot, old) = try result.get()
+        let controller: TerminalWindowController
+        if let destination, !destination.closing {
+          controller = destination
+          try destination.addHerdrTerminals(snapshot, excluding: old, client: client)
+        } else {
+          let ids = Set(snapshot.panes.filter { !old.contains($0.terminal_id) }.map(\.workspace_id))
+          self.loadWorkspaceState(for: client)
+          controller = try self.attachHerdrWindow(snapshot.filtered(namespaceIDs: ids), client: client,
+            presentation: .init(id: UUID().uuidString, namespaceIDs: Array(ids), selectedNamespaceID: ids.first, frame: nil, sidebar: nil), state: self.workspaceState ?? WorkspaceState())
+          controller.persistenceReady = self.workspaceStore != nil
+        }
+        self.observeHerdr(client, snapshot: snapshot)
+        self.scheduleWorkspaceSave(controller)
+      } catch { self.showMuxError(error) }
+    }
   }
 
   func insertFiles(_ filenames: [String]) -> Bool {
@@ -1646,8 +1705,7 @@ extension AppDelegate {
       guard !self.terminating else { return }
       defer {
         if !self.pendingFiles.isEmpty {
-          if !self.insertFiles(self.pendingFiles) { NSLog("Could not insert queued files.") }
-          self.pendingFiles.removeAll()
+          self.drainDockFiles()
         }
       }
       do {

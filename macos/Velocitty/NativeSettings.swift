@@ -51,6 +51,7 @@ struct NativeSettings {
   var bellAudioVolume: Double { double("bell-audio-volume", 0.5) }
   var bellFeatures: UInt32 { uint32("bell-features", 12) }
   var commandFinishActions: UInt32 { uint32("notify-on-command-finish-action", 1) }
+  var dockDropBehavior: String { string("macos-dock-drop-behavior", "new-tab") }
   var undoTimeout: Double { seconds("undo-timeout", 5) }
   var quitDelay: Double { seconds("quit-after-last-window-closed-delay", 0) }
   var resizeOverlayDuration: Double { seconds("resize-overlay-duration", 0.75) }
