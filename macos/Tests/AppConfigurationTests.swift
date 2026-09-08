@@ -124,6 +124,22 @@ final class AppConfigurationTests: XCTestCase {
     XCTAssertEqual(config.options.map(\.value), ["Menlo", "Monaco", "", "Courier"])
   }
 
+  func testInterfaceIncludesAndOptionalRequiredFile() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("config.toml")
+    try Data("[interface]\nagent-icon-size=20\n[terminal]\nconfig_file=['?missing.toml','missing.toml','child.toml']".utf8).write(to: file)
+    try Data("[interface]\nagent_icon_size=24\n".utf8).write(to: root.appendingPathComponent("child.toml"))
+    let config = AppConfiguration.load(from: file)
+    XCTAssertEqual(config.interface["agent_icon_size"], "24")
+    XCTAssertEqual(config.diagnostics.count, 1)
+    XCTAssertFalse(config.diagnostics[0].contains("cycle"))
+    let duplicate = try AppConfiguration.parse(Data("[interface]\nagent_icon_size=20\nagent-icon-size=24".utf8))
+    XCTAssertNil(duplicate.interface["agent_icon_size"])
+    XCTAssertFalse(duplicate.diagnostics.isEmpty)
+  }
+
   func testIncludeResets() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -344,7 +360,11 @@ final class AppConfigurationTests: XCTestCase {
     for (key, reason) in TerminalSettings.unavailable {
       let config = try parse("[terminal]\n\(key) = ''")
       XCTAssertTrue(config.options.isEmpty, key)
-      XCTAssertTrue(config.diagnostics.first?.contains(reason) == true, key)
+      if TerminalSettings.otherPlatformKeys.contains(key) {
+        XCTAssertTrue(config.diagnostics.isEmpty, key)
+      } else {
+        XCTAssertTrue(config.diagnostics.first?.contains(reason) == true, key)
+      }
     }
     XCTAssertNoThrow(try parse("[terminal]\nclipboard_write = 'ask'"))
   }

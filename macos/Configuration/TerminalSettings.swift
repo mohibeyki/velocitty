@@ -3,6 +3,9 @@
 // Terminal options in the vendored VeloKit Config.zig. Keep names in engine spelling.
 // Unsupported options are explicit errors, never silently accepted no-ops.
 public enum TerminalSettings {
+  public static let otherPlatformKeys: Set<String> = Set(unavailable.keys.filter {
+    $0.hasPrefix("gtk-") || $0.hasPrefix("linux-cgroup") || ["class", "x11-instance-name", "freetype-load-flags"].contains($0)
+  })
   public static let supported: Set<String> = [
     "abnormal-command-exit-runtime",
     "adjust-box-thickness",
@@ -197,7 +200,7 @@ public enum TerminalSettings {
       "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
     "config-default-files":
       "Uses the upstream configuration-file format and search policy; Velocitty loads its own TOML file.",
-    "focus-follows-mouse": "Deferred until tabs and panes are implemented.",
+    "focus-follows-mouse": "Not implemented for the herdr-backed pane and tab interface.",
     "freetype-load-flags":
       "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
     "gtk-custom-css":
@@ -237,7 +240,7 @@ public enum TerminalSettings {
     "macos-applescript": "Excluded from the application.",
     "macos-custom-icon": "Excluded; the app uses fixed artwork.",
     "macos-dock-drop-behavior":
-      "Velocitty inserts dropped paths into its single terminal; new-tab/new-window policies do not apply.",
+      "Velocitty inserts dropped paths into the selected terminal; configurable drop destinations are not implemented.",
     "macos-icon": "Excluded; the app uses fixed artwork.",
     "macos-icon-frame": "Excluded; the app uses fixed artwork.",
     "macos-icon-ghost-color": "Excluded; the app uses fixed artwork.",
@@ -250,15 +253,15 @@ public enum TerminalSettings {
     "quick-terminal-screen": "Excluded; there is no quick-terminal window.",
     "quick-terminal-size": "Excluded; there is no quick-terminal window.",
     "quick-terminal-space-behavior": "Excluded; there is no quick-terminal window.",
-    "split-divider-color": "Deferred until tabs and panes are implemented.",
-    "split-inherit-working-directory": "Deferred until tabs and panes are implemented.",
-    "split-preserve-zoom": "Deferred until tabs and panes are implemented.",
+    "split-divider-color": "Not implemented for the herdr-backed pane and tab interface.",
+    "split-inherit-working-directory": "Not implemented for the herdr-backed pane and tab interface.",
+    "split-preserve-zoom": "Not implemented for the herdr-backed pane and tab interface.",
     "undo-timeout": "Deferred until terminal session restoration is implemented.",
-    "unfocused-split-fill": "Deferred until tabs and panes are implemented.",
-    "unfocused-split-opacity": "Deferred until tabs and panes are implemented.",
-    "window-inherit-font-size": "Deferred until tabs and panes are implemented.",
-    "window-inherit-working-directory": "Deferred until tabs and panes are implemented.",
-    "window-show-tab-bar": "Deferred until tabs and panes are implemented.",
+    "unfocused-split-fill": "Not implemented for the herdr-backed pane and tab interface.",
+    "unfocused-split-opacity": "Not implemented for the herdr-backed pane and tab interface.",
+    "window-inherit-font-size": "Not implemented for the herdr-backed pane and tab interface.",
+    "window-inherit-working-directory": "Not implemented for the herdr-backed pane and tab interface.",
+    "window-show-tab-bar": "Not implemented for the herdr-backed pane and tab interface.",
     "x11-instance-name":
       "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
   ]

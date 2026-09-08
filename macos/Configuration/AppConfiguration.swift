@@ -63,7 +63,7 @@ public struct AppConfiguration: Equatable, Sendable {
       do {
         let data: Data
         do { data = try Data(contentsOf: file) }
-        catch let error as CocoaError where error.code == .fileReadNoSuchFile && optional { continue }
+        catch let error as CocoaError where error.code == .fileReadNoSuchFile && optional { loaded.remove(canonical); continue }
         let own = try parse(data, home: home, source: file)
         interface.merge(own.interface) { _, new in new }
         diagnostics += own.diagnostics
@@ -114,7 +114,13 @@ public struct AppConfiguration: Equatable, Sendable {
         $0.replacingOccurrences(of: "_", with: "-")
       }
       var interface: [String: String] = [:]
-      for (key, value) in document.interface ?? [:] {
+      let interfaceAliases = Dictionary(grouping: (document.interface ?? [:]).keys) { $0.replacingOccurrences(of: "-", with: "_") }
+      for (spelling, value) in document.interface ?? [:] {
+        let key = spelling.replacingOccurrences(of: "-", with: "_")
+        guard interfaceAliases[key]?.count == 1 else {
+          diagnostics.append("\(source.path): Duplicate setting aliases: interface.\(spelling)")
+          continue
+        }
         if case .scalar(let text) = value, NamespaceAppearance.validate(text, for: key) {
           interface[key] = text
         } else {
@@ -128,6 +134,7 @@ public struct AppConfiguration: Equatable, Sendable {
           guard aliases[key]?.count == 1 else {
             throw ConfigurationError("Duplicate setting aliases: terminal.\(spelling)")
           }
+          if TerminalSettings.otherPlatformKeys.contains(key) { continue }
           if let reason = TerminalSettings.unavailable[key] {
             throw ConfigurationError("terminal.\(spelling) is not available yet. \(reason)")
           }
