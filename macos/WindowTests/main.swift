@@ -1564,6 +1564,16 @@ func runWorkspacePersistenceCheck() throws {
   let dropDeadline = Date(timeIntervalSinceNow: 8)
   while third.windows.flatMap(\.allPanes).count == countBeforeDrop && Date() < dropDeadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.05)) }
   precondition(third.windows.flatMap(\.allPanes).count == countBeforeDrop + 1, "A directory drop creates a terminal")
+  let movingWindow = third.activeWindow!
+  let movingPane = movingWindow.session!
+  let surfaceBeforeMove = movingPane.surface
+  movingWindow.moveTabToNewWindow(); wait(third, movingWindow)
+  let movedWindow = third.windows.first { $0.allPanes.contains { $0 === movingPane } }!
+  precondition(movedWindow !== movingWindow && movingPane.surface == surfaceBeforeMove)
+  let titled = movedWindow.window!.styleMask.contains(.titled)
+  movedWindow.toggleDecorations()
+  precondition(movedWindow.window!.styleMask.contains(.titled) != titled)
+  movedWindow.toggleDecorations()
   for controller in Array(third.windows) { controller.closing = true; controller.window?.close() }
   print("Workspace persistence tests passed.")
 }

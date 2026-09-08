@@ -334,10 +334,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     let environment = client.shellEnvironment(settings: runtime!.settings)
     openingDroppedFile = true
     client.perform({ client -> (HerdrClient.Snapshot, Set<String>) in
-      let before = try client.connect(directory: directory)
-      let old = Set(before.panes.map(\.terminal_id))
-      let after = try client.create(workspace: workspace, name: directory.lastPathComponent, directory: directory.path, environment: environment)
-      if let input, let pane = after.panes.first(where: { !old.contains($0.terminal_id) }) {
+      _ = try client.connect(directory: directory)
+      let pane = try client.createPane(workspace: workspace, name: directory.lastPathComponent, directory: directory.path, environment: environment)
+      let after = try client.snapshot()
+      let old = Set(after.panes.map(\.terminal_id)).subtracting([pane.terminal_id])
+      if let input {
         _ = try client.api("pane.send_input", ["pane_id": pane.pane_id, "text": input, "keys": ["Enter"]])
       }
       return (after, old)
@@ -355,7 +356,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         } else {
           let ids = Set(snapshot.panes.filter { !old.contains($0.terminal_id) }.map(\.workspace_id))
           self.loadWorkspaceState(for: client)
-          controller = try self.attachHerdrWindow(snapshot.filtered(namespaceIDs: ids), client: client,
+          controller = try self.attachHerdrWindow(snapshot.excluding(terminals: old).filtered(namespaceIDs: ids), client: client,
             presentation: .init(id: UUID().uuidString, namespaceIDs: Array(ids), selectedNamespaceID: ids.first, frame: nil, sidebar: nil), state: self.workspaceState ?? WorkspaceState())
           controller.persistenceReady = self.workspaceStore != nil
         }
@@ -813,6 +814,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate, NSToolbarDeleg
   var normalFrame: NSRect?
   var normalStyle: NSWindow.StyleMask?
   var fullscreenMode: String?
+  private var decorationsOverride: Bool?
   var titleAccessory: NSTitlebarAccessoryViewController?
   var titleLabel: NSTextField?
   var currentDirectory: String? {
@@ -935,7 +937,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate, NSToolbarDeleg
       titleLabel = nil
     }
     let titlebar = native.titlebarStyle
-    if normalFrame != nil || native.windowDecoration == "none" || titlebar == "hidden" {
+    if normalFrame != nil || (decorationsOverride.map { !$0 } ?? (native.windowDecoration == "none" || titlebar == "hidden")) {
       window.styleMask.remove(.titled)
     } else {
       window.styleMask.insert(.titled)
@@ -1734,7 +1736,8 @@ extension AppDelegate {
         let restored = saved.reconciled(with: live + saved.namespaces.filter { !client.owns($0.id) },
           panesByTab: Dictionary(grouping: snapshot.panes, by: \.tab_id).mapValues { Set($0.map(\.pane_id)) })
         let attachedNamespaces = Set(self.windows.flatMap(\.namespaces).compactMap(\.herdrID))
-        let available = snapshot.workspaces.map(\.workspace_id).filter { !attachedNamespaces.contains($0) }
+        let displaySnapshot = snapshot.excluding(terminals: self.retainedTerminalIDs)
+        let available = displaySnapshot.workspaces.map(\.workspace_id).filter { !attachedNamespaces.contains($0) }
         var groups = (restored.windows ?? []).compactMap { saved -> WorkspaceState.Window? in
           var window = saved
           window.namespaceIDs = window.namespaceIDs.filter { available.contains($0) }
@@ -1753,7 +1756,7 @@ extension AppDelegate {
         self.restoringWorkspace = true
         var opened: [TerminalWindowController] = []
         do {
-          for group in groups { opened.append(try self.attachHerdrWindow(snapshot, client: client, presentation: group, state: restored)) }
+          for group in groups { opened.append(try self.attachHerdrWindow(displaySnapshot, client: client, presentation: group, state: restored)) }
         } catch {
           for controller in opened { controller.closing = true; controller.window?.close() }
           self.restoringWorkspace = false
@@ -1805,7 +1808,7 @@ extension AppDelegate {
     observeHerdr(client, snapshot: serverSnapshot)
     let visibleNamespaces = Set(targets.flatMap(\.namespaces).compactMap(\.herdrID))
     let detached = Set((workspaceState?.windows ?? []).flatMap(\.namespaceIDs)).subtracting(visibleNamespaces)
-    let snapshot = serverSnapshot.filtered(namespaceIDs: Set(serverSnapshot.workspaces.map(\.workspace_id)).subtracting(detached))
+    let snapshot = serverSnapshot.filtered(namespaceIDs: Set(serverSnapshot.workspaces.map(\.workspace_id)).subtracting(detached)).excluding(terminals: retainedTerminalIDs)
     let currentRecords = targets.flatMap(\.allPanes).filter { $0.herdrTerminal?.client === client }.compactMap { $0.herdrTerminal?.pane }
     let structureMatches = Set(currentRecords.map(\.terminal_id)) == Set(snapshot.panes.map(\.terminal_id))
       && currentRecords.allSatisfy { old in snapshot.panes.contains { $0.terminal_id == old.terminal_id && $0.tab_id == old.tab_id && $0.workspace_id == old.workspace_id } }
@@ -2115,9 +2118,9 @@ extension TerminalWindowController {
     moveTerminals { _ = try $0.api("pane.move", ["pane_id": terminal.pane.pane_id, "destination": ["type": "new_tab", "workspace_id": terminal.pane.workspace_id], "focus": false]) }
   }
 
-  private func moveTerminals(_ change: @escaping (HerdrClient) throws -> Void) {
+  private func moveTerminals(_ change: @escaping (HerdrClient) throws -> Void, newWindow: Bool = false) {
     guard !closing, let client = session?.herdrTerminal?.client else { return }
-    if deferMuxAction({ [weak self] in self?.moveTerminals(change) }) { return }
+    if deferMuxAction({ [weak self] in self?.moveTerminals(change, newWindow: newWindow) }) { return }
     let selected = session
     let app = owner
     muxBusy = true
@@ -2134,6 +2137,7 @@ extension TerminalWindowController {
           if let selected, let destination = app?.windows.first(where: { $0.allPanes.contains { $0 === selected } }) {
             destination.selectTab(selected)
             destination.window?.makeKeyAndOrderFront(nil)
+            if newWindow, error == nil { destination.detachSelectedNamespace() }
           }
         }
         if let error { self.owner?.showMuxError(error) }
@@ -2770,4 +2774,47 @@ extension TerminalWindowController {
     }
     closing = false
   }
+}
+
+
+extension TerminalWindowController {
+  func moveTabToNewWindow() {
+    guard let id = activeTab.herdrID, !closing else { return }
+    let label = activeTab.title, namespaceLabel = activeNamespace.name
+    moveTerminals({ try $0.moveTab(tabID: id, workspaceID: nil, label: label, namespaceLabel: namespaceLabel) }, newWindow: true)
+  }
+
+  private func detachSelectedNamespace() {
+    guard let owner, let selected = session, !closing else { return }
+    let namespace = activeNamespace
+    let previousWindow = window
+    namespaces.removeAll { $0 === namespace }
+    if let remaining = allPanes.first { selectTab(remaining); workspaceView.present(); owner.scheduleWorkspaceSave(self) }
+    else { closing = true; window?.close() }
+    let destination = TerminalWindowController(session: selected, owner: owner)
+    destination.namespaces = [namespace]
+    destination.activeNamespace = namespace
+    for pane in namespace.tabs.flatMap(\.panes) { pane.windowController = destination }
+    owner.windows.append(destination)
+    destination.openWindow(cascadingFrom: previousWindow)
+    destination.persistenceReady = persistenceReady || owner.workspacePersistenceEnabled
+    destination.workspaceView.present()
+    destination.selectTab(selected)
+    owner.scheduleWorkspaceSave(destination)
+  }
+
+  func toggleDecorations() {
+    guard let window, !window.styleMask.contains(.fullScreen), normalFrame == nil else { return }
+    decorationsOverride = !window.styleMask.contains(.titled)
+    applyWindowSettings()
+  }
+
+  func toggleTabOverview() {
+    if palette?.isVisible == true { palette?.close() }
+    else { showWorkspaceSearch() }
+  }
+}
+
+extension AppDelegate {
+  fileprivate var workspacePersistenceEnabled: Bool { workspaceStore != nil }
 }

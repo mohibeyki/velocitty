@@ -379,7 +379,7 @@ final class HerdrClient {
     return try JSONDecoder().decode(LayoutNode.self, from: JSONSerialization.data(withJSONObject: root))
   }
 
-  func moveTab(tabID: String, workspaceID: String, label: String?) throws {
+  func moveTab(tabID: String, workspaceID: String?, label: String?, namespaceLabel: String? = nil) throws {
     let before = try snapshot()
     let root = try layoutTree(tabID: tabID)
     let terminals = Dictionary(uniqueKeysWithValues: before.panes.map { ($0.pane_id, $0.terminal_id) })
@@ -394,15 +394,27 @@ final class HerdrClient {
     }
     let firstID = try firstTerminal(root)
     let firstPane = try current(firstID)
-    var destination: [String: Any] = ["type": "new_tab", "workspace_id": workspaceID]
-    if let label { destination["label"] = label }
+    var destination: [String: Any]
+    if let workspaceID {
+      destination = ["type": "new_tab", "workspace_id": workspaceID]
+      if let label { destination["label"] = label }
+    } else {
+      destination = ["type": "new_workspace", "label": namespaceLabel ?? "Namespace"]
+      if let label { destination["tab_label"] = label }
+    }
     _ = try api("pane.move", ["pane_id": firstPane.pane_id, "destination": destination, "focus": false])
-    let newTabID = try current(firstID).tab_id
+    let moved = try current(firstID)
+    guard moved.tab_id != firstPane.tab_id,
+      workspaceID.map({ moved.workspace_id == $0 }) ?? (moved.workspace_id != firstPane.workspace_id) else {
+      throw ConfigurationError("herdr did not move the tab. Check whether another client has zoomed its layout.")
+    }
+    let newTabID = moved.tab_id
     func build(_ node: LayoutNode) throws {
       guard let first = node.first, let second = node.second, let direction = node.direction else { return }
       let target = try current(firstTerminal(first))
       let source = try current(firstTerminal(second))
       _ = try api("pane.move", ["pane_id": source.pane_id, "destination": ["type": "tab", "tab_id": newTabID, "target_pane_id": target.pane_id, "split": direction, "ratio": node.ratio ?? 0.5], "focus": false])
+      guard try current(source.terminal_id).tab_id == newTabID else { throw ConfigurationError("herdr did not move a pane; the partial move has been retained.") }
       try build(first)
       try build(second)
     }
@@ -569,12 +581,19 @@ final class HerdrClient {
     environment.sorted { $0.key < $1.key }.flatMap { ["--env", "\($0.key)=\($0.value)"] }
   }
 
-  func create(workspace: String?, name: String, directory: String?, environment: [String: String] = [:]) throws -> Snapshot {
+  func createPane(workspace: String?, name: String, directory: String?, environment: [String: String] = [:]) throws -> Pane {
+    let response: [String: Any]
     if let workspace {
-      _ = try request(["tab", "create", "--workspace", workspace, "--no-focus"] + (directory.map { ["--cwd", $0] } ?? []) + Self.environmentArguments(environment))
+      response = try request(["tab", "create", "--workspace", workspace, "--no-focus"] + (directory.map { ["--cwd", $0] } ?? []) + Self.environmentArguments(environment))
     } else {
-      _ = try request(["workspace", "create", "--label", name, "--no-focus"] + (directory.map { ["--cwd", $0] } ?? []) + Self.environmentArguments(environment))
+      response = try request(["workspace", "create", "--label", name, "--no-focus"] + (directory.map { ["--cwd", $0] } ?? []) + Self.environmentArguments(environment))
     }
+    guard let pane = response["root_pane"] else { throw ConfigurationError("herdr did not identify the created terminal.") }
+    return try JSONDecoder().decode(Pane.self, from: JSONSerialization.data(withJSONObject: pane))
+  }
+
+  func create(workspace: String?, name: String, directory: String?, environment: [String: String] = [:]) throws -> Snapshot {
+    _ = try createPane(workspace: workspace, name: name, directory: directory, environment: environment)
     return try snapshot()
   }
 

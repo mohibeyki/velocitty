@@ -151,7 +151,7 @@ int main(int argc, char **argv) {
     assert(velokit_action_supported("copy_to_clipboard"));
     assert(velokit_action_supported("open_config:new_window"));
     assert(velokit_action_supported("new_tab"));
-    assert(!velokit_action_supported("toggle_window_decorations"));
+    assert(velokit_action_supported("toggle_window_decorations"));
     accepts("keybind", "ctrl+r=rename_namespace");
     accepts("keybind", "ctrl+t=new_namespace");
     accepts("keybind", "ctrl+2=goto_namespace:2");

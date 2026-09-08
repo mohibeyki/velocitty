@@ -184,6 +184,12 @@ final class RuntimeContext: NSObject {
         if delegate.session === view?.session { delegate.applyWindowSettings() }
       }
 
+    case GHOSTTY_ACTION_MOVE_TAB_TO_NEW_WINDOW:
+      perform { _, owner in owner?.moveTabToNewWindow() }
+    case GHOSTTY_ACTION_TOGGLE_WINDOW_DECORATIONS:
+      perform { _, owner in owner?.toggleDecorations() }
+    case GHOSTTY_ACTION_TOGGLE_TAB_OVERVIEW:
+      perform { _, owner in owner?.toggleTabOverview() }
     case GHOSTTY_ACTION_TOGGLE_COMMAND_PALETTE:
       perform { view, owner in owner?.showCommands() }
 

@@ -8,9 +8,9 @@ Each step ends with focused validation and a local commit. Consult a subagent fo
 - [x] 2. Pane controls: draggable dividers, zoom, equalization, all split directions, styling. Validate nested splits, minimum sizes, selection and restoration.
 - [x] 3. Rearrangement: move tabs across namespaces and panes across tabs, enable mixed-namespace presentation where ownership remains clear. Validate IDs/process lifetime and persistence.
 - [x] 4. Workspace search: centered search, keyboard navigation across namespaces/tabs/agents, waiting-agent discovery. Validate dynamic result updates and focus.
-- [ ] 5. Deferred settings: implement applicable Ghostty pane/window behavior, retain deliberate exclusions. Validate defaults, reload, export and invalid values.
+- [x] 5. Deferred settings: implement applicable Ghostty pane/window behavior, retain deliberate exclusions. Validate defaults, reload, export and invalid values.
 - [x] 6. Settings GUI: native editor backed by existing TOML, preserve unknown settings/comments, validation and reload. Validate round-trip and external edits.
-- [ ] 7. Remote support: use herdr 0.9 multi-server facilities, explicit server identity, config/UI, reconnect and persistence. Validate via laptop IP with isolated sessions; no changes to existing work sessions.
+- [x] 7. Remote support: use herdr 0.9 multi-server facilities, explicit server identity, config/UI, reconnect and persistence. Validate via laptop IP with isolated sessions; no changes to existing work sessions.
 - [ ] 8. Agent polish and integration: consistent status presentation, stale-state handling, navigation. Run focused end-to-end checks, update README roadmap, remove this temporary work plan, commit final docs.
 
 Progress:
@@ -36,3 +36,5 @@ Progress:
 - Close undo validated over SSH: retained native surface identity, authoritative live-terminal validation, redo deadline, and backend destruction pass. Pending explicit closes are persisted and flushed with a bounded quit flow; window detach undo never destroys herdr sessions.
 
 - Dock destinations validated: directory drops create a terminal and the full workspace check passes. Files require execution confirmation; local drops never run on a selected remote host.
+
+- Remaining window actions validated: moving a tab to a new window preserves its surface and terminal identity; decoration toggling works. Tab overview uses workspace search. Final review fixed exact Dock creation targeting and retained-detach synchronization.
