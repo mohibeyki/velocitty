@@ -8,6 +8,10 @@ precondition(velokit_init(UInt(CommandLine.argc), CommandLine.unsafeArgv) == GHO
 if ProcessInfo.processInfo.environment["VELOKIT_TEST_RESTORATION"] != nil {
   runRestorationCheck()
 }
+if CommandLine.arguments.contains("--herdr-control-only") {
+  try runHerdrControlCheck()
+  exit(0)
+}
 let previouslyActiveApplication = NSWorkspace.shared.frontmostApplication
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
@@ -1429,4 +1433,39 @@ func runWorkspacePersistenceCheck() throws {
   precondition(restored.workspaceView.savedSidebarState == .init(width: 276, compact: true))
   restored.window?.performClose(nil)
   print("Workspace persistence tests passed.")
+}
+
+// Runs without creating NSApplication or a real herdr server, including in Core CI.
+func runHerdrControlCheck() throws {
+  let root = FileManager.default.temporaryDirectory.appendingPathComponent("velocitty-control-" + UUID().uuidString)
+  try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let executable = root.appendingPathComponent("herdr")
+  func script(_ body: String) throws {
+    try Data(("#!/bin/sh\n" + body + "\n").utf8).write(to: executable)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+  }
+  let client = HerdrClient(executable: executable, sessionName: "isolated-test")
+  try script("echo 'diagnostic on stderr' >&2\nprintf '%s' '{\"result\":{\"value\":42}}'")
+  let response = try client.request(["read"])
+  precondition(response["value"] as? Int == 42)
+  try script("printf '%s' '{\"error\":{\"code\":\"server_not_running\",\"message\":\"absent\"}}'\nexit 1")
+  do { _ = try client.run(["read"]); preconditionFailure("Expected structured error") }
+  catch let error as HerdrClient.RequestError { precondition(error.code == "server_not_running") }
+  let descendant = root.appendingPathComponent("descendant")
+  try script("(sleep 0.3; touch " + HerdrClient.quote(descendant.path) + ") &\nwait")
+  let started = ProcessInfo.processInfo.systemUptime
+  do { _ = try client.run(["read"], timeout: 0.1); preconditionFailure("Expected timeout") }
+  catch let error as HerdrClient.RequestError { precondition(error.code == "timeout") }
+  precondition(ProcessInfo.processInfo.systemUptime - started < 1)
+  // A malformed response must not start a server or be treated as an empty workspace.
+  try script("if [ \"$3\" = '--version' ]; then echo 'herdr 0.8.2'; else echo invalid; fi")
+  do { _ = try client.connect(directory: root); preconditionFailure("Expected invalid snapshot") }
+  catch { precondition(!(error is HerdrClient.RequestError)) }
+  try script("printf '%s' '{\"result\":{\"snapshot\":{\"workspaces\":[],\"tabs\":[],\"panes\":[],\"layouts\":[]}}}'")
+  let empty = try client.snapshot()
+  precondition(empty.panes.isEmpty)
+  Thread.sleep(forTimeInterval: 0.4)
+  precondition(!FileManager.default.fileExists(atPath: descendant.path), "Timeout must also terminate request descendants")
+  print("Herdr control tests passed.")
 }

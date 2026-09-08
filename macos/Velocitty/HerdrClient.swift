@@ -1,5 +1,5 @@
-import Darwin
 // SPDX-License-Identifier: GPL-3.0
+import Darwin
 import Foundation
 import VelocittyConfiguration
 
@@ -32,17 +32,17 @@ final class HerdrClient {
     var display_agent: String? = nil
     var agent_status: String? = nil
   }
-  struct Rect: Decodable {
+  struct Rect: Decodable, Equatable {
     let x: Int
     let y: Int
     let width: Int
     let height: Int
   }
-  struct LayoutPane: Decodable {
+  struct LayoutPane: Decodable, Equatable {
     let pane_id: String
     let rect: Rect
   }
-  struct Layout: Decodable {
+  struct Layout: Decodable, Equatable {
     let tab_id: String
     let area: Rect
     let focused_pane_id: String
@@ -53,6 +53,13 @@ final class HerdrClient {
     let workspaces: [Workspace]
     let tabs: [Tab]
     let panes: [Pane]
+    func filtered(namespaceIDs: Set<String>) -> Snapshot {
+      let tabs = tabs.filter { namespaceIDs.contains($0.workspace_id) }
+      let tabIDs = Set(tabs.map(\.tab_id))
+      return Snapshot(layouts: layouts.filter { tabIDs.contains($0.tab_id) },
+        workspaces: workspaces.filter { namespaceIDs.contains($0.workspace_id) }, tabs: tabs,
+        panes: panes.filter { namespaceIDs.contains($0.workspace_id) })
+    }
   }
   struct Terminal {
     let client: HerdrClient
@@ -70,10 +77,59 @@ final class HerdrClient {
   let sessionName: String
   private let queue = DispatchQueue(label: "velocitty.herdr", qos: .userInitiated)
   private var server: Process?
+  private var eventStream: HerdrEventStream?
+  private var eventStarting = false
+  private var eventPaneIDs: Set<String> = []
+  private var eventGeneration = UUID()
+  var eventsConnected: Bool { eventStream?.isActive == true }
+  var onWorkspaceEvent: (() -> Void)?
+  private var cachedStatus: (TimeInterval, Snapshot)?
 
   init(executable: URL, sessionName: String = "velocitty") {
     self.executable = executable
     self.sessionName = sessionName
+  }
+
+  func observeEvents(panes: [Pane]) {
+    let ids = Set(panes.map(\.pane_id))
+    guard !eventStarting, !eventsConnected || eventPaneIDs != ids else { return }
+    eventStarting = true
+    let generation = UUID()
+    eventGeneration = generation
+    eventStream?.stop()
+    eventStream = nil
+    eventPaneIDs = ids
+    perform({ client -> HerdrEventStream in
+      let data = try client.run(["session", "list", "--json"])
+      let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+      guard let sessions = json?["sessions"] as? [[String: Any]],
+        let path = sessions.first(where: { $0["name"] as? String == client.sessionName })?["socket_path"] as? String else {
+        throw ConfigurationError("herdr did not report its event socket.")
+      }
+      return try HerdrEventStream(path: path, paneIDs: ids, changed: { [weak client] in
+        DispatchQueue.main.async { client?.onWorkspaceEvent?() }
+      }, ended: { [weak client] in
+        DispatchQueue.main.async {
+          if client?.eventGeneration == generation { client?.eventStream = nil }
+        }
+      })
+    }) { [weak self] result in
+      guard let self else { return }
+      self.eventStarting = false
+      if case .success(let stream) = result, stream.isActive { self.eventStream = stream }
+    }
+  }
+
+  /// True only with evidence of a foreground task; nil means we must ask.
+  func hasRunningTask(paneID: String) throws -> Bool? {
+    let result = try request(["pane", "process-info", "--pane", paneID], timeout: 1)
+    guard let info = result["process_info"] as? [String: Any],
+      let shell = info["shell_pid"] as? Int,
+      let group = info["foreground_process_group_id"] as? Int,
+      let processes = info["foreground_processes"] as? [[String: Any]] else { return nil }
+    if group != shell { return true }
+    guard !processes.isEmpty else { return nil }
+    return processes.contains { ($0["pid"] as? Int) != shell }
   }
 
   static func discover() -> URL? {
@@ -112,35 +168,108 @@ final class HerdrClient {
     process.environment = ProcessInfo.processInfo.environment.filter {
       !$0.key.hasPrefix("HERDR_") || $0.key == "HERDR_CONFIG_PATH"
     }
+    if process.environment?["SHELL"] == nil, let user = getpwuid(getuid()) {
+      process.environment?["SHELL"] = String(cString: user.pointee.pw_shell)
+    }
     process.standardInput = FileHandle.nullDevice
     return process
   }
 
-  // Drain output while the child runs, with a deadline even for a hung CLI/server.
-  func run(_ arguments: [String], timeout: TimeInterval = 5) throws -> Data {
-    let child = process(arguments)
-    let output = Pipe()
-    child.standardOutput = output
-    child.standardError = output
-    try child.run()
-    let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
-    timer.schedule(deadline: .now() + timeout)
-    timer.setEventHandler { if child.isRunning { kill(child.processIdentifier, SIGKILL) } }
-    timer.resume()
-    defer { timer.cancel() }
-    let data = output.fileHandleForReading.readDataToEndOfFile()
-    child.waitUntilExit()
-    guard child.terminationReason == .exit, child.terminationStatus == 0 else {
-      let detail =
-        String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-      throw ConfigurationError(
-        detail.isEmpty ? "herdr did not complete the request." : String(detail.prefix(1500)))
+  // Only short-lived CLI requests use this launcher. The persistent server
+  // is launched separately and can never share a request's process group.
+  private final class RequestProcess {
+    let processIdentifier: pid_t
+    private var status: Int32 = 0
+    private var reaped = false
+    var isRunning: Bool {
+      if !reaped { reaped = waitpid(processIdentifier, &status, WNOHANG) == processIdentifier }
+      return !reaped
     }
-    return data
+    var terminationStatus: Int32 { (status >> 8) & 255 }
+    var terminationReason: Process.TerminationReason { status & 127 == 0 ? .exit : .uncaughtSignal }
+    init(executable: String, arguments: [String], environment: [String: String], stdout: Int32, stderr: Int32) throws {
+      var actions: posix_spawn_file_actions_t?
+      var attributes: posix_spawnattr_t?
+      posix_spawn_file_actions_init(&actions)
+      posix_spawnattr_init(&attributes)
+      defer { posix_spawn_file_actions_destroy(&actions); posix_spawnattr_destroy(&attributes) }
+      posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT))
+      posix_spawnattr_setpgroup(&attributes, 0)
+      posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0)
+      posix_spawn_file_actions_adddup2(&actions, stdout, STDOUT_FILENO)
+      posix_spawn_file_actions_adddup2(&actions, stderr, STDERR_FILENO)
+      let argv = ([executable] + arguments).map { strdup($0) } + [nil]
+      let env = environment.map { strdup("\($0.key)=\($0.value)") } + [nil]
+      defer { argv.forEach { free($0) }; env.forEach { free($0) } }
+      var pid: pid_t = 0
+      let code = argv.withUnsafeBufferPointer { argv in env.withUnsafeBufferPointer { env in
+        posix_spawn(&pid, executable, &actions, &attributes,
+          UnsafeMutablePointer(mutating: argv.baseAddress!), UnsafeMutablePointer(mutating: env.baseAddress!))
+      } }
+      guard code == 0 else { throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO) }
+      processIdentifier = pid
+    }
+    func waitUntilExit() { if !reaped { while waitpid(processIdentifier, &status, 0) == -1 && errno == EINTR {}; reaped = true } }
+    func killGroup() { kill(-processIdentifier, SIGKILL); waitUntilExit() }
   }
 
-  func request(_ arguments: [String]) throws -> [String: Any] {
-    let data = try run(arguments)
+  struct RequestError: LocalizedError {
+    let code: String?
+    let message: String
+    var errorDescription: String? { message }
+  }
+
+  // Drain both streams without allowing an inherited pipe in a descendant to
+  // extend the deadline. JSON is always read from stdout, never mixed with logs.
+  func run(_ arguments: [String], timeout: TimeInterval = 5) throws -> Data {
+    let output = Pipe(), errors = Pipe()
+    let child = try RequestProcess(executable: executable.path, arguments: ["--session", sessionName] + arguments,
+      environment: process(arguments).environment ?? [:], stdout: output.fileHandleForWriting.fileDescriptor,
+      stderr: errors.fileHandleForWriting.fileDescriptor)
+    try output.fileHandleForWriting.close()
+    try errors.fileHandleForWriting.close()
+    let handles = [output.fileHandleForReading, errors.fileHandleForReading]
+    defer { handles.forEach { try? $0.close() } }
+    for handle in handles { _ = fcntl(handle.fileDescriptor, F_SETFL, O_NONBLOCK) }
+    var streams = [Data(), Data()]
+    var ended = [false, false]
+    var buffer = [UInt8](repeating: 0, count: 16384)
+    let deadline = ProcessInfo.processInfo.systemUptime + timeout
+    while child.isRunning || !ended.allSatisfy({ $0 }) {
+      for index in handles.indices where !ended[index] {
+        let count = read(handles[index].fileDescriptor, &buffer, buffer.count)
+        if count > 0 { streams[index].append(contentsOf: buffer.prefix(count)) }
+        else if count == 0 { ended[index] = true }
+        else if errno != EAGAIN && errno != EINTR { ended[index] = true }
+      }
+      if ProcessInfo.processInfo.systemUptime >= deadline {
+        child.killGroup()
+        throw RequestError(code: "timeout", message: "herdr request timed out.")
+      }
+      if streams.contains(where: { $0.count > 64 * 1024 * 1024 }) {
+        child.killGroup()
+        throw RequestError(code: nil, message: "herdr response exceeded the size limit.")
+      }
+      if !ended.allSatisfy({ $0 }) || child.isRunning { Thread.sleep(forTimeInterval: 0.001) }
+    }
+    child.waitUntilExit()
+    guard child.terminationReason == .exit, child.terminationStatus == 0 else {
+      for data in streams {
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let error = json["error"] as? [String: Any] {
+          throw RequestError(code: error["code"] as? String, message: error["message"] as? String ?? "herdr request failed.")
+        }
+      }
+      let detail = String(decoding: streams[1].isEmpty ? streams[0] : streams[1], as: UTF8.self)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+      throw RequestError(code: nil, message: detail.isEmpty ? "herdr did not complete the request." : String(detail.prefix(1500)))
+    }
+    return streams[0]
+  }
+
+  func request(_ arguments: [String], timeout: TimeInterval = 5) throws -> [String: Any] {
+    cachedStatus = nil
+    let data = try run(arguments, timeout: timeout)
     guard let response = try JSONSerialization.jsonObject(with: data) as? [String: Any],
       let result = response["result"] as? [String: Any]
     else {
@@ -149,24 +278,44 @@ final class HerdrClient {
     return result
   }
 
-  func snapshot() throws -> Snapshot {
-    let result = try request(["api", "snapshot"])
+  // Shared by all windows; structural operations always request a fresh snapshot.
+  func statusSnapshot() throws -> Snapshot {
+    let now = ProcessInfo.processInfo.systemUptime
+    if let (time, snapshot) = cachedStatus, now - time < 1 { return snapshot }
+    let value = try snapshot(timeout: 0.75)
+    cachedStatus = (now, value)
+    return value
+  }
+
+  func snapshot(timeout: TimeInterval = 5) throws -> Snapshot {
+    let result = try request(["api", "snapshot"], timeout: timeout)
     guard let value = result["snapshot"] else {
       throw ConfigurationError("herdr did not return a session snapshot.")
     }
-    return try JSONDecoder().decode(
-      Snapshot.self, from: JSONSerialization.data(withJSONObject: value))
+    let snapshot = try JSONDecoder().decode(Snapshot.self, from: JSONSerialization.data(withJSONObject: value))
+    let workspaceIDs = snapshot.workspaces.map(\.workspace_id)
+    let tabIDs = snapshot.tabs.map(\.tab_id)
+    let paneIDs = snapshot.panes.map(\.pane_id)
+    let terminalIDs = snapshot.panes.map(\.terminal_id)
+    guard [workspaceIDs, tabIDs, paneIDs, terminalIDs].allSatisfy({ Set($0).count == $0.count && !$0.contains("") }),
+      snapshot.tabs.allSatisfy({ tab in workspaceIDs.contains(tab.workspace_id) && snapshot.panes.filter { $0.tab_id == tab.tab_id }.count == tab.pane_count }),
+      snapshot.panes.allSatisfy({ pane in snapshot.tabs.contains { $0.tab_id == pane.tab_id && $0.workspace_id == pane.workspace_id } })
+    else { throw ConfigurationError("herdr returned an inconsistent session snapshot.") }
+    cachedStatus = (ProcessInfo.processInfo.systemUptime, snapshot)
+    return snapshot
   }
 
   func connect(directory: URL) throws -> Snapshot {
     let version = String(decoding: try run(["--version"]), as: UTF8.self)
-    let numbers = version.split(whereSeparator: { !$0.isNumber }).compactMap { Int($0) }
+    let match = version.range(of: #"^herdr\s+v?([0-9]+\.[0-9]+\.[0-9]+)"#, options: .regularExpression)
+    let numbers = match.map { version[$0].split(whereSeparator: { !$0.isNumber }).compactMap { Int($0) } } ?? []
     guard numbers.count >= 3,
       Array(numbers.prefix(3)).lexicographicallyPrecedes([0, 8, 2]) == false
     else {
       throw ConfigurationError("herdr 0.8.2 or newer is required for direct terminal attachment.")
     }
-    if let existing = try? snapshot() { return existing }
+    do { return try snapshot() }
+    catch let error as RequestError where error.code == "server_not_running" { /* Start only an absent server. */ }
     let child = process(["server"])
     child.currentDirectoryURL = directory
     child.standardOutput = FileHandle.nullDevice
@@ -175,18 +324,34 @@ final class HerdrClient {
     server = child  // Closing the app does not stop this server or its terminals.
     let deadline = Date(timeIntervalSinceNow: 5)
     repeat {
-      if let value = try? snapshot() { return value }
+      if let value = try? snapshot(timeout: min(0.5, max(0.05, deadline.timeIntervalSinceNow))) { return value }
       Thread.sleep(forTimeInterval: 0.1)
     } while Date() < deadline && child.isRunning
+    if child.isRunning { child.terminate() }
+    server = nil
     throw ConfigurationError(
       "Could not connect to the herdr session ‘\(sessionName)’. Check herdr's server log.")
   }
 
-  func create(workspace: String?, name: String, directory: String) throws -> Snapshot {
+  func shellEnvironment(settings: AppConfiguration) -> [String: String] {
+    let inherited = ProcessInfo.processInfo.environment
+    let home = settings.home
+    let config = inherited["HERDR_CONFIG_PATH"].map { URL(fileURLWithPath: $0) }
+      ?? URL(fileURLWithPath: inherited["XDG_CONFIG_HOME"] ?? home.appendingPathComponent(".config").path).appendingPathComponent("herdr/config.toml")
+    let fallback = inherited["SHELL"] ?? getpwuid(getuid()).map { String(cString: $0.pointee.pw_shell) } ?? "/bin/zsh"
+    let shell = HerdrShellIntegration.configuredShell(from: config, fallback: fallback)
+    guard let resources = inherited["VELOKIT_RESOURCES_DIR"].map({ URL(fileURLWithPath: $0) }) ?? Bundle.main.resourceURL else { return [:] }
+    return HerdrShellIntegration.environment(settings: settings, resources: resources, shell: shell, inherited: inherited)
+  }
+  static func environmentArguments(_ environment: [String: String]) -> [String] {
+    environment.sorted { $0.key < $1.key }.flatMap { ["--env", "\($0.key)=\($0.value)"] }
+  }
+
+  func create(workspace: String?, name: String, directory: String, environment: [String: String] = [:]) throws -> Snapshot {
     if let workspace {
-      _ = try request(["tab", "create", "--workspace", workspace, "--cwd", directory, "--no-focus"])
+      _ = try request(["tab", "create", "--workspace", workspace, "--cwd", directory, "--no-focus"] + Self.environmentArguments(environment))
     } else {
-      _ = try request(["workspace", "create", "--label", name, "--cwd", directory, "--no-focus"])
+      _ = try request(["workspace", "create", "--label", name, "--cwd", directory, "--no-focus"] + Self.environmentArguments(environment))
     }
     return try snapshot()
   }
@@ -199,4 +364,63 @@ final class HerdrClient {
       "--token", "subtitle=" + subtitle,
     ])
   }
+}
+
+// A read-only event connection. All mutations and terminal I/O still use explicit IDs.
+private final class HerdrEventStream {
+  private let source: DispatchSourceRead
+  private var buffer = Data()
+  private var stopped = false
+  var isActive: Bool { !stopped }
+  init(path: String, paneIDs: Set<String>, changed: @escaping () -> Void, ended: @escaping () -> Void) throws {
+    var address = sockaddr_un()
+    address.sun_family = sa_family_t(AF_UNIX)
+    let bytes = Array(path.utf8CString)
+    guard bytes.count <= MemoryLayout.size(ofValue: address.sun_path) else { throw ConfigurationError("herdr socket path is too long.") }
+    withUnsafeMutableBytes(of: &address.sun_path) { target in bytes.withUnsafeBytes { target.copyBytes(from: $0) } }
+    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+    guard fd >= 0 else { throw POSIXError(.EIO) }
+    let connected = withUnsafePointer(to: &address) { pointer in
+      pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+    }
+    guard connected == 0 else { Darwin.close(fd); throw POSIXError(.ECONNREFUSED) }
+    var noSignal: Int32 = 1
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size))
+    var timeout = timeval(tv_sec: 1, tv_usec: 0)
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    let types = ["workspace.created", "workspace.updated", "workspace.renamed", "workspace.closed", "tab.created", "tab.closed", "tab.renamed", "tab.moved", "pane.created", "pane.closed", "pane.updated", "pane.moved", "pane.exited", "pane.agent_detected", "layout.updated"]
+    let subscriptions: [[String: String]] = types.map { ["type": $0] }
+      + paneIDs.map { ["type": "pane.agent_status_changed", "pane_id": $0] }
+    var request = try JSONSerialization.data(withJSONObject: ["id": "velocitty-events", "method": "events.subscribe", "params": ["subscriptions": subscriptions]])
+    request.append(10)
+    let sent = request.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+    guard sent == request.count else { Darwin.close(fd); throw POSIXError(.EIO) }
+    _ = fcntl(fd, F_SETFL, O_NONBLOCK)
+    source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .main)
+    source.setCancelHandler { Darwin.close(fd) }
+    source.setEventHandler { [weak self] in
+      guard let self, !self.stopped else { return }
+      var bytes = [UInt8](repeating: 0, count: 16384)
+      let count = read(fd, &bytes, bytes.count)
+      if count <= 0 {
+        if count == 0 || (errno != EAGAIN && errno != EINTR) { self.stop(); ended() }
+        return
+      }
+      self.buffer.append(contentsOf: bytes.prefix(count))
+      guard self.buffer.count < 4 * 1024 * 1024 else { self.stop(); ended(); return }
+      var updated = false
+      while let end = self.buffer.firstIndex(of: 10) {
+        let line = self.buffer.prefix(upTo: end)
+        self.buffer.removeSubrange(...end)
+        if let json = try? JSONSerialization.jsonObject(with: line) as? [String: Any] {
+          if json["error"] != nil { self.stop(); ended(); return }
+          if json["event"] != nil { updated = true }
+        }
+      }
+      if updated { changed() }
+    }
+    source.resume()
+  }
+  func stop() { guard !stopped else { return }; stopped = true; source.cancel() }
+  deinit { source.cancel() }
 }
