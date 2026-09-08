@@ -7166,14 +7166,14 @@ pub const Keybinds = struct {
             }
 
             // Namespaces (Control)
-            try self.putDefault(alloc, "ctrl+t=new_namespace");
+            try self.putDefault(alloc, "performable:ctrl+t=new_namespace");
             try self.putDefault(alloc, "performable:ctrl+r=rename_namespace");
-            try self.putDefault(alloc, "ctrl+w=close_namespace");
-            try self.putDefault(alloc, "ctrl+[=previous_namespace");
-            try self.putDefault(alloc, "ctrl+]=next_namespace");
+            try self.putDefault(alloc, "performable:ctrl+w=close_namespace");
+            try self.putDefault(alloc, "performable:ctrl+[=previous_namespace");
+            try self.putDefault(alloc, "performable:ctrl+]=next_namespace");
             for ('1'..'9' + 1) |number| {
-                try self.set.put(alloc, .{ .key = .{ .unicode = @intCast(number) }, .mods = .{ .ctrl = true } },
-                    .{ .goto_namespace = @intCast(number - '0') });
+                try self.set.putFlags(alloc, .{ .key = .{ .unicode = @intCast(number) }, .mods = .{ .ctrl = true } },
+                    .{ .goto_namespace = @intCast(number - '0') }, .{ .performable = true });
             }
 
             // Panes: navigation passes through when a split is not available.

@@ -20,6 +20,7 @@ final class TerminalView: NSView, NSTextInputClient {
   var tracking: NSTrackingArea?
   var keyInProgress: NSEvent?
   var keyHandled = false
+  private var composingBeforeKey = false
   private(set) var terminalFocused = false
   var linkURL: String?
   var pointer: NSCursor = .iBeam
@@ -35,6 +36,12 @@ final class TerminalView: NSView, NSTextInputClient {
     addTrackingArea(area)
     tracking = area
     super.updateTrackingAreas()
+  }
+
+  var pointerIsInside: Bool {
+    guard let window, window.isKeyWindow else { return false }
+    let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+    return visibleRect.contains(point)
   }
 
   override func cursorUpdate(with event: NSEvent) { pointer.set() }
@@ -152,7 +159,7 @@ final class TerminalView: NSView, NSTextInputClient {
 
   override func resignFirstResponder() -> Bool {
     let result = super.resignFirstResponder()
-    if result { updateFocus(firstResponder: false) }
+    if result { inputContext?.discardMarkedText(); unmarkText(); updateFocus(firstResponder: false) }
     return result
   }
 
@@ -208,7 +215,7 @@ final class TerminalView: NSView, NSTextInputClient {
   }
 
   override func performKeyEquivalent(with event: NSEvent) -> Bool {
-    guard window?.firstResponder === self, let surface else { return false }
+    guard !hasMarkedText(), window?.firstResponder === self, let surface else { return false }
     return withKey(event, action: GHOSTTY_ACTION_PRESS) { key in
       var flags = ghostty_binding_flags_e(rawValue: 0)
       guard velokit_surface_key_is_binding(surface, key, &flags),
@@ -222,7 +229,7 @@ final class TerminalView: NSView, NSTextInputClient {
     session?.windowController?.clearBell()
     invalidateAccessibilityText()
     guard let surface else { return }
-    if withKey(
+    if !hasMarkedText() && withKey(
       event, action: GHOSTTY_ACTION_PRESS,
       { key in
         guard velokit_surface_key_is_binding(surface, key, nil) else { return false }
@@ -234,15 +241,17 @@ final class TerminalView: NSView, NSTextInputClient {
     }
     let translated = velokit_surface_key_translation_mods(
       surface, Int32(ghosttyMods(event.modifierFlags).rawValue))
-    if event.modifierFlags.contains(.option), translated & Int32(GHOSTTY_MODS_ALT.rawValue) == 0 {
+    if !hasMarkedText(), event.modifierFlags.contains(.option), translated & Int32(GHOSTTY_MODS_ALT.rawValue) == 0 {
       sendKey(event, action: GHOSTTY_ACTION_PRESS)
       return
     }
+    composingBeforeKey = hasMarkedText()
     keyInProgress = event
     keyHandled = false
     interpretKeyEvents([event])
-    if !keyHandled && !hasMarkedText() { sendKey(event, action: GHOSTTY_ACTION_PRESS) }
+    if !keyHandled && !hasMarkedText() && !composingBeforeKey { sendKey(event, action: GHOSTTY_ACTION_PRESS) }
     keyInProgress = nil
+    composingBeforeKey = false
   }
 
   override func keyUp(with event: NSEvent) {
@@ -312,7 +321,7 @@ final class TerminalView: NSView, NSTextInputClient {
     hasMarkedText()
       ? NSRange(location: 0, length: markedText.length) : NSRange(location: NSNotFound, length: 0)
   }
-  func selectedRange() -> NSRange { NSRange(location: NSNotFound, length: 0) }
+  func selectedRange() -> NSRange { NSRange(location: hasMarkedText() ? markedText.length : NSNotFound, length: 0) }
   func validAttributesForMarkedText() -> [NSAttributedString.Key] { [] }
   func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?)
     -> NSAttributedString?
@@ -361,20 +370,26 @@ final class TerminalView: NSView, NSTextInputClient {
     default: return
     }
 
+    let composed = composingBeforeKey || hasMarkedText()
     unmarkText()
     keyHandled = true
-    guard let surface else { return }
-    if let event = keyInProgress {
+    guard let surface, !text.isEmpty else { return }
+    if let event = keyInProgress, !composed {
       _ = withKey(event, action: GHOSTTY_ACTION_PRESS, overrideText: text) {
         velokit_surface_key(surface, $0)
       }
       return
     }
-    text.withCString { velokit_surface_text(surface, $0, UInt(text.utf8.count)) }
+    // Like Ghostty, committed IME text is typed input with no committing
+    // Return/Space key or modifiers, never a bracketed paste.
+    guard !composed || text.unicodeScalars.allSatisfy({ $0.value >= 0x20 }) else { return }
+    var key = ghostty_input_key_s()
+    key.action = GHOSTTY_ACTION_PRESS
+    text.withCString { key.text = $0; _ = velokit_surface_key(surface, key) }
   }
 
   override func doCommand(by selector: Selector) {
-    if let event = keyInProgress {
+    if let event = keyInProgress, !keyHandled, !composingBeforeKey, !hasMarkedText() {
       keyHandled = true
       sendKey(event, action: GHOSTTY_ACTION_PRESS)
     }
@@ -407,7 +422,6 @@ extension TerminalView {
     guard let surface, session?.readonly != true,
       let text = Self.droppedText(from: pasteboard), !text.contains("\0") else { return false }
     window?.makeFirstResponder(self)
-    text.withCString { velokit_surface_text(surface, $0, UInt(text.utf8.count)) }
-    return true
+    return text.withCString { velokit_surface_paste(surface, $0, UInt(text.utf8.count)) }
   }
 }

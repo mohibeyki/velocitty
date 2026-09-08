@@ -151,6 +151,7 @@ final class TerminalRuntime {
       }
     }
     for session in terminals {
+      if !NativeSettings(config: session.config).progressStyle { session.chrome?.progress.clear() }
       if let surface = session.surface {
         velokit_surface_set_color_scheme(
           surface, NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? 1 : 0)

@@ -349,7 +349,8 @@ do {
   precondition(runtime.diagnostics.count == 8, runtime.diagnostics.joined(separator: "\n"))
   precondition(first.session!.surface == firstSurface && second.session!.surface == secondSurface)
   precondition(first.native.backgroundOpacity == 1 && second.native.backgroundOpacity == 0.45)
-  precondition(second.window!.backgroundColor.alphaComponent == 0.45)
+  precondition(second.window!.backgroundColor == .windowBackgroundColor,
+    "Native window chrome stays independent of terminal opacity")
   precondition(first.window!.title == "Reloaded" && second.window!.title == "Reloaded")
   precondition(first.titleAccessory == nil && second.titleAccessory == nil,
     "Rejected titlebar colors must not enable custom titlebars")
@@ -993,8 +994,13 @@ do {
   window.makeKeyAndOrderFront(nil)
   expect("\u{1b}[I", "Composition focus gain was not forwarded")
   precondition(terminal.markedText.string == "にほん")
+  terminal.keyInProgress = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+    windowNumber: window.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)
   terminal.insertText("日本" as NSString, replacementRange: NSRange(location: NSNotFound, length: 0))
-  expect("日本", "Committed composition did not reach the PTY exactly once")
+  terminal.insertText("" as NSString, replacementRange: NSRange(location: NSNotFound, length: 0))
+  terminal.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+  terminal.keyInProgress = nil
+  expect("日本", "Committed composition must not leak Return or duplicate input")
   precondition(!terminal.hasMarkedText())
   terminal.removeFromSuperview()
   expect("\u{1b}[O", "Detached view retained focus")
@@ -1061,6 +1067,12 @@ do {
     windowNumber: alert.window.windowNumber, context: nil,
     characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!
   precondition(alert.buttons[0].performKeyEquivalent(with: cancelKey))
+  drain()
+  precondition(links.confirmation != nil && links.confirmation !== alert,
+    "The next queued link should appear after cancelling the first")
+  let queuedText = (links.confirmation!.accessoryView as! NSScrollView).documentView as! NSTextView
+  precondition(queuedText.string == "file:///tmp/another")
+  links.confirmation!.buttons[0].performClick(nil)
   drain()
   precondition(links.confirmation == nil && opened.count == 2,
     "Return cancellation: active=\(app.isActive), key=\(alert.window.isKeyWindow), "

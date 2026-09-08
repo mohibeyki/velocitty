@@ -39,7 +39,7 @@ final class RuntimeContext: NSObject {
     let surfaceTarget = target.tag == GHOSTTY_TARGET_SURFACE
     let perform: (@escaping (TerminalView?, TerminalWindowController?) -> Void) -> Void = { [self, view] body in
       DispatchQueue.main.async { [weak self, weak view] in
-        guard let self, self.app != nil else { return }
+        guard let self, self.app != nil, self.owner?.terminating != true else { return }
         if surfaceTarget {
           guard let view, view.surface != nil else { return }
           body(view, view.session?.windowController)
@@ -196,12 +196,15 @@ final class RuntimeContext: NSObject {
       perform { _, owner in owner?.editNamespace() }
 
     case GHOSTTY_ACTION_NEW_NAMESPACE:
+      guard view?.session?.herdrTerminal != nil else { return false }
       perform { _, owner in owner?.newNamespace() }
 
     case GHOSTTY_ACTION_CLOSE_NAMESPACE:
+      guard view?.session?.herdrTerminal != nil else { return false }
       perform { _, owner in owner?.closeNamespace() }
 
     case GHOSTTY_ACTION_PREVIOUS_NAMESPACE, GHOSTTY_ACTION_NEXT_NAMESPACE:
+      guard view?.session?.herdrTerminal != nil else { return false }
       let step = action.tag == GHOSTTY_ACTION_NEXT_NAMESPACE ? 1 : -1
       perform { _, owner in
         guard let owner, let index = owner.namespaces.firstIndex(where: { $0 === owner.activeNamespace }) else { return }
@@ -209,6 +212,7 @@ final class RuntimeContext: NSObject {
       }
 
     case GHOSTTY_ACTION_GOTO_NAMESPACE:
+      guard view?.session?.herdrTerminal != nil else { return false }
       let index = Int(action.action.goto_namespace.index) - 1
       perform { _, owner in owner?.selectNamespace(at: index) }
 
@@ -400,13 +404,13 @@ final class RuntimeContext: NSObject {
           shape == GHOSTTY_MOUSE_SHAPE_POINTER
           ? .pointingHand : shape == GHOSTTY_MOUSE_SHAPE_TEXT ? .iBeam : .arrow
         view?.pointer = cursor
-        if view?.window?.isKeyWindow == true { cursor.set() }
+        if view?.pointerIsInside == true { cursor.set() }
       }
 
     case GHOSTTY_ACTION_MOUSE_VISIBILITY:
       let hidden = action.action.mouse_visibility == GHOSTTY_MOUSE_HIDDEN
       perform { view, owner in
-        if view?.window?.isKeyWindow == true { NSCursor.setHiddenUntilMouseMoves(hidden) }
+        if view?.pointerIsInside == true { NSCursor.setHiddenUntilMouseMoves(hidden) }
       }
 
     case GHOSTTY_ACTION_CLOSE_WINDOW:
@@ -475,7 +479,7 @@ final class RuntimeContext: NSObject {
   }
 
   static let confirmReadClipboard: ghostty_runtime_confirm_read_clipboard_cb = {
-    userdata, request, state, _ in
+    userdata, request, state, kind in
     guard let view = RuntimeContext.fromSurfaceUserdata(userdata), let surface = view.surface
     else { return }
     guard let request else {
@@ -493,9 +497,10 @@ final class RuntimeContext: NSObject {
     }
     let canRemember = request.pointee.can_remember
     let name = request.pointee.name.map { String(cString: $0) } ?? "The terminal"
+    let writing = kind == GHOSTTY_CLIPBOARD_REQUEST_KITTY_WRITE || kind == GHOSTTY_CLIPBOARD_REQUEST_OSC_52_WRITE
     view.clipboard.enqueue(
-      title: "Allow clipboard access?",
-      message: "\(name) requested clipboard content or a paste requiring confirmation.\n\n"
+      title: writing ? "Replace clipboard contents?" : "Allow clipboard access?",
+      message: (writing ? "\(name) wants to write to your clipboard.\n\n" : "\(name) requested clipboard content or a paste requiring confirmation.\n\n")
         + String(String(data: items.first?.1 ?? Data(), encoding: .utf8)?.prefix(500) ?? ""),
       canRemember: canRemember
     ) { allowed, remember in

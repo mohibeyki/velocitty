@@ -72,8 +72,13 @@ final class TerminalSession {
     return terminalView
   }
 
+  private var opacityBase: ghostty_config_t?
   func toggleOpacity() throws {
-    guard !closed, let base = runtime.config else { return }
+    guard !closed, let base = opacityBase ?? config else { return }
+    if opacityOverride == nil && opacityBase == nil {
+      guard let copy = velokit_config_clone(base) else { throw ConfigurationError("Could not copy terminal configuration.") }
+      opacityBase = copy
+    }
     let value: Double? = opacityOverride == nil ? 1 : nil
     let candidate = try Self.prepareConfig(from: base, opacity: value)
     defer { velokit_config_free(candidate) }
@@ -81,10 +86,13 @@ final class TerminalSession {
       throw ConfigurationError("VeloKit could not apply the terminal configuration.")
     }
     opacityOverride = value
+    if value == nil, let original = opacityBase { velokit_config_free(original); opacityBase = nil }
   }
 
   func prepareOverride(from base: ghostty_config_t) throws -> ghostty_config_t? {
     guard !closed, surface != nil, let opacityOverride else { return nil }
+    if let original = opacityBase { velokit_config_free(original) }
+    opacityBase = velokit_config_clone(base)
     return try Self.prepareConfig(from: base, opacity: opacityOverride)
   }
 
@@ -120,6 +128,8 @@ final class TerminalSession {
     guard !closed else { return }
     chrome?.progress.clear()
     chrome?.fadeTimer?.invalidate()
+    view?.inputContext?.discardMarkedText()
+    view?.unmarkText()
     view?.stopAccessibility()
     view?.clipboard.cancel()
     links.cancel()
@@ -132,6 +142,8 @@ final class TerminalSession {
     view = nil
     if let appliedConfig { velokit_config_free(appliedConfig) }
     appliedConfig = nil
+    if let opacityBase { velokit_config_free(opacityBase) }
+    opacityBase = nil
     runtime.remove(self)
   }
 

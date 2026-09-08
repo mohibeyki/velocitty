@@ -12,6 +12,8 @@ final class TerminalLinks {
 
   private let openURL: (URL) -> Void
   private(set) var confirmation: NSAlert?
+  private var waiting: [() -> Void] = []
+  private var sheetObserver: NSObjectProtocol?
 
   init(openURL: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) }) {
     self.openURL = openURL
@@ -60,9 +62,23 @@ final class TerminalLinks {
     case .direct(let url):
       openURL(url)
     case .confirm(let url):
-      guard confirmation == nil, let view, let surface = view.surface,
-        let window = view.window, window.isVisible, window.attachedSheet == nil
-      else { return }
+      guard let view, let surface = view.surface, let window = view.window, window.isVisible else { return }
+      if confirmation != nil || window.attachedSheet != nil {
+        waiting.append { [weak self, weak view] in
+          guard let view, view.surface == surface else { return }
+          self?.open(value, kind: kind, from: view)
+        }
+        if sheetObserver == nil {
+          sheetObserver = NotificationCenter.default.addObserver(forName: NSWindow.didEndSheetNotification,
+            object: window, queue: .main) { [weak self] _ in
+              DispatchQueue.main.async { [weak self] in
+                guard let self, !self.waiting.isEmpty else { return }
+                self.waiting.removeFirst()()
+              }
+            }
+        }
+        return
+      }
       let alert = NSAlert()
       alert.messageText = "Open this terminal link?"
       alert.informativeText = "This link will open a file or another application. Review its destination before opening it."
@@ -100,7 +116,12 @@ final class TerminalLinks {
     }
   }
 
+  deinit { if let sheetObserver { NotificationCenter.default.removeObserver(sheetObserver) } }
+
   func cancel() {
+    waiting.removeAll()
+    if let sheetObserver { NotificationCenter.default.removeObserver(sheetObserver) }
+    sheetObserver = nil
     guard let alert = confirmation else { return }
     confirmation = nil
     alert.window.sheetParent?.endSheet(alert.window, returnCode: .alertFirstButtonReturn)

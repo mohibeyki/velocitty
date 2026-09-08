@@ -1130,6 +1130,7 @@ void velokit_surface_set_color_scheme(ghostty_surface_t, int);
 int velokit_surface_key_translation_mods(ghostty_surface_t, int);
 bool velokit_surface_key_is_binding(ghostty_surface_t, ghostty_input_key_s, ghostty_binding_flags_e*);
 void velokit_surface_text(ghostty_surface_t, const char*, uintptr_t);
+bool velokit_surface_paste(ghostty_surface_t, const char*, uintptr_t);
 bool velokit_surface_mouse_captured(ghostty_surface_t);
 bool velokit_surface_mouse_button(ghostty_surface_t, ghostty_input_mouse_state_e, ghostty_input_mouse_button_e, int);
 void velokit_surface_mouse_pos(ghostty_surface_t, double, double, int);

@@ -1648,6 +1648,22 @@ pub const CAPI = struct {
         surface.textCallback(ptr[0..len]);
     }
 
+    /// Paste dropped text through the same safety/confirmation path as clipboard input.
+    export fn velokit_surface_paste(surface: *Surface, ptr: [*]const u8, len: usize) bool {
+        const state = surface.app.core_app.alloc.create(apprt.ClipboardRequest) catch return false;
+        state.* = .{ .paste = .standard };
+        const contents = [_]ClipboardContent{.{ .mime = "text/plain", .data = ptr, .len = len }};
+        surface.completeClipboardRequest(&.{
+            .contents = &contents,
+            .contents_len = 1,
+            .available = null,
+            .available_len = 0,
+            .confirmed = false,
+            .remember = false,
+        }, state);
+        return true;
+    }
+
     export fn velokit_surface_mouse_captured(surface: *Surface) bool {
         return surface.core_surface.mouseCaptured();
     }
