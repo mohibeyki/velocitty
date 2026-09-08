@@ -559,6 +559,14 @@ pub const Action = union(enum) {
     /// Open a new tab.
     new_tab,
 
+    // Namespace navigation, handled by the Velocitty frontend.
+    rename_namespace,
+    new_namespace,
+    close_namespace,
+    previous_namespace,
+    next_namespace,
+    goto_namespace: u8,
+
     /// Go to the previous tab.
     previous_tab,
 
@@ -1453,6 +1461,12 @@ pub const Action = union(enum) {
             // come from. For example `new_window` needs to be sourced to
             // a surface so inheritance can be done correctly.
             .new_tab,
+            .rename_namespace,
+            .new_namespace,
+            .close_namespace,
+            .previous_namespace,
+            .next_namespace,
+            .goto_namespace,
             .previous_tab,
             .next_tab,
             .last_tab,

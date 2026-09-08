@@ -422,6 +422,33 @@ fn actionCommands(action: Action.Key) []const Command {
             .description = i18n.N_("Open a new window."),
         }},
 
+        .rename_namespace => comptime &.{.{
+            .action = .rename_namespace,
+            .title = i18n.N_("Rename Namespace…"),
+            .description = i18n.N_("Change the current namespace name."),
+        }},
+        .new_namespace => comptime &.{.{
+            .action = .new_namespace,
+            .title = i18n.N_("New Namespace"),
+            .description = i18n.N_("Create a namespace with a terminal tab."),
+        }},
+        .close_namespace => comptime &.{.{
+            .action = .close_namespace,
+            .title = i18n.N_("Close Namespace"),
+            .description = i18n.N_("Close every tab in the current namespace."),
+        }},
+        .previous_namespace => comptime &.{.{
+            .action = .previous_namespace,
+            .title = i18n.N_("Previous Namespace"),
+            .description = i18n.N_("Select the previous namespace."),
+        }},
+        .next_namespace => comptime &.{.{
+            .action = .next_namespace,
+            .title = i18n.N_("Next Namespace"),
+            .description = i18n.N_("Select the next namespace."),
+        }},
+        .goto_namespace => &.{},
+
         .new_tab => comptime &.{.{
             .action = .new_tab,
             .title = i18n.N_("New Tab"),

@@ -5298,6 +5298,13 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             v,
         ),
 
+        .rename_namespace => return try self.rt_app.performAction(.{ .surface = self }, .rename_namespace, {}),
+        .new_namespace => return try self.rt_app.performAction(.{ .surface = self }, .new_namespace, {}),
+        .close_namespace => return try self.rt_app.performAction(.{ .surface = self }, .close_namespace, {}),
+        .previous_namespace => return try self.rt_app.performAction(.{ .surface = self }, .previous_namespace, {}),
+        .next_namespace => return try self.rt_app.performAction(.{ .surface = self }, .next_namespace, {}),
+        .goto_namespace => |index| return try self.rt_app.performAction(.{ .surface = self }, .goto_namespace, .{ .index = index }),
+
         .new_tab => return try self.rt_app.performAction(
             .{ .surface = self },
             .new_tab,

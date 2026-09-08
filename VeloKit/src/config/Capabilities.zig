@@ -4,9 +4,8 @@ const Binding = @import("../input/Binding.zig");
 
 pub fn supported(action: Binding.Action) bool {
     const unsupported = std.StaticStringMap(void).initComptime(.{
-        .{ "show_on_screen_keyboard", {} }, .{ "new_split", {} },
-        .{ "goto_split", {} },
-        .{ "move_tab_to_new_window", {} }, .{ "resize_split", {} }, .{ "equalize_splits", {} },
+        .{ "show_on_screen_keyboard", {} },
+        .{ "move_tab_to_new_window", {} }, .{ "equalize_splits", {} },
         .{ "toggle_split_zoom", {} }, .{ "toggle_tab_overview", {} }, .{ "toggle_quick_terminal", {} },
         .{ "undo", {} }, .{ "redo", {} }, .{ "check_for_updates", {} }, .{ "inspector", {} },
         .{ "show_gtk_inspector", {} }, .{ "crash", {} }, .{ "export_terminal_io", {} },

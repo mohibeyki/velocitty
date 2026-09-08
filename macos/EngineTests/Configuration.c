@@ -15,7 +15,7 @@ static void accepts(const char *key, const char *value) {
     ghostty_config_t config = velokit_config_new();
     assert(config);
     if (!velokit_config_set(config, key, value) || !velokit_config_finalize(config, "/tmp")) {
-        fprintf(stderr, "%s: %s\n", key, velokit_config_error(config));
+        fprintf(stderr, "%s=%s: %s\n", key, value, velokit_config_error(config));
         assert(0);
     }
     velokit_config_free(config);
@@ -26,6 +26,7 @@ static void rejects(const char *key, const char *value) {
     assert(config);
     assert(!velokit_config_set(config, key, value));
     const char *error = velokit_config_error(config);
+    if (!error || !strstr(error, key)) fprintf(stderr, "Rejected %s=%s: %s\n", key, value, error ? error : "(no diagnostic)");
     assert(error && strstr(error, key));
     velokit_config_free(config);
 }
@@ -151,9 +152,27 @@ int main(int argc, char **argv) {
     assert(velokit_action_supported("open_config:new_window"));
     assert(velokit_action_supported("new_tab"));
     assert(!velokit_action_supported("toggle_window_decorations"));
+    accepts("keybind", "ctrl+r=rename_namespace");
+    accepts("keybind", "ctrl+t=new_namespace");
+    accepts("keybind", "ctrl+2=goto_namespace:2");
+    ghostty_config_t grouped = velokit_config_new();
+    ghostty_input_trigger_s grouped_trigger;
+    assert(velokit_config_trigger(grouped, "rename_namespace", &grouped_trigger));
+    assert(grouped_trigger.key.unicode == 'r' && grouped_trigger.mods == GHOSTTY_MODS_CTRL);
+    assert(velokit_config_trigger(grouped, "new_namespace", &grouped_trigger));
+    assert(grouped_trigger.key.unicode == 't' && grouped_trigger.mods == GHOSTTY_MODS_CTRL);
+    assert(velokit_config_trigger(grouped, "close_tab", &grouped_trigger));
+    assert(grouped_trigger.key.unicode == 'w' && grouped_trigger.mods == GHOSTTY_MODS_SUPER);
+    assert(velokit_config_trigger(grouped, "close_surface", &grouped_trigger));
+    assert(grouped_trigger.key.unicode == 'w' && grouped_trigger.mods == (GHOSTTY_MODS_CTRL | GHOSTTY_MODS_SHIFT));
+    assert(velokit_config_trigger(grouped, "new_split:down", &grouped_trigger));
+    assert(grouped_trigger.key.physical == GHOSTTY_KEY_MINUS && grouped_trigger.mods == GHOSTTY_MODS_CTRL);
+    assert(velokit_config_trigger(grouped, "new_split:right", &grouped_trigger));
+    assert(grouped_trigger.key.physical == GHOSTTY_KEY_BACKSLASH && grouped_trigger.mods == GHOSTTY_MODS_CTRL);
+    velokit_config_free(grouped);
     accepts("keybind", "ctrl+t=new_tab");
     accepts("keybind", "mode/performable:ctrl+t=new_tab");
-    rejects("keybind", "chain=new_split:right");
+    rejects("keybind", "chain=new_split:right"); // Chains require a preceding user binding.
     accepts("command-palette-entry", "title:New Tab,action:new_tab");
     accepts("keybind", "ctrl+==increase_font_size:1");
     accepts("keybind", "mode/ctrl+c=copy_to_clipboard");

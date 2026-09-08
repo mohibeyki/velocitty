@@ -6573,6 +6573,15 @@ pub const Keybinds = struct {
         table: []const u8,
     } = .root,
 
+    // Invalid built-in bindings are programming errors, not user config errors.
+    fn putDefault(self: *Keybinds, alloc: Allocator, value: []const u8) Allocator.Error!void {
+        self.set.parseAndPut(alloc, value) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => unreachable,
+        };
+        self.set.chain_parent = null;
+    }
+
     pub fn init(self: *Keybinds, alloc: Allocator) !void {
         // We don't clear the memory because it's in the arena and unlikely
         // to be free-able anyways (since arenas can only clear the last
@@ -6740,6 +6749,7 @@ pub const Keybinds = struct {
             .{ .performable = true },
         );
 
+        if (comptime !builtin.target.os.tag.isDarwin()) {
         // Tabs common to all platforms
         try self.set.put(
             alloc,
@@ -6751,6 +6761,8 @@ pub const Keybinds = struct {
             .{ .key = .{ .physical = .tab }, .mods = .{ .ctrl = true } },
             .{ .next_tab = {} },
         );
+
+        }
 
         // Windowing
         if (comptime !builtin.target.os.tag.isDarwin()) {
@@ -7139,106 +7151,43 @@ pub const Keybinds = struct {
                 .{ .key = .{ .unicode = 'n' }, .mods = .{ .super = true } },
                 .{ .new_window = {} },
             );
-            try self.set.put(
-                alloc,
-                .{ .key = .{ .unicode = 'w' }, .mods = .{ .super = true } },
-                .{ .close_surface = {} },
-            );
-            try self.set.put(
-                alloc,
-                .{ .key = .{ .unicode = 'w' }, .mods = .{ .super = true, .alt = true } },
-                .{ .close_tab = .this },
-            );
-            try self.set.put(
-                alloc,
-                .{ .key = .{ .unicode = 'w' }, .mods = .{ .super = true, .shift = true } },
-                .{ .close_window = {} },
-            );
-            try self.set.put(
-                alloc,
-                .{ .key = .{ .unicode = 'w' }, .mods = .{ .super = true, .shift = true, .alt = true } },
-                .{ .close_all_windows = {} },
-            );
-            try self.set.put(
-                alloc,
-                .{ .key = .{ .unicode = 't' }, .mods = .{ .super = true } },
-                .{ .new_tab = {} },
-            );
-            try self.set.put(
-                alloc,
-                .{ .key = .{ .unicode = '[' }, .mods = .{ .super = true, .shift = true } },
-                .{ .previous_tab = {} },
-            );
-            try self.set.put(
-                alloc,
-                .{ .key = .{ .unicode = ']' }, .mods = .{ .super = true, .shift = true } },
-                .{ .next_tab = {} },
-            );
-            try self.set.put(
-                alloc,
-                .{ .key = .{ .unicode = 'd' }, .mods = .{ .super = true } },
-                .{ .new_split = .right },
-            );
-            try self.set.put(
-                alloc,
-                .{ .key = .{ .unicode = 'd' }, .mods = .{ .super = true, .shift = true } },
-                .{ .new_split = .down },
-            );
-            try self.set.put(
-                alloc,
-                .{ .key = .{ .unicode = '[' }, .mods = .{ .super = true } },
-                .{ .goto_split = .previous },
-            );
-            try self.set.put(
-                alloc,
-                .{ .key = .{ .unicode = ']' }, .mods = .{ .super = true } },
-                .{ .goto_split = .next },
-            );
-            try self.set.put(
-                alloc,
-                .{ .key = .{ .physical = .arrow_up }, .mods = .{ .super = true, .alt = true } },
-                .{ .goto_split = .up },
-            );
-            try self.set.put(
-                alloc,
-                .{ .key = .{ .physical = .arrow_down }, .mods = .{ .super = true, .alt = true } },
-                .{ .goto_split = .down },
-            );
-            try self.set.put(
-                alloc,
-                .{ .key = .{ .physical = .arrow_left }, .mods = .{ .super = true, .alt = true } },
-                .{ .goto_split = .left },
-            );
-            try self.set.put(
-                alloc,
-                .{ .key = .{ .physical = .arrow_right }, .mods = .{ .super = true, .alt = true } },
-                .{ .goto_split = .right },
-            );
-            try self.set.put(
-                alloc,
-                .{ .key = .{ .physical = .arrow_up }, .mods = .{ .super = true, .ctrl = true } },
-                .{ .resize_split = .{ .up, 10 } },
-            );
-            try self.set.put(
-                alloc,
-                .{ .key = .{ .physical = .arrow_down }, .mods = .{ .super = true, .ctrl = true } },
-                .{ .resize_split = .{ .down, 10 } },
-            );
-            try self.set.put(
-                alloc,
-                .{ .key = .{ .physical = .arrow_left }, .mods = .{ .super = true, .ctrl = true } },
-                .{ .resize_split = .{ .left, 10 } },
-            );
-            try self.set.put(
-                alloc,
-                .{ .key = .{ .physical = .arrow_right }, .mods = .{ .super = true, .ctrl = true } },
-                .{ .resize_split = .{ .right, 10 } },
-            );
-            try self.set.put(
-                alloc,
-                .{ .key = .{ .unicode = '=' }, .mods = .{ .super = true, .ctrl = true } },
-                .{ .equalize_splits = {} },
-            );
+            // Windows
+            try self.putDefault(alloc, "super+shift+w=close_window");
+            try self.putDefault(alloc, "super+shift+alt+w=close_all_windows");
+
+            // Tabs (Command)
+            try self.putDefault(alloc, "super+t=new_tab");
+            try self.putDefault(alloc, "super+w=close_tab");
+            try self.putDefault(alloc, "super+[=previous_tab");
+            try self.putDefault(alloc, "super+]=next_tab");
+            for ('1'..'9' + 1) |number| {
+                try self.set.put(alloc, .{ .key = .{ .unicode = @intCast(number) }, .mods = .{ .super = true } },
+                    .{ .goto_tab = @intCast(number - '0') });
+            }
+
+            // Namespaces (Control)
+            try self.putDefault(alloc, "ctrl+t=new_namespace");
+            try self.putDefault(alloc, "performable:ctrl+r=rename_namespace");
+            try self.putDefault(alloc, "ctrl+w=close_namespace");
+            try self.putDefault(alloc, "ctrl+[=previous_namespace");
+            try self.putDefault(alloc, "ctrl+]=next_namespace");
+            for ('1'..'9' + 1) |number| {
+                try self.set.put(alloc, .{ .key = .{ .unicode = @intCast(number) }, .mods = .{ .ctrl = true } },
+                    .{ .goto_namespace = @intCast(number - '0') });
+            }
+
+            // Panes: navigation passes through when a split is not available.
+            try self.putDefault(alloc, "performable:ctrl+h=goto_split:left");
+            try self.putDefault(alloc, "performable:ctrl+j=goto_split:down");
+            try self.putDefault(alloc, "performable:ctrl+k=goto_split:up");
+            try self.putDefault(alloc, "performable:ctrl+l=goto_split:right");
+            try self.putDefault(alloc, "ctrl+shift+w=close_surface");
+            try self.putDefault(alloc, "ctrl+backslash=new_split:right");
+            try self.putDefault(alloc, "ctrl+minus=new_split:down");
+            try self.putDefault(alloc, "ctrl+shift+arrow_up=resize_split:up,5");
+            try self.putDefault(alloc, "ctrl+shift+arrow_down=resize_split:down,5");
+            try self.putDefault(alloc, "ctrl+shift+arrow_left=resize_split:left,5");
+            try self.putDefault(alloc, "ctrl+shift+arrow_right=resize_split:right,5");
 
             // Jump to prompt, matches Terminal.app
             try self.set.put(

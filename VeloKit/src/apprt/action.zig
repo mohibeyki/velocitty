@@ -357,6 +357,15 @@ pub const Action = union(Key) {
     /// Move a tab to a new window.
     move_tab_to_new_window,
 
+    new_namespace,
+    close_namespace,
+    previous_namespace,
+    next_namespace,
+    goto_namespace: NamespaceIndex,
+    rename_namespace,
+
+    pub const NamespaceIndex = extern struct { index: u32 };
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -428,6 +437,13 @@ pub const Action = union(Key) {
         readonly,
         copy_title_to_clipboard,
         move_tab_to_new_window,
+
+        new_namespace,
+        close_namespace,
+        previous_namespace,
+        next_namespace,
+        goto_namespace,
+        rename_namespace,
 
         test "velokit.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");
