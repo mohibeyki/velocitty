@@ -35,7 +35,7 @@ final class CommandPalette: NSPanel, NSTextFieldDelegate, NSWindowDelegate, NSTa
     delegate = self
     let native = NativeSettings(config: terminal.config)
     entries = native.commands.compactMap { command in
-      guard !["new_split:left", "new_split:up"].contains(command.action), command.action.withCString({ velokit_action_supported($0) }), command.title != "Ghostty"
+      guard command.action.withCString({ velokit_action_supported($0) }), command.title != "Ghostty"
       else { return nil }
       return Entry(title: command.title, detail: command.detail, action: command.action)
     }

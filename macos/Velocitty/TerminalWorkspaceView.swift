@@ -28,6 +28,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
       green: CGFloat((hex >> 8) & 255) / 255, blue: CGFloat(hex & 255) / 255, alpha: 1)
   }
   func metric(_ key: String) -> CGFloat { CGFloat(Double(appearanceValues[key] ?? "") ?? Double(NamespaceAppearance.defaults[key] ?? "") ?? 0) }
+  private var paneDividers: [PaneDivider] = []
   private let splitView = WorkspaceSplitView()
   private let sidebar = NSVisualEffectView()
   private let content = NSView()
@@ -291,8 +292,10 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   }
 
   func present() {
-    let wanted = controller?.activeTab.panes.compactMap(\.chrome) ?? []
-    for view in panes.subviews where !wanted.contains(where: { $0 === view }) { view.removeFromSuperview() }
+    let tab = controller?.activeTab
+    let visible = tab.map { $0.zoomed ? [$0.selected] : $0.panes } ?? []
+    let wanted = visible.compactMap(\.chrome)
+    for view in panes.subviews where view is TerminalChrome && !wanted.contains(where: { $0 === view }) { view.removeFromSuperview() }
     for view in wanted where view.superview !== panes { panes.addSubview(view) }
     refreshTabs()
     needsLayout = true
@@ -355,9 +358,48 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
           y: panes.bounds.height - CGFloat(rect.y - layout.area.y + rect.height) * sy,
           width: CGFloat(rect.width) * sx, height: CGFloat(rect.height) * sy).insetBy(dx: 2, dy: 2)
       }
+      if tab.zoomed { frame = panes.bounds }
       pane.chrome?.frame = frame
     }
+    layoutDividers(tab)
     needsDisplay = true
+  }
+
+  private func layoutDividers(_ tab: TerminalTab) {
+    guard !paneDividers.contains(where: \.dragging) else { return }
+    paneDividers.forEach { $0.removeFromSuperview() }
+    paneDividers = []
+    guard !tab.zoomed, let root = tab.layoutTree, tab.treeLayout == tab.layout, let tabID = tab.herdrID else { return }
+    func visit(_ node: HerdrClient.LayoutNode, frame: NSRect, path: [Bool]) {
+      guard let first = node.first, let second = node.second, let direction = node.direction else { return }
+      let ratio = CGFloat(node.ratio ?? 0.5)
+      let vertical = direction == "right"
+      var firstFrame = frame, secondFrame = frame
+      let divider = PaneDivider()
+      divider.vertical = vertical
+      divider.ratio = Double(ratio)
+      divider.container = frame
+      if vertical {
+        firstFrame.size.width *= ratio
+        secondFrame.origin.x = firstFrame.maxX
+        secondFrame.size.width = frame.width - firstFrame.width
+        divider.frame = NSRect(x: firstFrame.maxX - 3, y: frame.minY, width: 6, height: frame.height)
+      } else {
+        firstFrame.size.height *= ratio
+        firstFrame.origin.y = frame.maxY - firstFrame.height
+        secondFrame.size.height = frame.height - firstFrame.height
+        divider.frame = NSRect(x: frame.minX, y: firstFrame.minY - 3, width: frame.width, height: 6)
+      }
+      divider.onCommit = { [weak self] ratio in
+        self?.controller?.setSplitRatio(tabID: tabID, path: path, ratio: ratio)
+        self?.needsLayout = true
+      }
+      panes.addSubview(divider)
+      paneDividers.append(divider)
+      visit(first, frame: firstFrame, path: path + [false])
+      visit(second, frame: secondFrame, path: path + [true])
+    }
+    visit(root, frame: panes.bounds, path: [])
   }
 
   override func draw(_ dirtyRect: NSRect) {
@@ -775,4 +817,29 @@ private enum AgentIconCatalog {
 
 private final class AgentImageView: NSImageView {
   override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+// A divider previews its position locally and commits one explicit ratio on release.
+private final class PaneDivider: NSView {
+  var vertical = true
+  var ratio = 0.5
+  var container = NSRect.zero
+  var onCommit: ((Double) -> Void)?
+  private(set) var dragging = false
+  override func resetCursorRects() { addCursorRect(bounds, cursor: vertical ? .resizeLeftRight : .resizeUpDown) }
+  override func mouseDown(with event: NSEvent) { dragging = true }
+  override func mouseDragged(with event: NSEvent) {
+    guard let parent = superview else { return }
+    let point = parent.convert(event.locationInWindow, from: nil)
+    let proposed = vertical ? (point.x - container.minX) / max(1, container.width) : (container.maxY - point.y) / max(1, container.height)
+    ratio = Double(max(0.1, min(0.9, proposed)))
+    if vertical { frame.origin.x = container.minX + container.width * ratio - 3 }
+    else { frame.origin.y = container.maxY - container.height * ratio - 3 }
+    needsDisplay = true
+  }
+  override func mouseUp(with event: NSEvent) { dragging = false; onCommit?(ratio) }
+  override func draw(_ dirtyRect: NSRect) {
+    (dragging ? NSColor.controlAccentColor : NSColor.separatorColor).setFill()
+    bounds.insetBy(dx: vertical ? 2 : 0, dy: vertical ? 0 : 2).fill()
+  }
 }

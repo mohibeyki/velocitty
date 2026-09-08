@@ -1447,8 +1447,21 @@ func runWorkspacePersistenceCheck() throws {
   let afterSelection = try client.snapshot().workspaces.map(\.active_tab_id)
   precondition(afterSelection == beforeSelection, "Velocitty navigation must not change herdr focus")
   window.splitPane("right"); wait(first, window)
-  let selectedPane = window.session!.herdrTerminal!.pane.pane_id
   let splitTabID = window.activeTab.herdrID!
+  window.setSplitRatio(tabID: splitTabID, path: [], ratio: 0.3); wait(first, window)
+  let resizedTree = try client.layoutTree(tabID: splitTabID)
+  precondition(abs((resizedTree.ratio ?? 0) - 0.3) < 0.01)
+  window.equalizePanes(); wait(first, window)
+  let equalTree = try client.layoutTree(tabID: splitTabID)
+  precondition(abs((equalTree.ratio ?? 0) - 0.5) < 0.01)
+  let originalPane = window.session!
+  window.splitPane("left"); wait(first, window)
+  window.workspaceView.layoutSubtreeIfNeeded()
+  precondition(window.session!.chrome!.frame.midX < originalPane.chrome!.frame.midX, "Left split must appear before the original pane")
+  window.selectTab(originalPane)
+  let selectedPane = originalPane.herdrTerminal!.pane.pane_id
+  window.togglePaneZoom()
+  precondition(window.activeTab.zoomed && window.session!.herdrTerminal!.pane.pane_id == selectedPane)
   window.newTab(); wait(first, window)
   window.moveTab(-1)
   let order = window.tabs.map { $0.herdrID! }
@@ -1472,6 +1485,7 @@ func runWorkspacePersistenceCheck() throws {
   precondition(restored.namespaces[0].tabs.map { $0.herdrID! } == order)
   let split = restored.namespaces[0].tabs.first { $0.herdrID == splitTabID }!
   precondition(split.selected.herdrTerminal!.pane.pane_id == selectedPane)
+  precondition(split.zoomed, "Local pane zoom must survive relaunch")
   precondition(restored.workspaceView.savedSidebarState == .init(width: 276, compact: true))
   // External changes must attach exactly once without importing backend focus.
   let localSelection = restored.session!

@@ -61,6 +61,19 @@ final class HerdrClient {
         panes: panes.filter { namespaceIDs.contains($0.workspace_id) })
     }
   }
+  final class LayoutNode: Decodable {
+    let type: String
+    let direction: String?
+    let ratio: Double?
+    let pane_id: String?
+    let first: LayoutNode?
+    let second: LayoutNode?
+    func weight(along direction: String) -> Double {
+      guard type == "split", self.direction == direction, let first, let second else { return 1 }
+      return first.weight(along: direction) + second.weight(along: direction)
+    }
+  }
+
   struct Terminal {
     let client: HerdrClient
     let pane: Pane
@@ -265,6 +278,83 @@ final class HerdrClient {
       throw RequestError(code: nil, message: detail.isEmpty ? "herdr did not complete the request." : String(detail.prefix(1500)))
     }
     return streams[0]
+  }
+
+  private func socketPath() throws -> String {
+    let data = try run(["session", "list", "--json"])
+    let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+    guard let sessions = json?["sessions"] as? [[String: Any]],
+      let path = sessions.first(where: { $0["name"] as? String == sessionName })?["socket_path"] as? String else {
+      throw ConfigurationError("herdr did not report its API socket.")
+    }
+    return path
+  }
+
+  // Explicit-ID operations absent from the CLI use the same framed API as herdr.
+  func api(_ method: String, _ params: [String: Any]) throws -> [String: Any] {
+    let path = try socketPath()
+    var address = sockaddr_un()
+    address.sun_family = sa_family_t(AF_UNIX)
+    let pathBytes = Array(path.utf8CString)
+    guard pathBytes.count <= MemoryLayout.size(ofValue: address.sun_path) else { throw ConfigurationError("herdr socket path is too long.") }
+    withUnsafeMutableBytes(of: &address.sun_path) { buffer in pathBytes.withUnsafeBytes { buffer.copyBytes(from: $0) } }
+    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+    guard fd >= 0 else { throw POSIXError(.EIO) }
+    defer { Darwin.close(fd) }
+    var timeout = timeval(tv_sec: 2, tv_usec: 0)
+    var noSignal: Int32 = 1
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size))
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    let connected = withUnsafePointer(to: &address) { pointer in
+      pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+    }
+    guard connected == 0 else { throw ConfigurationError("Could not connect to herdr.") }
+    var data = try JSONSerialization.data(withJSONObject: ["id": UUID().uuidString, "method": method, "params": params])
+    data.append(10)
+    var sent = 0
+    while sent < data.count {
+      let count = data.withUnsafeBytes { Darwin.write(fd, $0.baseAddress!.advanced(by: sent), data.count - sent) }
+      guard count > 0 else { throw ConfigurationError("herdr API write failed.") }
+      sent += count
+    }
+    var received = Data()
+    var bytes = [UInt8](repeating: 0, count: 16384)
+    let deadline = ProcessInfo.processInfo.systemUptime + 3
+    while received.count < 4 * 1024 * 1024 && ProcessInfo.processInfo.systemUptime < deadline {
+      let count = Darwin.read(fd, &bytes, bytes.count)
+      guard count > 0 else { throw ConfigurationError("herdr API connection ended or timed out.") }
+      received.append(contentsOf: bytes.prefix(count))
+      if let end = received.firstIndex(of: 10) {
+        let json = try JSONSerialization.jsonObject(with: received.prefix(upTo: end)) as? [String: Any]
+        if let error = json?["error"] as? [String: Any] { throw RequestError(code: error["code"] as? String, message: error["message"] as? String ?? "herdr API request failed.") }
+        guard let result = json?["result"] as? [String: Any] else { throw ConfigurationError("Invalid herdr API response.") }
+        cachedStatus = nil
+        return result
+      }
+    }
+    throw ConfigurationError("herdr API response exceeded its limit.")
+  }
+
+  func layoutTree(tabID: String) throws -> LayoutNode {
+    let response = try api("layout.export", ["tab_id": tabID])
+    guard let layout = response["layout"] as? [String: Any], let root = layout["root"] else { throw ConfigurationError("herdr did not return a layout tree.") }
+    return try JSONDecoder().decode(LayoutNode.self, from: JSONSerialization.data(withJSONObject: root))
+  }
+
+  func equalize(tabID: String) throws {
+    let root = try layoutTree(tabID: tabID)
+    func apply(_ node: LayoutNode, path: [Bool]) throws {
+      guard let first = node.first, let second = node.second, let direction = node.direction else { return }
+      let weight = first.weight(along: direction)
+      let ratio = weight / (weight + second.weight(along: direction))
+      if abs((node.ratio ?? 0.5) - ratio) > 0.001 {
+        _ = try api("layout.set_split_ratio", ["tab_id": tabID, "path": path, "ratio": ratio])
+      }
+      try apply(first, path: path + [false])
+      try apply(second, path: path + [true])
+    }
+    try apply(root, path: [])
   }
 
   func request(_ arguments: [String], timeout: TimeInterval = 5) throws -> [String: Any] {

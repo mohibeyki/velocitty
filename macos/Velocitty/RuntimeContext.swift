@@ -214,8 +214,23 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_NEW_SPLIT:
       let direction = action.action.new_split
-      guard direction == GHOSTTY_SPLIT_DIRECTION_RIGHT || direction == GHOSTTY_SPLIT_DIRECTION_DOWN else { return false }
-      perform { view, owner in owner?.splitPane(direction == GHOSTTY_SPLIT_DIRECTION_RIGHT ? "right" : "down", from: view?.session) }
+      let name: String
+      switch direction {
+      case GHOSTTY_SPLIT_DIRECTION_RIGHT: name = "right"
+      case GHOSTTY_SPLIT_DIRECTION_DOWN: name = "down"
+      case GHOSTTY_SPLIT_DIRECTION_LEFT: name = "left"
+      case GHOSTTY_SPLIT_DIRECTION_UP: name = "up"
+      default: return false
+      }
+      perform { view, owner in owner?.splitPane(name, from: view?.session) }
+
+    case GHOSTTY_ACTION_EQUALIZE_SPLITS:
+      guard let pane = view?.session, (pane.windowController?.tab(for: pane)?.panes.count ?? 0) > 1 else { return false }
+      perform { _, owner in owner?.equalizePanes() }
+
+    case GHOSTTY_ACTION_TOGGLE_SPLIT_ZOOM:
+      guard let pane = view?.session, (pane.windowController?.tab(for: pane)?.panes.count ?? 0) > 1 else { return false }
+      perform { view, owner in owner?.togglePaneZoom(from: view?.session) }
 
     case GHOSTTY_ACTION_GOTO_SPLIT:
       guard let pane = view?.session, let controller = pane.windowController,

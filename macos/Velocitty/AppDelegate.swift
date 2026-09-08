@@ -229,6 +229,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   @objc func newTab() { if let activeWindow { activeWindow.newTab() } else { newWindow() } }
   @objc func splitVertical() { activeWindow?.splitPane("right") }
   @objc func splitHorizontal() { activeWindow?.splitPane("down") }
+  @objc func equalizePanes() { activeWindow?.equalizePanes() }
+  @objc func zoomPane() { activeWindow?.togglePaneZoom() }
   @objc func closePane() { activeWindow?.closePane() }
   @objc func nextPane() { activeWindow?.focusPane("next") }
   @objc func previousPane() { activeWindow?.focusPane("previous") }
@@ -250,6 +252,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
     if [#selector(closePane), #selector(closeTab)].contains(menuItem.action), activeWindow?.muxBusy == true { return false }
     switch menuItem.action {
+    case #selector(zoomPane), #selector(equalizePanes): return (activeWindow?.activeTab.panes.count ?? 0) > 1 && activeWindow?.muxBusy != true
     case #selector(closePane), #selector(newNamespace), #selector(editNamespace), #selector(closeNamespace),  #selector(closeTab), #selector(nextTab), #selector(previousTab), #selector(renameTab),
       #selector(moveTabLeft), #selector(moveTabRight), #selector(closeWindow), #selector(showCommands), #selector(findTerminal),
       #selector(findNext), #selector(findPrevious):
@@ -446,6 +449,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     terminalMenu.addItem(.separator())
     terminalMenu.addItem(withTitle: "Split Vertically", action: #selector(splitVertical), keyEquivalent: "").target = self
     terminalMenu.addItem(withTitle: "Split Horizontally", action: #selector(splitHorizontal), keyEquivalent: "").target = self
+    terminalMenu.addItem(withTitle: "Equalize Panes", action: #selector(equalizePanes), keyEquivalent: "").target = self
+    terminalMenu.addItem(withTitle: "Zoom Pane", action: #selector(zoomPane), keyEquivalent: "").target = self
     terminalMenu.addItem(withTitle: "Next Pane", action: #selector(nextPane), keyEquivalent: "").target = self
     terminalMenu.addItem(withTitle: "Previous Pane", action: #selector(previousPane), keyEquivalent: "").target = self
     for (index, direction) in ["Left", "Right", "Up", "Down"].enumerated() {
@@ -519,6 +524,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
       "Resize Pane Left": "resize_split:left,5", "Resize Pane Right": "resize_split:right,5",
       "Resize Pane Up": "resize_split:up,5", "Resize Pane Down": "resize_split:down,5",
       "Split Vertically": "new_split:right", "Split Horizontally": "new_split:down",
+      "Zoom Pane": "toggle_split_zoom", "Equalize Panes": "equalize_splits",
       "Next Pane": "goto_split:next", "Previous Pane": "goto_split:previous",
       "New Tab": "new_tab", "Close Pane": "close_surface", "Close Tab": "close_tab", "Rename Tab…": "prompt_tab_title",
       "Next Tab": "next_tab", "Previous Tab": "previous_tab",
@@ -572,6 +578,10 @@ final class TerminalTab {
   var selected: TerminalSession
   var title: String?
   var layout: HerdrClient.Layout?
+  var zoomed = false
+  var layoutTree: HerdrClient.LayoutNode?
+  var treeLayout: HerdrClient.Layout?
+  var loadingTree = false
   var displayTitle: String { title ?? selected.terminalTitle }
   var hasBell: Bool { panes.contains { $0.hasBell } }
   let herdrID: String?
@@ -1234,6 +1244,7 @@ extension TerminalWindowController {
       session?.view?.updateFocus(forceOff: true)
       activeNamespace = namespace
       namespace.selected = tab
+      if tab.selected !== pane { tab.zoomed = false }
       tab.selected = pane
       session = pane
       workspaceView.present()
@@ -1244,7 +1255,7 @@ extension TerminalWindowController {
     for terminal in allPanes {
       if let surface = terminal.surface {
         velokit_surface_set_occlusion(surface,
-          tab.panes.contains { $0 === terminal } && window.occlusionState.contains(.visible))
+          tab.panes.contains { $0 === terminal } && (!tab.zoomed || terminal === tab.selected) && window.occlusionState.contains(.visible))
       }
     }
     if native.windowStepResize, tab.panes.count == 1, let surface = pane.surface {
@@ -1762,6 +1773,11 @@ extension TerminalWindowController {
   }
 
   func updateHerdrLabels(_ snapshot: HerdrClient.Snapshot) {
+    for pane in allPanes {
+      if let terminal = pane.herdrTerminal, let record = snapshot.panes.first(where: { $0.terminal_id == terminal.pane.terminal_id }) {
+        pane.herdrTerminal = .init(client: terminal.client, pane: record)
+      }
+    }
     workspaceView.updateAgents(snapshot)
     var changed = false
     for namespace in namespaces {
@@ -1774,6 +1790,7 @@ extension TerminalWindowController {
         let layout = snapshot.layouts.first { $0.tab_id == tab.herdrID }
         changed = changed || tab.layout != layout
         tab.layout = layout
+        refreshLayoutTree(tab)
         if let record = snapshot.tabs.first(where: { $0.tab_id == tab.herdrID }) {
           let position = snapshot.tabs.filter { $0.workspace_id == record.workspace_id }.firstIndex { $0.tab_id == record.tab_id }.map { $0 + 1 }
           let defaultLabel = String(position ?? record.number ?? 1)
@@ -1785,6 +1802,47 @@ extension TerminalWindowController {
       }
     }
     if changed { workspaceView.present() }
+  }
+
+  func refreshLayoutTree(_ tab: TerminalTab) {
+    guard !tab.loadingTree, tab.treeLayout != tab.layout, let terminal = tab.selected.herdrTerminal,
+      let layout = tab.layout, tab.panes.count > 1 else { return }
+    tab.loadingTree = true
+    terminal.client.perform({ try $0.layoutTree(tabID: terminal.pane.tab_id) }) { [weak self, weak tab] result in
+      guard let self, let tab else { return }
+      tab.loadingTree = false
+      guard !self.closing else { return }
+      if tab.layout == layout, case .success(let tree) = result {
+        tab.layoutTree = tree
+        tab.treeLayout = layout
+        self.workspaceView.needsLayout = true
+      }
+    }
+  }
+
+  func equalizePanes() {
+    guard let terminal = session?.herdrTerminal, activeTab.panes.count > 1 else { return }
+    changePaneLayout { try $0.equalize(tabID: terminal.pane.tab_id) }
+  }
+
+  func setSplitRatio(tabID: String, path: [Bool], ratio: Double) {
+    guard ratio.isFinite else { return }
+    changePaneLayout { _ = try $0.api("layout.set_split_ratio", ["tab_id": tabID, "path": path, "ratio": max(0.1, min(0.9, ratio))]) }
+  }
+
+  private func changePaneLayout(_ change: @escaping (HerdrClient) throws -> Void) {
+    guard !closing, let client = session?.herdrTerminal?.client else { return }
+    if deferMuxAction({ [weak self] in self?.changePaneLayout(change) }) { return }
+    muxBusy = true
+    client.perform({ client in try change(client); return try client.snapshot() }) { [weak self] result in
+      guard let self else { return }
+      self.muxBusy = false
+      guard !self.closing else { return }
+      switch result {
+      case .success(let snapshot): self.updateHerdrLabels(snapshot)
+      case .failure(let error): self.owner?.showMuxError(error)
+      }
+    }
   }
 
   func endHerdrTabs(_ targets: [TerminalTab]) {
@@ -1826,7 +1884,13 @@ extension TerminalWindowController {
     let shellEnvironment = terminal.client.shellEnvironment(settings: pane.settings)
     muxBusy = true
     terminal.client.perform({ client in
-      _ = try client.request(["pane", "split", terminal.pane.pane_id, "--direction", direction, "--no-focus"] + HerdrClient.environmentArguments(shellEnvironment))
+      let backendDirection = direction == "left" ? "right" : direction == "up" ? "down" : direction
+      let response = try client.request(["pane", "split", terminal.pane.pane_id, "--direction", backendDirection, "--no-focus"] + HerdrClient.environmentArguments(shellEnvironment))
+      if direction == "left" || direction == "up", let newPane = response["pane"] as? [String: Any], let id = newPane["pane_id"] as? String {
+        // Herdr creates right/down only. Swapping preserves both processes;
+        // its incidental backend selection is never imported into Velocitty.
+        _ = try client.request(["pane", "swap", "--source-pane", id, "--target-pane", terminal.pane.pane_id])
+      }
       return try client.snapshot()
     }) { [weak self] result in
       guard let self else { return }
@@ -1835,6 +1899,15 @@ extension TerminalWindowController {
       do { try self.addHerdrTerminals(result.get(), excluding: existing) }
       catch { self.owner?.showMuxError(error) }
     }
+  }
+
+  func togglePaneZoom(from source: TerminalSession? = nil) {
+    guard let pane = source ?? session, let tab = tab(for: pane), tab.panes.count > 1,
+      !closing, window?.attachedSheet == nil else { return }
+    tab.zoomed.toggle()
+    selectTab(pane)
+    workspaceView.present()
+    owner?.scheduleWorkspaceSave(self)
   }
 
   func focusPane(_ direction: String, from source: TerminalSession? = nil) {
@@ -1945,7 +2018,7 @@ extension AppDelegate {
       guard let id = namespace.herdrID else { return nil }
       return WorkspaceState.Namespace(id: id, tabs: namespace.tabs.compactMap { tab in
         guard let id = tab.herdrID else { return nil }
-        return WorkspaceState.Tab(id: id, selectedPaneID: tab.selected.herdrTerminal?.pane.pane_id)
+        return WorkspaceState.Tab(id: id, selectedPaneID: tab.selected.herdrTerminal?.pane.pane_id, zoomed: tab.zoomed)
       }, selectedTabID: namespace.selected.herdrID)
     }
     state.update(current, replacing: controller.persistedNamespaceIDs)
@@ -1997,6 +2070,7 @@ extension TerminalWindowController {
       let tabOrder = saved.tabs.map(\.id)
       namespace.tabs.sort { (tabOrder.firstIndex(of: $0.herdrID ?? "") ?? Int.max) < (tabOrder.firstIndex(of: $1.herdrID ?? "") ?? Int.max) }
       for tab in namespace.tabs {
+        tab.zoomed = saved.tabs.first(where: { $0.id == tab.herdrID })?.zoomed == true
         if let paneID = saved.tabs.first(where: { $0.id == tab.herdrID })?.selectedPaneID,
           let pane = tab.panes.first(where: { $0.herdrTerminal?.pane.pane_id == paneID }) { tab.selected = pane }
       }

@@ -5,8 +5,9 @@ public struct WorkspaceState: Codable, Equatable, Sendable {
   public struct Tab: Codable, Equatable, Sendable {
     public var id: String
     public var selectedPaneID: String?
-    public init(id: String, selectedPaneID: String?) {
-      self.id = id; self.selectedPaneID = selectedPaneID
+    public var zoomed: Bool?
+    public init(id: String, selectedPaneID: String?, zoomed: Bool? = nil) {
+      self.id = id; self.selectedPaneID = selectedPaneID; self.zoomed = zoomed
     }
   }
   public struct Namespace: Codable, Equatable, Sendable {
@@ -61,6 +62,7 @@ public struct WorkspaceState: Codable, Equatable, Sendable {
       for savedTab in saved.tabs {
         guard let index = tabs.firstIndex(where: { $0.id == savedTab.id }) else { continue }
         var tab = tabs.remove(at: index)
+        tab.zoomed = savedTab.zoomed
         if let selected = savedTab.selectedPaneID, panesByTab[tab.id]?.contains(selected) == true { tab.selectedPaneID = selected }
         current.tabs.append(tab)
       }

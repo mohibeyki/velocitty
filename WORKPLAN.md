@@ -5,7 +5,7 @@ Scope: macOS features only. Keep focus and presentation in Velocitty, terminal l
 Each step ends with focused validation and a local commit. Consult a subagent for uncertain design choices. Preserve actual user sessions.
 
 - [x] 1. Connection recovery: retain pane identity/layout, distinguish shell exit from attachment failure, retry with backoff, expose retry state. Validate isolated attachment interruption, real exit, cancellation, no duplicate attachments.
-- [ ] 2. Pane controls: draggable dividers, zoom, equalization, all split directions, styling. Validate nested splits, minimum sizes, selection and restoration.
+- [x] 2. Pane controls: draggable dividers, zoom, equalization, all split directions, styling. Validate nested splits, minimum sizes, selection and restoration.
 - [ ] 3. Rearrangement: move tabs across namespaces and panes across tabs, enable mixed-namespace presentation where ownership remains clear. Validate IDs/process lifetime and persistence.
 - [ ] 4. Workspace search: centered search, keyboard navigation across namespaces/tabs/agents, waiting-agent discovery. Validate dynamic result updates and focus.
 - [ ] 5. Deferred settings: implement applicable Ghostty pane/window behavior, retain deliberate exclusions. Validate defaults, reload, export and invalid values.
@@ -17,3 +17,5 @@ Progress:
 - Baseline clean. Installed herdr is 0.8.2; investigating 0.9 without replacing the user's executable.
 
 - Step 1 validated: build and isolated workspace GUI test passed, including repeated recovery requests and input reaching the original terminal ID. Recovery retries eight times with capped backoff; manual retry remains available.
+
+- Step 2 validated: build and isolated GUI checks passed for split ratios, equalization, left placement, zoom and restoration. Left/up use process-preserving split+swap; backend incidental selection is ignored. Divider commits one ratio on release.
