@@ -105,11 +105,20 @@ and running terminals when the window closes or the app quits.
 ## Namespaces
 
 Use the left sidebar or **Namespace** menu to create, select, rename, and close
-namespaces. Ctrl-R renames the current namespace. Ctrl-1–Ctrl-9
+namespaces. Expanded rows show the name above smaller, muted Git branch and cwd
+subtitles, followed by agent icons. The branch and agent rows are omitted when absent.
+Branch and cwd follow the selected pane; compact mode keeps the numbered column.
+Ctrl-R renames the current namespace. Ctrl-1–Ctrl-9
 select namespaces by position. Ctrl-T creates a namespace, Ctrl-W closes it,
 and Ctrl-[ / Ctrl-] switch namespaces. Switching returns to that namespace's selected
 tab, with its shells still running. Closing a namespace checks all its tabs
 before ending them.
+
+Monochrome agent marks are bundled for Codex, Claude, Grok, Gemini, Cursor,
+GitHub Copilot, OpenCode, Kimi, Amp, Cline, Kilo Code, Qwen, Devin, Antigravity,
+Kiro, and Qoder. Other agents use a terminal symbol. The icons come from
+[Lobe Icons](https://github.com/lobehub/lobe-icons); provenance and license are in
+[VeloKit’s third-party notices](VeloKit/THIRD_PARTY_NOTICES.md).
 
 ## Multiplexing
 

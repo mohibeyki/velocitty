@@ -46,6 +46,8 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   var agents: [String: Agent] = [:]
   private var paneTitles: [String: String] = [:]
   private var paneDirectories: [String: String] = [:]
+  private var branches: [String: String] = [:]
+  private var pollingBranches = false
   private var agentTimer: Timer?
   private var pollingAgents = false
 
@@ -164,11 +166,61 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
       titles[pane.pane_id] = pane.terminal_title_stripped ?? pane.terminal_title
       directories[pane.pane_id] = pane.foreground_cwd ?? pane.cwd
     }
+    pollBranches(directories: directories)
     guard updated != agents || titles != paneTitles || directories != paneDirectories else { return }
     paneTitles = titles
     paneDirectories = directories
     agents = updated
     refreshTabs()
+  }
+
+  private func directory(for namespace: TerminalNamespace) -> String {
+    let pane = namespace.selected.selected
+    return paneDirectories[pane.herdrTerminal?.pane.pane_id ?? ""] ?? pane.currentDirectory
+      ?? pane.initialDirectory?.path ?? pane.settings.workingDirectory.path
+  }
+
+  private func pollBranches(directories: [String: String]) {
+    guard !pollingBranches, let controller else { return }
+    let paths = Set(controller.namespaces.map { namespace in
+      directories[namespace.selected.selected.herdrTerminal?.pane.pane_id ?? ""] ?? directory(for: namespace)
+    })
+    pollingBranches = true
+    DispatchQueue.global(qos: .utility).async { [weak self] in
+      var results: [String: String] = [:]
+      for path in paths {
+        func git(_ arguments: [String]) -> String? {
+          let process = Process()
+          process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+          process.arguments = ["--no-optional-locks", "-C", path] + arguments
+          process.environment = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("GIT_") }
+          let output = Pipe()
+          process.standardOutput = output
+          process.standardError = FileHandle.nullDevice
+          process.standardInput = FileHandle.nullDevice
+          do { try process.run() } catch { return nil }
+          let timeout = DispatchWorkItem { if process.isRunning { process.terminate() } }
+          DispatchQueue.global().asyncAfter(deadline: .now() + 2, execute: timeout)
+          let data = output.fileHandleForReading.readDataToEndOfFile()
+          process.waitUntilExit()
+          timeout.cancel()
+          guard process.terminationStatus == 0 else { return nil }
+          let value = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+          return value.isEmpty ? nil : value
+        }
+        if let branch = git(["symbolic-ref", "--quiet", "--short", "HEAD"]) { results[path] = branch }
+        else if let commit = git(["rev-parse", "--short", "HEAD"]) { results[path] = "Detached · " + commit }
+      }
+      let updated = results
+      DispatchQueue.main.async { [weak self] in
+        guard let self else { return }
+        self.pollingBranches = false
+        if self.branches != updated {
+          self.branches = updated
+          if let controller = self.controller { self.refreshNamespaces(controller) }
+        }
+      }
+    }
   }
 
   func agent(for pane: TerminalSession) -> Agent? {
@@ -342,13 +394,14 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
       controller.namespaces.indices.contains(index) else { return nil }
     return controller.namespaces[index]
   }
-  private var agentColumns: Int { max(1, Int((max(160, sidebar.frame.width) - 40) / (metric("agent_icon_size") + 6))) }
   func outlineView(_ outlineView: NSOutlineView, shouldShowOutlineCellForItem item: Any) -> Bool { false }
   func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? { NamespaceHoverRow() }
   func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
     if sidebarCompact { return 34 }
-    let count = namespace(for: item)?.tabs.flatMap(\.panes).filter { agent(for: $0) != nil }.count ?? 0
-    return count == 0 ? 34 : 32 + CGFloat((count + agentColumns - 1) / agentColumns) * (metric("agent_icon_size") + 6)
+    guard let namespace = namespace(for: item) else { return 34 }
+    let hasBranch = branches[directory(for: namespace)] != nil
+    let hasAgents = namespace.tabs.flatMap(\.panes).contains { agent(for: $0) != nil }
+    return 50 + (hasBranch ? 18 : 0) + (hasAgents ? metric("agent_icon_size") + 8 : 0)
   }
   func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
     guard let namespace = namespace(for: item) else { return nil }
@@ -367,12 +420,51 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     NSLayoutConstraint.activate([
       title.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
       title.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
-      sidebarCompact || members.isEmpty
+      sidebarCompact
         ? title.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
         : title.topAnchor.constraint(equalTo: cell.topAnchor, constant: 7),
     ])
     if sidebarCompact { return cell }
+    let cwd = directory(for: namespace)
+    let home = namespace.selected.selected.settings.home.path
+    let displayDirectory = cwd == home ? "~" : cwd.hasPrefix(home + "/") ? "~" + cwd.dropFirst(home.count) : cwd
+    func detail(_ text: String, top: CGFloat, tooltip: String? = nil) {
+      let label = NSTextField(labelWithString: text)
+      label.font = .systemFont(ofSize: 11)
+      label.textColor = .secondaryLabelColor
+      label.lineBreakMode = .byTruncatingMiddle
+      label.toolTip = tooltip ?? text
+      label.translatesAutoresizingMaskIntoConstraints = false
+      cell.addSubview(label)
+      NSLayoutConstraint.activate([
+        label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+        label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+        label.topAnchor.constraint(equalTo: cell.topAnchor, constant: top),
+      ])
+    }
+    var detailTop: CGFloat = 27
+    if let branch = branches[cwd] {
+      detail(branch, top: detailTop)
+      detailTop += 18
+    }
+    detail(displayDirectory, top: detailTop, tooltip: cwd)
+    guard !members.isEmpty else { return cell }
     let size = metric("agent_icon_size")
+    let statusScroll = NSScrollView()
+    statusScroll.drawsBackground = false
+    statusScroll.hasHorizontalScroller = true
+    statusScroll.autohidesScrollers = true
+    statusScroll.scrollerStyle = .overlay
+    let statusRow = NSView(frame: NSRect(x: 0, y: 0, width: CGFloat(members.count) * (size + 6) - 6, height: size + 4))
+    statusScroll.documentView = statusRow
+    statusScroll.translatesAutoresizingMaskIntoConstraints = false
+    cell.addSubview(statusScroll)
+    NSLayoutConstraint.activate([
+      statusScroll.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+      statusScroll.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+      statusScroll.topAnchor.constraint(equalTo: cell.topAnchor, constant: detailTop + 21),
+      statusScroll.heightAnchor.constraint(equalToConstant: size + 4),
+    ])
     for (offset, pane) in members.enumerated() {
       guard let agent = agent(for: pane) else { continue }
       let chip = AgentIconButton(agent: agent, values: appearanceValues)
@@ -381,13 +473,8 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
       }
       chip.toolTip = "\(agent.name) — \(chip.statusLabel) · \(pane.displayTitle)"
       chip.setAccessibilityLabel(chip.toolTip)
-      chip.translatesAutoresizingMaskIntoConstraints = false
-      cell.addSubview(chip)
-      NSLayoutConstraint.activate([
-        chip.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4 + CGFloat(offset % agentColumns) * (size + 6)),
-        chip.topAnchor.constraint(equalTo: cell.topAnchor, constant: 30 + CGFloat(offset / agentColumns) * (size + 6)),
-        chip.widthAnchor.constraint(equalToConstant: size), chip.heightAnchor.constraint(equalToConstant: size),
-      ])
+      chip.frame = NSRect(x: CGFloat(offset) * (size + 6), y: 2, width: size, height: size)
+      statusRow.addSubview(chip)
     }
     return cell
   }
@@ -459,6 +546,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
 private final class AgentIconButton: NSButton {
   var onSelect: (() -> Void)?
   private let border = CAShapeLayer()
+  private let agentImage = AgentImageView()
   private let values: [String: String]
   private let agent: TerminalWorkspaceView.Agent
   private var statusKey: String {
@@ -487,6 +575,10 @@ private final class AgentIconButton: NSButton {
     isBordered = false
     wantsLayer = true
     layer?.addSublayer(border)
+    agentImage.image = AgentIconCatalog.image(for: agent.name)
+    agentImage.contentTintColor = .labelColor
+    agentImage.imageScaling = .scaleProportionallyUpOrDown
+    addSubview(agentImage)
     target = self
     action = #selector(selectAgent)
   }
@@ -495,6 +587,7 @@ private final class AgentIconButton: NSButton {
 
   override func layout() {
     super.layout()
+    agentImage.frame = bounds.insetBy(dx: 4, dy: 4)
     let width = CGFloat(Double(values["agent_border_width"]!)!)
     let rect = bounds.insetBy(dx: width / 2 + 1, dy: width / 2 + 1)
     border.frame = bounds
@@ -520,35 +613,6 @@ private final class AgentIconButton: NSButton {
       animation.repeatCount = .infinity
       border.add(animation, forKey: "activity")
     }
-  }
-
-  override func draw(_ dirtyRect: NSRect) {
-    // Small monochrome marks remain legible at 22 points; identity is also
-    // available through the tooltip and accessibility label.
-    let rect = bounds.insetBy(dx: 5, dy: 5)
-    let name = agent.name.lowercased()
-    NSColor.labelColor.setStroke()
-    let path = NSBezierPath()
-    path.lineWidth = 1.2
-    if name.contains("claude") {
-      for i in 0..<8 {
-        let angle = CGFloat(i) * .pi / 4
-        path.move(to: NSPoint(x: rect.midX + cos(angle) * 2, y: rect.midY + sin(angle) * 2))
-        path.line(to: NSPoint(x: rect.midX + cos(angle) * rect.width / 2, y: rect.midY + sin(angle) * rect.height / 2))
-      }
-    } else if name.contains("grok") {
-      path.appendOval(in: rect.insetBy(dx: 1, dy: 1))
-      path.move(to: NSPoint(x: rect.minX, y: rect.minY))
-      path.line(to: NSPoint(x: rect.maxX, y: rect.maxY))
-    } else {
-      // Terminal mark for Codex and a neutral fallback for other agents.
-      path.move(to: NSPoint(x: rect.minX, y: rect.maxY - 1))
-      path.line(to: NSPoint(x: rect.midX - 1, y: rect.midY))
-      path.line(to: NSPoint(x: rect.minX, y: rect.minY + 1))
-      path.move(to: NSPoint(x: rect.midX + 1, y: rect.minY + 1))
-      path.line(to: NSPoint(x: rect.maxX, y: rect.minY + 1))
-    }
-    path.stroke()
   }
 }
 
@@ -621,4 +685,22 @@ private final class NamespaceHoverRow: NSTableRowView {
       NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 0), xRadius: 5, yRadius: 5).fill()
     }
   }
+}
+
+/// A single monochrome source, with aliases for herdr's agent names.
+private enum AgentIconCatalog {
+  static let names = ["codex", "claude", "grok", "gemini", "cursor", "copilot", "opencode",
+    "kimi", "amp", "cline", "kilo", "qwen", "devin", "antigravity", "kiro", "qoder"]
+  static func image(for agent: String) -> NSImage? {
+    let key = agent.lowercased().filter { $0.isLetter || $0.isNumber }
+    let aliases = ["claudecode": "claude", "githubcopilot": "copilot", "geminicli": "gemini",
+      "cursoragent": "cursor", "grokbuild": "grok", "kilocode": "kilo", "qodercli": "qoder", "qwencode": "qwen"]
+    let name = aliases[key] ?? key
+    if names.contains(name), let image = NSImage(named: "Agent-" + name) { return image }
+    return NSImage(systemSymbolName: "terminal", accessibilityDescription: agent)
+  }
+}
+
+private final class AgentImageView: NSImageView {
+  override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
