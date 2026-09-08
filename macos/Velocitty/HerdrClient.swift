@@ -73,6 +73,11 @@ final class HerdrClient {
     let tabs: [Tab]
     let panes: [Pane]
     var endpointID: String? = nil
+    func excluding(terminals: Set<String>) -> Snapshot {
+      let panes = panes.filter { !terminals.contains($0.terminal_id) }
+      let tabIDs = Set(panes.map(\.tab_id)), namespaceIDs = Set(panes.map(\.workspace_id))
+      return Snapshot(layouts: layouts.filter { tabIDs.contains($0.tab_id) }, workspaces: workspaces.filter { namespaceIDs.contains($0.workspace_id) }, tabs: tabs.filter { tabIDs.contains($0.tab_id) }, panes: panes, endpointID: endpointID)
+    }
     func filtered(namespaceIDs: Set<String>) -> Snapshot {
       let tabs = tabs.filter { namespaceIDs.contains($0.workspace_id) }
       let tabIDs = Set(tabs.map(\.tab_id))

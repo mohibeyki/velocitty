@@ -418,6 +418,10 @@ final class RuntimeContext: NSObject {
       let mode = action.action.close_tab_mode
       perform { view, owner in owner?.closeTabs(mode, from: view?.session) }
 
+    case GHOSTTY_ACTION_UNDO:
+      perform { _, owner in owner?.owner?.undoClose() }
+    case GHOSTTY_ACTION_REDO:
+      perform { _, owner in owner?.owner?.redoClose() }
     case GHOSTTY_ACTION_QUIT:
       perform { view, owner in
         NSApp.terminate(nil)

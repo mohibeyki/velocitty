@@ -44,6 +44,7 @@ public struct WorkspaceState: Codable, Equatable, Sendable {
       self.frame = frame; self.sidebar = sidebar
     }
   }
+  public var pendingTerminalClosures: [String]?
   public var windows: [Window]?
   public var activeWindowID: String?
   public var version = 2

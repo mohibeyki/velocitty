@@ -7,6 +7,7 @@ public enum TerminalSettings {
     $0.hasPrefix("gtk-") || $0.hasPrefix("linux-cgroup") || ["class", "x11-instance-name", "freetype-load-flags"].contains($0)
   })
   public static let supported: Set<String> = [
+    "undo-timeout",
     "focus-follows-mouse",
     "split-divider-color",
     "split-inherit-working-directory",
@@ -262,7 +263,6 @@ public enum TerminalSettings {
     "quick-terminal-screen": "Excluded; there is no quick-terminal window.",
     "quick-terminal-size": "Excluded; there is no quick-terminal window.",
     "quick-terminal-space-behavior": "Excluded; there is no quick-terminal window.",
-    "undo-timeout": "Deferred until terminal session restoration is implemented.",
     "x11-instance-name":
       "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
   ]

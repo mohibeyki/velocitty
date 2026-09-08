@@ -32,3 +32,5 @@ Progress:
 - Step 7 remote transport validated against herdr 0.9 over laptop SSH: real keyboard input, scoped IDs, two servers in one window, and tunnel reconnect pass. Uses herdr machine catalog; reconnects saved enabled endpoints. Installed herdr remains unchanged. Remote Git queries execute over SSH.
 
 - Step 3 presentation validated: existing tabs from different servers can appear alongside one another, with local focus and outer divider, preserved terminal IDs and saved composition. Startup preserves offline companions and remote window ownership.
+
+- Close undo validated over SSH: retained native surface identity, authoritative live-terminal validation, redo deadline, and backend destruction pass. Pending explicit closes are persisted and flushed with a bounded quit flow; window detach undo never destroys herdr sessions.

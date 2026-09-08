@@ -47,6 +47,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   private var remoteRestoreAttempted = false
   var muxOpening = false
   var muxError: String?
+  private var closedOperations: [ClosedTerminals] = []
+  private var redoOperations: [ClosedTerminals] = []
+  private var pendingEnds: Set<String> = []
+  private var endingEndpoints: Set<String> = []
+  var retainedTerminalIDs: Set<String> { Set(closedOperations.filter(\.applied).flatMap(\.terminalIDs)) }
+  var hiddenTerminalIDs: Set<String> {
+    pendingEnds.union(closedOperations.filter { $0.applied && $0.destroy }.flatMap(\.terminalIDs))
+  }
 
 
   var activeWindow: TerminalWindowController? {
@@ -217,13 +225,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     pendingFiles.removeAll()
     quitTimer?.invalidate()
     // Leave windows registered while AppKit captures their restorable state.
+    if flushClosesBeforeQuit() { return .terminateLater }
     return .terminateNow
   }
 
   func applicationWillTerminate(_ notification: Notification) {
     secureInputOwner.update(wanted: false)
     fullscreenPresentation.update(nil)
+    persistCloseIntent()
     flushWorkspaceSave()
+    for operation in closedOperations { operation.panes.forEach { $0.close() } }
     for controller in windows {
       controller.clearProgress()
       for tab in controller.allPanes { tab.close() }
@@ -264,6 +275,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
     if [#selector(closePane), #selector(closeTab)].contains(menuItem.action), activeWindow?.muxBusy == true { return false }
     switch menuItem.action {
+    case #selector(undoClose): return NSApp.keyWindow?.firstResponder?.undoManager?.canUndo == true || closedOperations.contains { $0.applied }
+    case #selector(redoClose): return NSApp.keyWindow?.firstResponder?.undoManager?.canRedo == true || !redoOperations.isEmpty
     case #selector(zoomPane), #selector(equalizePanes): return (activeWindow?.activeTab.panes.count ?? 0) > 1 && activeWindow?.muxBusy != true
     case #selector(closePane), #selector(newNamespace), #selector(editNamespace), #selector(closeNamespace),  #selector(closeTab), #selector(nextTab), #selector(previousTab), #selector(renameTab),
       #selector(moveTabLeft), #selector(moveTabRight), #selector(closeWindow), #selector(showCommands), #selector(findTerminal),
@@ -497,6 +510,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     let editMenuItem = NSMenuItem()
     editMenuItem.submenu = editMenu
     mainMenu.addItem(editMenuItem)
+    editMenu.addItem(withTitle: "Undo Close", action: #selector(undoClose), keyEquivalent: "z").target = self
+    let redo = editMenu.addItem(withTitle: "Redo Close", action: #selector(redoClose), keyEquivalent: "z")
+    redo.keyEquivalentModifierMask = [.command, .shift]; redo.target = self
+    editMenu.addItem(.separator())
     editMenu.addItem(
       withTitle: "Copy", action: #selector(TerminalView.copyMenuItem(_:)), keyEquivalent: "c")
     editMenu.addItem(
@@ -990,7 +1007,12 @@ final class TerminalWindowController: NSObject, NSWindowDelegate, NSToolbarDeleg
     return alert.runModal() == .alertSecondButtonReturn
   }
 
-  func windowShouldClose(_ sender: NSWindow) -> Bool { closing || confirmClose() }
+  func windowShouldClose(_ sender: NSWindow) -> Bool {
+    if closing { return true }
+    guard confirmClose() else { return false }
+    if owner?.deferClose(allPanes, in: self, destroy: false) == true { return false }
+    return true
+  }
 
   func windowWillClose(_ notification: Notification) {
     owner?.scheduleWorkspaceSave(self)
@@ -1445,6 +1467,7 @@ extension TerminalWindowController {
       return
     }
     if endSession, pane.herdrTerminal != nil { endHerdrTabs([tab]); return }
+    if endSession, owner?.deferClose(tab.panes, in: self, destroy: true) == true { return }
     if namespaces.flatMap(\.tabs).count == 1 {
       closing = true
       window?.close()
@@ -1609,7 +1632,7 @@ extension AppDelegate {
     guard !muxOpening, !terminating, let runtime else { return }
     muxOpening = true
     quitTimer?.invalidate()
-    let attached = Set(windows.flatMap(\.allPanes).compactMap { $0.herdrTerminal?.pane.terminal_id })
+    let attached = Set(windows.flatMap(\.allPanes).compactMap { $0.herdrTerminal?.pane.terminal_id }).union(retainedTerminalIDs)
     let inheritedDirectory = activeWindow.flatMap { $0.native.windowInheritsDirectory ? $0.currentDirectory : nil }
     let directory = inheritedDirectory.map { URL(fileURLWithPath: $0) } ?? runtime.settings.workingDirectory
     let shellEnvironment = client.shellEnvironment(settings: runtime.settings)
@@ -1628,8 +1651,21 @@ extension AppDelegate {
         }
       }
       do {
-        let snapshot = try result.get()
+        let incoming = try result.get()
         self.loadWorkspaceState(for: client)
+        self.retryPendingClosures(client, snapshot: incoming)
+        let snapshot = incoming.excluding(terminals: self.hiddenTerminalIDs)
+        if snapshot.panes.isEmpty {
+          self.muxOpening = true
+          client.perform({ try $0.create(workspace: nil, name: "Default", directory: client.machine == nil ? directory.path : nil, environment: shellEnvironment) }) { [weak self] result in
+            guard let self else { return }; self.muxOpening = false
+            switch result {
+            case .success: self.openHerdrWindow(using: client)
+            case .failure(let error): self.showMuxError(error); if self.windows.isEmpty { self.newLocalWindow() }
+            }
+          }
+          return
+        }
         let live = snapshot.workspaces.map { workspace in
           WorkspaceState.Namespace(id: workspace.workspace_id,
             tabs: snapshot.tabs.filter { $0.workspace_id == workspace.workspace_id }.map { tab in
@@ -1702,7 +1738,9 @@ extension AppDelegate {
     client.observeEvents(panes: snapshot.panes)
   }
 
-  func synchronizeHerdr(_ serverSnapshot: HerdrClient.Snapshot, client: HerdrClient) {
+  func synchronizeHerdr(_ incoming: HerdrClient.Snapshot, client: HerdrClient) {
+    retryPendingClosures(client, snapshot: incoming)
+    let serverSnapshot = incoming.excluding(terminals: hiddenTerminalIDs)
     let targets = windows.filter { $0.allPanes.contains { $0.herdrTerminal?.client === client } && !$0.closing }
     guard !terminating, !muxOpening, !restoringWorkspace, !synchronizingWorkspace, !targets.isEmpty,
       targets.allSatisfy({ !$0.muxBusy && !$0.hasPendingMuxActions && $0.window?.attachedSheet == nil }) else { return }
@@ -1816,7 +1854,7 @@ extension AppDelegate {
 extension TerminalWindowController {
   func addHerdrTerminals(_ snapshot: HerdrClient.Snapshot, excluding excluded: Set<String>, restoring: Bool = false, client explicitClient: HerdrClient? = nil) throws {
     guard let client = explicitClient ?? session?.herdrTerminal?.client, let runtime = session?.runtime else { return }
-    let attached = Set((owner?.windows.flatMap(\.allPanes) ?? allPanes).compactMap { $0.herdrTerminal?.pane.terminal_id })
+    let attached = Set((owner?.windows.flatMap(\.allPanes) ?? allPanes).compactMap { $0.herdrTerminal?.pane.terminal_id }).union(owner?.retainedTerminalIDs ?? [])
     let excluded = excluded.union(attached)
     var prepared: [String: TerminalSession] = [:]
     do {
@@ -2075,6 +2113,7 @@ extension TerminalWindowController {
     guard !closing, owner?.terminating != true else { return }
     if deferMuxAction({ [weak self] in self?.endHerdrTabs(targets) }) { return }
     let targets = targets.filter { tab in namespaces.contains { $0.tabs.contains { $0 === tab } } }
+    if owner?.deferClose(targets.flatMap(\.panes), in: self, destroy: true) == true { return }
     let groups = Dictionary(grouping: targets, by: { $0.selected.herdrTerminal?.client.endpointID ?? "local" })
     if groups.count > 1 {
       for group in groups.values { endHerdrTabs(group) }
@@ -2197,6 +2236,7 @@ extension TerminalWindowController {
       }
       return
     }
+    if endSession, owner?.deferClose([pane], in: self, destroy: true) == true { return }
     if endSession, let terminal = pane.herdrTerminal {
       if deferMuxAction({ [weak self, weak pane] in if let pane { self?.closePane(pane, confirm: false) } }) { return }
       muxBusy = true
@@ -2238,6 +2278,7 @@ extension AppDelegate {
     let store = workspaceStateURL.map { WorkspaceStateStore(url: $0) } ?? WorkspaceStateStore()
     do {
       workspaceState = try store.load()
+      pendingEnds = Set(workspaceState?.pendingTerminalClosures ?? [])
       workspaceStore = store
     } catch {
       // Preserve unreadable, malformed, or future-version state for recovery.
@@ -2399,7 +2440,9 @@ extension AppDelegate {
       defer { completion?() }
       guard !self.terminating, let destination, !destination.closing else { return }
       do {
-        let snapshot = try result.get()
+        let incoming = try result.get()
+        self.retryPendingClosures(client, snapshot: incoming)
+        let snapshot = incoming.excluding(terminals: self.hiddenTerminalIDs)
         guard !snapshot.panes.isEmpty else { throw ConfigurationError("The remote session has no terminals. Create a terminal in herdr before connecting.") }
         let saved = self.workspaceState ?? WorkspaceState()
         let attached = Set(self.windows.flatMap(\.namespaces).compactMap(\.herdrID))
@@ -2426,5 +2469,247 @@ extension AppDelegate {
         self.observeHerdr(client, snapshot: snapshot)
       } catch { self.showMuxError(error) }
     }
+  }
+}
+
+// A close keeps the original surfaces alive for the configured undo window.
+// Only explicit terminal closes become durable backend-destruction intentions.
+private final class ClosedTerminals {
+  struct Slot {
+    let pane: TerminalSession
+    let namespace: TerminalNamespace
+    let namespaceIndex: Int
+    let tab: TerminalTab
+    let tabIndex: Int
+    let paneIndex: Int
+  }
+  weak var controller: TerminalWindowController?
+  var slots: [Slot]
+  let destroy: Bool
+  let frame: NSRect?
+  let windowID: String
+  var applied = true
+  var checking = false
+  var timer: Timer?
+  var panes: [TerminalSession] { slots.map(\.pane) }
+  var terminalIDs: [String] { panes.compactMap { $0.herdrTerminal?.pane.terminal_id } }
+  init(_ panes: [TerminalSession], controller: TerminalWindowController, destroy: Bool) {
+    self.controller = controller; self.destroy = destroy
+    frame = controller.window?.frame; windowID = controller.workspaceWindowID
+    slots = controller.namespaces.enumerated().flatMap { ni, namespace in
+      namespace.tabs.enumerated().flatMap { ti, tab in
+        tab.panes.enumerated().compactMap { pi, pane in
+          panes.contains(where: { $0 === pane }) ? Slot(pane: pane, namespace: namespace, namespaceIndex: ni, tab: tab, tabIndex: ti, paneIndex: pi) : nil
+        }
+      }
+    }
+  }
+}
+
+extension AppDelegate {
+  fileprivate func deferClose(_ panes: [TerminalSession], in controller: TerminalWindowController, destroy: Bool) -> Bool {
+    let timeout = controller.native.undoTimeout
+    guard timeout > 0, !panes.isEmpty, !terminating, !controller.muxBusy else { return false }
+    let operation = ClosedTerminals(panes, controller: controller, destroy: destroy)
+    guard !operation.slots.isEmpty else { return false }
+    redoOperations.forEach { $0.timer?.invalidate() }; redoOperations = []
+    closedOperations.append(operation)
+    operation.timer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [weak self, weak operation] _ in
+      guard let self, let operation else { return }
+      self.expireClose(operation)
+    }
+    persistCloseIntent()
+    controller.hideClosed(operation)
+    return true
+  }
+
+  private func persistCloseIntent() {
+    guard var state = workspaceState else { return }
+    state.pendingTerminalClosures = hiddenTerminalIDs.sorted()
+    if state != workspaceState { workspaceState = state; workspaceNeedsSave = true; flushWorkspaceSave() }
+  }
+
+  private func flushClosesBeforeQuit() -> Bool {
+    let clients = ([herdr].compactMap { $0 } + Array(remoteClients.values) + closedOperations.flatMap(\.panes).compactMap { $0.herdrTerminal?.client }).reduce(into: [String: HerdrClient]()) { $0[$1.endpointID] = $1 }
+    pendingEnds.formUnion(hiddenTerminalIDs)
+    for operation in closedOperations { operation.timer?.invalidate(); operation.applied = false }
+    persistCloseIntent()
+    guard !pendingEnds.isEmpty else { return false }
+    var remaining = clients.count
+    var replied = false
+    let finish = { if !replied { replied = true; NSApp.reply(toApplicationShouldTerminate: true) } }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: finish)
+    for client in clients.values {
+      let ids = pendingEnds.filter(client.owns)
+      client.perform({ client -> Set<String> in
+        let deadline = Date(timeIntervalSinceNow: 4)
+        let snapshot = try client.snapshot(timeout: 1)
+        var completed: Set<String> = []
+        for id in ids where Date() < deadline {
+          guard let pane = snapshot.panes.first(where: { $0.terminal_id == id }) else { completed.insert(id); continue }
+          if (try? client.request(["pane", "close", pane.pane_id], timeout: 1)) != nil { completed.insert(id) }
+        }
+        return completed
+      }) { [weak self] result in
+        guard let self, !replied else { return }
+        if case .success(let completed) = result { self.pendingEnds.subtract(completed); self.persistCloseIntent() }
+        remaining -= 1
+        if remaining == 0 { finish() }
+      }
+    }
+    return true
+  }
+
+  private func expireClose(_ operation: ClosedTerminals) {
+    operation.timer?.invalidate()
+    closedOperations.removeAll { $0 === operation }
+    redoOperations.removeAll { $0 === operation }
+    guard operation.applied else { return }
+    if operation.destroy { pendingEnds.formUnion(operation.terminalIDs) }
+    operation.panes.forEach { $0.close() }
+    persistCloseIntent()
+    let clients = operation.panes.compactMap { $0.herdrTerminal?.client }.reduce(into: [String: HerdrClient]()) { $0[$1.endpointID] = $1 }
+    for client in clients.values {
+      client.perform({ try $0.snapshot() }) { [weak self] result in
+        if case .success(let snapshot) = result { self?.retryPendingClosures(client, snapshot: snapshot) }
+      }
+    }
+  }
+
+  private func retryPendingClosures(_ client: HerdrClient, snapshot: HerdrClient.Snapshot) {
+    let ids = pendingEnds.filter(client.owns)
+    guard !ids.isEmpty, !endingEndpoints.contains(client.endpointID), !terminating else { return }
+    endingEndpoints.insert(client.endpointID)
+    client.perform({ client -> Set<String> in
+      var completed: Set<String> = []
+      for id in ids {
+        guard let pane = snapshot.panes.first(where: { $0.terminal_id == id }) else { completed.insert(id); continue }
+        // Resolve the current pane ID from the terminal identity, including after swaps.
+        do { _ = try client.request(["pane", "close", pane.pane_id]); completed.insert(id) }
+        catch { NSLog("Pending terminal close: %@", error.localizedDescription) }
+      }
+      return completed
+    }) { [weak self] result in
+      guard let self else { return }
+      self.endingEndpoints.remove(client.endpointID)
+      if case .success(let completed) = result { self.pendingEnds.subtract(completed); self.persistCloseIntent() }
+    }
+  }
+
+  @objc func undoClose() {
+    if let editor = NSApp.keyWindow?.firstResponder as? NSTextView, let undo = editor.undoManager, undo.canUndo { undo.undo(); return }
+    guard let operation = closedOperations.last, operation.applied, !operation.checking, !terminating else { return }
+    operation.checking = true
+    operation.timer?.invalidate()
+    let clients = Array(operation.panes.compactMap { $0.herdrTerminal?.client }.reduce(into: [String: HerdrClient]()) { $0[$1.endpointID] = $1 }.values)
+    validateUndo(operation, clients: clients)
+  }
+
+  private func validateUndo(_ operation: ClosedTerminals, clients: [HerdrClient]) {
+    guard let client = clients.first else { restoreUndo(operation); return }
+    client.perform({ try $0.snapshot() }) { [weak self, weak operation] result in
+      guard let self, let operation, !self.terminating else { return }
+      switch result {
+      case .success(let snapshot):
+        let live = Set(snapshot.panes.map(\.terminal_id))
+        operation.slots.removeAll { slot in
+          guard let terminal = slot.pane.herdrTerminal, terminal.client === client, !live.contains(terminal.pane.terminal_id) else { return false }
+          slot.pane.close(); return true
+        }
+        operation.slots = operation.slots.map { slot in
+          guard let terminal = slot.pane.herdrTerminal, terminal.client === client,
+            let record = snapshot.panes.first(where: { $0.terminal_id == terminal.pane.terminal_id }) else { return slot }
+          let previousTabID = slot.tab.herdrID
+          slot.pane.herdrTerminal = .init(client: client, pane: record)
+          guard record.workspace_id != slot.namespace.herdrID || record.tab_id != previousTabID else { return slot }
+          let namespace = operation.controller?.namespaces.first { $0.herdrID == record.workspace_id } ?? TerminalNamespace(name: snapshot.workspaces.first { $0.workspace_id == record.workspace_id }?.label ?? "Namespace", session: slot.pane)
+          namespace.herdrID = record.workspace_id
+          let tab = namespace.tabs.first { $0.herdrID == record.tab_id } ?? TerminalTab(slot.pane)
+          return ClosedTerminals.Slot(pane: slot.pane, namespace: namespace, namespaceIndex: slot.namespaceIndex, tab: tab, tabIndex: slot.tabIndex, paneIndex: slot.paneIndex)
+        }
+        self.validateUndo(operation, clients: Array(clients.dropFirst()))
+      case .failure(let error):
+        operation.checking = false
+        self.showMuxError(error)
+        operation.timer = Timer.scheduledTimer(withTimeInterval: max(0.01, self.native.undoTimeout), repeats: false) { [weak self, weak operation] _ in
+          if let operation { self?.expireClose(operation) }
+        }
+      }
+    }
+  }
+
+  private func restoreUndo(_ operation: ClosedTerminals) {
+    operation.checking = false
+    operation.applied = false
+    closedOperations.removeAll { $0 === operation }
+    if operation.slots.isEmpty { persistCloseIntent(); return }
+    redoOperations.append(operation)
+    persistCloseIntent()
+    let controller: TerminalWindowController
+    if let existing = operation.controller, !existing.closing, existing.window != nil { controller = existing }
+    else {
+      guard let first = operation.panes.first else { return }
+      controller = TerminalWindowController(session: first, owner: self)
+      controller.workspaceWindowID = operation.windowID
+      windows.append(controller)
+      operation.controller = controller
+    }
+    controller.restoreClosed(operation)
+    if controller.window == nil {
+      controller.openWindow()
+      if let frame = operation.frame { controller.window?.setFrame(frame, display: true) }
+    }
+    controller.persistenceReady = workspaceStore != nil
+    if let first = operation.panes.first { controller.selectTab(first) }
+    controller.workspaceView.present()
+    controller.window?.makeKeyAndOrderFront(nil)
+    scheduleWorkspaceSave(controller)
+    operation.timer = Timer.scheduledTimer(withTimeInterval: max(0.01, controller.native.undoTimeout), repeats: false) { [weak self, weak operation] _ in
+      guard let operation else { return }; self?.expireClose(operation)
+    }
+  }
+
+  @objc func redoClose() {
+    if let editor = NSApp.keyWindow?.firstResponder as? NSTextView, let undo = editor.undoManager, undo.canRedo { undo.redo(); return }
+    guard let operation = redoOperations.last, let controller = operation.controller, !controller.closing else { return }
+    operation.timer?.invalidate()
+    let panes = operation.panes.filter { pane in controller.allPanes.contains { $0 === pane } }
+    _ = deferClose(panes, in: controller, destroy: operation.destroy)
+  }
+}
+
+extension TerminalWindowController {
+  fileprivate func hideClosed(_ operation: ClosedTerminals) {
+    if !operation.destroy { owner?.scheduleWorkspaceSave(self); owner?.flushWorkspaceSave(); persistenceReady = false }
+    for slot in operation.slots {
+      slot.tab.panes.removeAll { $0 === slot.pane }
+      slot.pane.chrome?.removeFromSuperview()
+      if let surface = slot.pane.surface { velokit_surface_set_occlusion(surface, false) }
+      slot.pane.windowController = nil
+      if slot.tab.selected === slot.pane, let first = slot.tab.panes.first { slot.tab.selected = first }
+    }
+    for namespace in namespaces {
+      namespace.tabs.removeAll { $0.panes.isEmpty }
+      if !namespace.tabs.contains(where: { $0 === namespace.selected }), let first = namespace.tabs.first { namespace.selected = first }
+    }
+    namespaces.removeAll { $0.tabs.isEmpty }
+    if let next = allPanes.first {
+      if !allPanes.contains(where: { $0 === session }) { selectTab(next) }
+      workspaceView.present()
+      owner?.scheduleWorkspaceSave(self)
+    } else { closing = true; window?.close() }
+  }
+
+  fileprivate func restoreClosed(_ operation: ClosedTerminals) {
+    if window == nil { namespaces = [] }
+    for slot in operation.slots {
+      let namespace = namespaces.first { $0 === slot.namespace || ($0.herdrID != nil && $0.herdrID == slot.namespace.herdrID) } ?? slot.namespace
+      if !namespaces.contains(where: { $0 === namespace }) { namespaces.insert(namespace, at: min(slot.namespaceIndex, namespaces.count)) }
+      let tab = namespace.tabs.first { $0 === slot.tab || ($0.herdrID != nil && $0.herdrID == slot.tab.herdrID) } ?? slot.tab
+      if !namespace.tabs.contains(where: { $0 === tab }) { namespace.tabs.insert(tab, at: min(slot.tabIndex, namespace.tabs.count)) }
+      if !tab.panes.contains(where: { $0 === slot.pane }) { tab.panes.insert(slot.pane, at: min(slot.paneIndex, tab.panes.count)) }
+      slot.pane.windowController = self
+    }
+    closing = false
   }
 }

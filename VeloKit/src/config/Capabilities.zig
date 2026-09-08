@@ -7,7 +7,7 @@ pub fn supported(action: Binding.Action) bool {
         .{ "show_on_screen_keyboard", {} },
         .{ "move_tab_to_new_window", {} },
         .{ "toggle_tab_overview", {} }, .{ "toggle_quick_terminal", {} },
-        .{ "undo", {} }, .{ "redo", {} }, .{ "check_for_updates", {} }, .{ "inspector", {} },
+        .{ "check_for_updates", {} }, .{ "inspector", {} },
         .{ "show_gtk_inspector", {} }, .{ "crash", {} }, .{ "export_terminal_io", {} },
         .{ "toggle_window_decorations", {} },
     });

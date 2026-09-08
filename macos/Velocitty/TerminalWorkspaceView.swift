@@ -392,7 +392,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
         region = position == 0 ? NSRect(x: 0, y: 0, width: split - 3, height: region.height) : NSRect(x: split + 3, y: 0, width: region.width - split - 3, height: region.height)
       }
     let completeLayout = tab.layout.map { layout in
-      layout.area.width > 0 && layout.area.height > 0 && tab.panes.allSatisfy { pane in
+      layout.area.width > 0 && layout.area.height > 0 && layout.panes.count == tab.panes.count && tab.panes.allSatisfy { pane in
         layout.panes.contains { $0.pane_id == pane.herdrTerminal?.pane.pane_id && $0.rect.width > 0 && $0.rect.height > 0 }
       }
     } ?? false
@@ -432,7 +432,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
 
   private func layoutDividers(_ tab: TerminalTab, region: NSRect) {
     guard !paneDividers.contains(where: \.dragging) else { return }
-    guard !tab.zoomed, let root = tab.layoutTree, tab.treeLayout == tab.layout, let tabID = tab.herdrID else { return }
+    guard !tab.zoomed, tab.layout?.panes.count == tab.panes.count, let root = tab.layoutTree, tab.treeLayout == tab.layout, let tabID = tab.herdrID else { return }
     func visit(_ node: HerdrClient.LayoutNode, frame: NSRect, path: [Bool]) {
       guard let first = node.first, let second = node.second, let direction = node.direction else { return }
       let ratio = CGFloat(node.ratio ?? 0.5)

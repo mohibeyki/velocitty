@@ -1621,7 +1621,7 @@ func runRemoteCheck() throws {
   defer { remote.disconnectTransport() }
   let scoped = try remote.snapshot()
   precondition(Set(scoped.panes.map(\.terminal_id)) == Set(raw.panes.map { remote.qualify($0.terminal_id) }))
-  let settings = try AppConfiguration.parse(Data("[terminal]\nconfirm_close_surface=false\ntheme=''\n".utf8))
+  let settings = try AppConfiguration.parse(Data("[terminal]\nconfirm_close_surface=false\nundo_timeout='2s'\ntheme=''\n".utf8))
   let owner = AppDelegate()
   owner.workspaceStateURL = root.appendingPathComponent("workspace.json")
   owner.runtime = try TerminalRuntime(settings: settings)
@@ -1676,6 +1676,24 @@ func runRemoteCheck() throws {
   let reconnected = try remote.snapshot()
   owner.synchronizeHerdr(reconnected, client: remote)
   precondition(window.allPanes.contains { $0 === remotePane }, "Reconnect must preserve the terminal view")
-  for controller in Array(owner.windows) { controller.window?.performClose(nil) }
-  print("Remote transport tests passed.")
+  let originalSurface = remotePane.surface
+  window.closePane(remotePane, confirm: false)
+  precondition(!window.allPanes.contains { $0 === remotePane })
+  let beforeUndo = try remote.snapshot()
+  precondition(beforeUndo.panes.contains { $0.terminal_id == remotePane.herdrTerminal!.pane.terminal_id })
+  owner.undoClose()
+  pumpEvents(until: Date(timeIntervalSinceNow: 0.5))
+  precondition(window.allPanes.contains { $0 === remotePane } && remotePane.surface == originalSurface)
+  precondition(window.native.undoTimeout == 2)
+  owner.redoClose()
+  precondition(!window.allPanes.contains { $0 === remotePane }, "Redo must hide the restored pane")
+  let closeDeadline = Date(timeIntervalSinceNow: 7)
+  var afterClose = try remote.snapshot()
+  while afterClose.panes.contains(where: { $0.terminal_id == remotePane.herdrTerminal!.pane.terminal_id }) && Date() < closeDeadline {
+    pumpEvents(until: Date(timeIntervalSinceNow: 0.1))
+    afterClose = try remote.snapshot()
+  }
+  precondition(!afterClose.panes.contains { $0.terminal_id == remotePane.herdrTerminal!.pane.terminal_id })
+  for controller in Array(owner.windows) { controller.closing = true; controller.window?.close() }
+  print("Remote transport, comparison and close undo tests passed.")
 }
