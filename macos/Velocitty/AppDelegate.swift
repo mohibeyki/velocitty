@@ -360,6 +360,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
   }
 
+  @objc func searchWorkspace() { activeWindow?.showWorkspaceSearch() }
   @objc func showCommands() { activeWindow?.showCommands() }
   @objc func findTerminal() { activeWindow?.findTerminal() }
   @objc func findNext() { activeWindow?.findNext() }
@@ -436,6 +437,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     terminalMenu.addItem(
       withTitle: "New Window", action: #selector(newWindow), keyEquivalent: "n"
     ).target = self
+    terminalMenu.addItem(withTitle: "Search Workspace…", action: #selector(searchWorkspace), keyEquivalent: "p").target = self
     terminalMenu.addItem(withTitle: "New Tab", action: #selector(newTab), keyEquivalent: "t").target = self
     terminalMenu.addItem(withTitle: "Close Pane", action: #selector(closePane), keyEquivalent: "w").target = self
     terminalMenu.addItem(withTitle: "Close Tab", action: #selector(closeTab), keyEquivalent: "").target = self
@@ -616,7 +618,7 @@ final class TerminalNamespace: NSObject {
   }
 }
 
-final class TerminalWindowController: NSObject, NSWindowDelegate {
+final class TerminalWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate {
   weak var owner: AppDelegate?
 
   init(session: TerminalSession, owner: AppDelegate) {
@@ -800,6 +802,16 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     } else {
       window.styleMask.insert(.titled)
     }
+    if window.styleMask.contains(.titled), session?.herdrTerminal != nil {
+      if window.toolbar == nil {
+        let toolbar = NSToolbar(identifier: "workspace")
+        toolbar.delegate = self
+        toolbar.displayMode = .iconOnly
+        toolbar.centeredItemIdentifier = .init("workspaceSearch")
+        window.toolbar = toolbar
+        window.toolbarStyle = .unifiedCompact
+      }
+    } else { window.toolbar = nil }
     window.titlebarAppearsTransparent = false
     window.hasShadow = native.windowShadow
     window.titleVisibility = titlebar == "hidden" ? .hidden : .visible
@@ -1053,6 +1065,56 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
   }
   func windowDidEndLiveResize(_ notification: Notification) {
     window?.invalidateRestorableState()
+  }
+
+  func workspaceSearchEntries() -> [CommandPalette.Entry] {
+    (owner?.windows ?? [self]).flatMap { controller in
+      controller.namespaces.flatMap { namespace in
+        namespace.tabs.enumerated().flatMap { index, tab in
+          tab.panes.map { pane in
+            let agent = controller.workspaceView.agent(for: pane)
+            let status = agent.map { " · " + $0.name + " · " + ($0.status == "blocked" ? "waiting for input" : $0.status) } ?? ""
+            return CommandPalette.Entry(title: namespace.name + " / " + String(index + 1) + " · " + tab.displayTitle + status,
+              detail: [pane.currentDirectory, pane.herdrTerminal?.pane.cwd, agent?.name, agent?.status].compactMap { $0 }.joined(separator: " "),
+              action: "workspace:" + (pane.herdrTerminal?.pane.terminal_id ?? String(ObjectIdentifier(pane).hashValue)),
+              run: { [weak controller, weak pane] in
+                guard let controller, let pane, controller.allPanes.contains(where: { $0 === pane }) else { return }
+                controller.selectTab(pane)
+                controller.window?.makeKeyAndOrderFront(nil)
+              })
+          }
+        }
+      }
+    }
+  }
+
+  func showWorkspaceSearch(query: String = "") {
+    guard let terminal = session?.view, window?.attachedSheet == nil else { return }
+    palette?.close()
+    let panel = CommandPalette(terminal: terminal, entries: { [weak self] in self?.workspaceSearchEntries() ?? [] })
+    palette = panel
+    panel.query.stringValue = query
+    panel.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification))
+    panel.present()
+  }
+
+  @objc private func workspaceSearchTyped(_ sender: NSSearchField) {
+    let text = sender.stringValue
+    sender.stringValue = ""
+    showWorkspaceSearch(query: text)
+  }
+
+  func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { [.flexibleSpace, .init("workspaceSearch")] }
+  func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { [.flexibleSpace, .init("workspaceSearch"), .flexibleSpace] }
+  func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+    guard identifier.rawValue == "workspaceSearch" else { return nil }
+    let item = NSSearchToolbarItem(itemIdentifier: identifier)
+    item.searchField.placeholderString = "Search namespaces, tabs, agents…"
+    item.searchField.sendsSearchStringImmediately = true
+    item.searchField.target = self
+    item.searchField.action = #selector(workspaceSearchTyped(_:))
+    item.preferredWidthForSearchField = 400
+    return item
   }
 
   @objc func showCommands() {

@@ -11,10 +11,13 @@ final class CommandPalette: NSPanel, NSTextFieldDelegate, NSWindowDelegate, NSTa
     let title: String
     let detail: String
     let action: String
+    var run: (() -> Void)? = nil
   }
   let query = NSTextField()
   let table = NSTableView()
   let list = NSScrollView()
+  private var entryProvider: (() -> [Entry])?
+  private var refreshTimer: Timer?
   var entries: [Entry] = []
   var filtered: [Entry] = []
   weak var terminal: TerminalView?
@@ -22,12 +25,13 @@ final class CommandPalette: NSPanel, NSTextFieldDelegate, NSWindowDelegate, NSTa
   override var canBecomeKey: Bool { true }
   override var canBecomeMain: Bool { false }
 
-  init(terminal: TerminalView) {
+  init(terminal: TerminalView, entries provider: (() -> [Entry])? = nil) {
     self.terminal = terminal
     super.init(
       contentRect: NSRect(x: 0, y: 0, width: 500, height: 249), styleMask: [.borderless],
       backing: .buffered, defer: false)
-    title = "Commands"
+    entryProvider = provider
+    title = provider == nil ? "Commands" : "Search Workspace"
     isReleasedWhenClosed = false
     isOpaque = false
     backgroundColor = .clear
@@ -39,13 +43,14 @@ final class CommandPalette: NSPanel, NSTextFieldDelegate, NSWindowDelegate, NSTa
       else { return nil }
       return Entry(title: command.title, detail: command.detail, action: command.action)
     }
-    if terminal.session?.herdrTerminal != nil {
+    if provider == nil, terminal.session?.herdrTerminal != nil {
       entries += [
         Entry(title: "Move Tab to Namespace…", detail: "Move all panes while retaining their running processes.", action: "velocitty:move-tab"),
         Entry(title: "Move Pane to Tab…", detail: "Move this terminal into another tab.", action: "velocitty:move-pane"),
         Entry(title: "Move Pane to New Tab", detail: "Detach this pane into its own tab.", action: "velocitty:detach-pane"),
       ]
     }
+    if let provider { entries = provider() }
     let color = native.background.usingColorSpace(.sRGB) ?? .windowBackgroundColor
     let dark = 0.2126 * color.redComponent + 0.7152 * color.greenComponent
       + 0.0722 * color.blueComponent < 0.5
@@ -109,8 +114,22 @@ final class CommandPalette: NSPanel, NSTextFieldDelegate, NSWindowDelegate, NSTa
     emptyLabel.textColor = .secondaryLabelColor
     emptyLabel.frame = NSRect(x: 10, y: 80, width: 480, height: 24)
     background.addSubview(emptyLabel)
+    if provider != nil { query.placeholderString = "Search namespaces, tabs, agents…" }
     filter()
+    if provider != nil {
+      refreshTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+        guard let self, let provider = self.entryProvider else { return }
+        let updated = provider()
+        if updated.map({ $0.action + $0.title + $0.detail }) != self.entries.map({ $0.action + $0.title + $0.detail }) {
+          let selected = self.filtered.indices.contains(self.table.selectedRow) ? self.filtered[self.table.selectedRow].action : nil
+          self.entries = updated
+          self.filter()
+          if let index = self.filtered.firstIndex(where: { $0.action == selected }) { self.table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false) }
+        }
+      }
+    }
   }
+  deinit { refreshTimer?.invalidate() }
   func numberOfRows(in tableView: NSTableView) -> Int { filtered.count }
   func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView?
   {
@@ -173,6 +192,7 @@ final class CommandPalette: NSPanel, NSTextFieldDelegate, NSWindowDelegate, NSTa
     makeFirstResponder(query)
   }
   override func close() {
+    refreshTimer?.invalidate()
     let restoreFocus = isKeyWindow && NSApp.isActive
     parent?.removeChildWindow(self)
     super.close()
@@ -225,8 +245,10 @@ final class CommandPalette: NSPanel, NSTextFieldDelegate, NSWindowDelegate, NSTa
   }
   @objc func runSelected() {
     guard filtered.indices.contains(table.selectedRow) else { return }
-    let action = filtered[table.selectedRow].action
+    let entry = filtered[table.selectedRow]
+    let action = entry.action
     close()
+    if let run = entry.run { run(); return }
     terminal?.window?.makeFirstResponder(terminal)
     switch action {
     case "velocitty:move-tab": terminal?.session?.windowController?.chooseTabNamespace()

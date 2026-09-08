@@ -1538,6 +1538,15 @@ func runWorkspacePersistenceCheck() throws {
   let detachedID = extraRestored.session!.herdrTerminal!.pane.terminal_id
   extraRestored.movePaneToNewTab(); wait(third, extraRestored)
   precondition(extraRestored.activeTab.panes.count == 1 && extraRestored.session!.herdrTerminal!.pane.terminal_id == detachedID)
+  extraRestored.showWorkspaceSearch()
+  let searchPanel = extraRestored.palette!
+  precondition(searchPanel.entries.count == third.windows.flatMap(\.allPanes).count)
+  let searchTarget = sourceWindow.session!
+  let searchID = "workspace:" + searchTarget.herdrTerminal!.pane.terminal_id
+  let searchRow = searchPanel.filtered.firstIndex { $0.action == searchID }!
+  searchPanel.table.selectRowIndexes(IndexSet(integer: searchRow), byExtendingSelection: false)
+  searchPanel.runSelected()
+  precondition(sourceWindow.session === searchTarget && !searchPanel.isVisible)
   for controller in Array(third.windows) { controller.window?.performClose(nil) }
   print("Workspace persistence tests passed.")
 }
