@@ -157,7 +157,10 @@ final class HerdrClient {
         }
       })
     }) { [weak self] result in
-      guard let self else { return }
+      guard let self, self.eventGeneration == generation else {
+        if case .success(let stream) = result { stream.stop() }
+        return
+      }
       self.eventStarting = false
       if case .success(let stream) = result, stream.isActive { self.eventStream = stream }
     }

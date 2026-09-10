@@ -1691,6 +1691,7 @@ extension AppDelegate {
 
   func openHerdrWindow(using client: HerdrClient) {
     guard !muxOpening, !terminating, let runtime else { return }
+    loadWorkspaceState(for: client)
     muxOpening = true
     quitTimer?.invalidate()
     let attached = Set(windows.flatMap(\.allPanes).compactMap { $0.herdrTerminal?.pane.terminal_id }).union(retainedTerminalIDs)
