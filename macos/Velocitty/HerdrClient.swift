@@ -13,10 +13,16 @@ final class HerdrClient {
     let session: String
     let enabled: Bool
   }
-  var endpointID: String { machine.map { "ssh:" + $0.id } ?? "local" }
-  var endpointLabel: String { machine?.label ?? "Local" }
-  func owns(_ id: String) -> Bool { machine == nil ? !id.contains("::") : id.hasPrefix(endpointID + "::") }
-  func qualify(_ id: String) -> String { machine == nil || id.isEmpty ? id : endpointID + "::" + id }
+  var endpointID: String { identity ?? machine.map { "ssh:" + $0.id } ?? (sessionName == "velocitty" ? "local" : "local:" + sessionName) }
+  private let identity: String?
+  private let label: String?
+  private let availabilityLock = NSLock()
+  private var enabled = true
+  private var availabilityGeneration = UUID()
+  var isEnabled: Bool { availabilityLock.lock(); defer { availabilityLock.unlock() }; return enabled }
+  var endpointLabel: String { label ?? machine?.label ?? (sessionName == "velocitty" ? "Local" : sessionName) }
+  func owns(_ id: String) -> Bool { endpointID == "local" ? !id.contains("::") : id.hasPrefix(endpointID + "::") }
+  func qualify(_ id: String) -> String { endpointID == "local" || id.isEmpty ? id : endpointID + "::" + id }
   private func raw(_ id: String) -> String { let prefix = endpointID + "::"; return id.hasPrefix(prefix) ? String(id.dropFirst(prefix.count)) : id }
   private func mapIDs(_ value: Any, incoming: Bool, key: String = "") -> Any {
     if let dictionary = value as? [String: Any] { return dictionary.mapValues { $0 }.reduce(into: [String: Any]()) { $0[$1.key] = mapIDs($1.value, incoming: incoming, key: $1.key) } }
@@ -129,7 +135,9 @@ final class HerdrClient {
   var onWorkspaceEvent: (() -> Void)?
   private var cachedStatus: (TimeInterval, Snapshot)?
 
-  init(executable: URL, sessionName: String = "velocitty", machine: Machine? = nil, sshOptions: [String] = [], remoteExecutable: String? = nil, remoteEnvironment: [String: String] = [:]) {
+  init(executable: URL, sessionName: String = "velocitty", machine: Machine? = nil, sshOptions: [String] = [], remoteExecutable: String? = nil, remoteEnvironment: [String: String] = [:], identity: String? = nil, label: String? = nil) {
+    self.identity = identity
+    self.label = label
     self.executable = executable
     self.sessionName = machine?.session ?? sessionName
     self.machine = machine
@@ -140,7 +148,7 @@ final class HerdrClient {
 
   func observeEvents(panes: [Pane]) {
     let ids = Set(panes.map(\.pane_id))
-    guard !eventStarting, !eventsConnected || eventPaneIDs != ids else { return }
+    guard isEnabled, !eventStarting, !eventsConnected || eventPaneIDs != ids else { return }
     eventStarting = true
     let generation = UUID()
     eventGeneration = generation
@@ -201,10 +209,28 @@ final class HerdrClient {
     _ work: @escaping (HerdrClient) throws -> T,
     completion: @escaping (Result<T, Error>) -> Void
   ) {
+    availabilityLock.lock()
+    let generation = availabilityGeneration, submittedEnabled = enabled
+    availabilityLock.unlock()
     queue.async {
-      let result = Result { try work(self) }
-      DispatchQueue.main.async { completion(result) }
+      self.availabilityLock.lock()
+      let enabled = self.enabled && self.availabilityGeneration == generation && submittedEnabled
+      self.availabilityLock.unlock()
+      let result = Result { guard enabled else { throw ConfigurationError("Connection disabled or changed.") }; return try work(self) }
+      DispatchQueue.main.async {
+        self.availabilityLock.lock()
+        let current = self.enabled && generation == self.availabilityGeneration
+        self.availabilityLock.unlock()
+        completion(current ? result : .failure(ConfigurationError("Connection disabled or changed.")))
+      }
     }
+  }
+
+  func setEnabled(_ value: Bool) {
+    availabilityLock.lock(); enabled = value; availabilityGeneration = UUID(); availabilityLock.unlock()
+    eventGeneration = UUID(); eventStarting = false
+    eventStream?.stop(); eventStream = nil
+    if !value { queue.async { self.cachedStatus = nil; self.disconnectTransport() } }
   }
 
   private func process(_ arguments: [String]) -> Process {

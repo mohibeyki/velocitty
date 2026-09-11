@@ -250,3 +250,91 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
     return false
   }
 }
+
+final class ConnectionsWindow: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
+  private weak var appOwner: AppDelegate?
+  private let table = NSTableView()
+  private let message = NSTextField(wrappingLabelWithString: "Disabling a connection leaves its terminals running. Tabs remain in their spaces.")
+  private var rows: [HerdrConnection] = []
+  private var timer: Timer?
+  init(owner: AppDelegate) {
+    self.appOwner = owner
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 660, height: 370), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+    super.init(window: window)
+    window.title = "Herdr Connections"; window.minSize = NSSize(width: 560, height: 280); window.center()
+    let root = NSView(); window.contentView = root
+    for (id, title, width) in [("enabled", "Enabled", 65.0), ("name", "Connection", 270.0), ("status", "Status", 260.0)] {
+      let column = NSTableColumn(identifier: .init(id)); column.title = title; column.width = width; table.addTableColumn(column)
+    }
+    table.dataSource = self; table.delegate = self; table.rowHeight = 44
+    table.setAccessibilityLabel("Herdr connections")
+    let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true
+    let local = NSButton(title: "Add Local…", target: self, action: #selector(addLocal))
+    let remote = NSButton(title: "Add SSH…", target: self, action: #selector(addRemote))
+    let retry = NSButton(title: "Retry", target: self, action: #selector(retry))
+    let tab = NSButton(title: "New Tab", target: self, action: #selector(newTab))
+    let buttons = NSStackView(views: [local, remote, retry, tab]); buttons.spacing = 8
+    message.textColor = .secondaryLabelColor
+    for view in [scroll, message, buttons] { root.addSubview(view); view.translatesAutoresizingMaskIntoConstraints = false }
+    NSLayoutConstraint.activate([
+      scroll.topAnchor.constraint(equalTo: root.topAnchor, constant: 16), scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16), scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16), scroll.bottomAnchor.constraint(equalTo: message.topAnchor, constant: -12),
+      message.leadingAnchor.constraint(equalTo: scroll.leadingAnchor), message.trailingAnchor.constraint(equalTo: scroll.trailingAnchor), message.bottomAnchor.constraint(equalTo: buttons.topAnchor, constant: -12),
+      buttons.leadingAnchor.constraint(equalTo: scroll.leadingAnchor), buttons.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
+    ])
+    refresh()
+    timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in if self?.window?.isVisible == true { self?.refresh() } }
+  }
+  required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+  deinit { timer?.invalidate() }
+  func refresh() {
+    let selected = rows.indices.contains(table.selectedRow) ? rows[table.selectedRow].id : nil
+    rows = appOwner?.connections ?? []; table.reloadData()
+    if let index = rows.firstIndex(where: { $0.id == selected }) { table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false) }
+  }
+  func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+  func tableView(_ tableView: NSTableView, viewFor column: NSTableColumn?, row: Int) -> NSView? {
+    guard rows.indices.contains(row) else { return nil }
+    let profile = rows[row]
+    if column?.identifier.rawValue == "enabled" {
+      let toggle = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggle(_:)))
+      toggle.state = profile.enabled ? .on : .off; toggle.tag = row
+      toggle.setAccessibilityLabel("Enable " + profile.label); return toggle
+    }
+    let text = column?.identifier.rawValue == "name" ? profile.label + "\n" + (profile.target ?? "Local") + " / " + profile.session : (appOwner?.connectionStatus[profile.id] ?? "Not connected")
+    let label = NSTextField(wrappingLabelWithString: text); label.maximumNumberOfLines = 2; label.toolTip = text
+    return label
+  }
+  @objc private func toggle(_ sender: NSButton) {
+    guard rows.indices.contains(sender.tag) else { return }; appOwner?.setConnectionEnabled(rows[sender.tag].id, enabled: sender.state == .on); refresh()
+  }
+  @objc private func retry() {
+    guard rows.indices.contains(table.selectedRow), let client = appOwner?.client(for: rows[table.selectedRow].id), client.isEnabled else { NSSound.beep(); return }
+    appOwner?.connectEndpoint(client)
+  }
+  @objc private func newTab() {
+    guard rows.indices.contains(table.selectedRow), let client = appOwner?.client(for: rows[table.selectedRow].id), client.isEnabled else { NSSound.beep(); return }
+    if let target = appOwner?.activeWindow, target.session?.herdrTerminal != nil { target.newTab(using: client) }
+    else { appOwner?.openHerdrWindow(using: client) }
+  }
+  @objc private func addLocal() { add(remote: false) }
+  @objc private func addRemote() { add(remote: true) }
+  private func add(remote: Bool) {
+    guard let window, window.attachedSheet == nil else { return }
+    let alert = NSAlert(); alert.messageText = remote ? "Add SSH Connection" : "Add Local Connection"
+    alert.informativeText = remote ? "Uses your existing SSH keys and known hosts. Start herdr on the destination first." : "Connect to an independent local herdr session."
+    let name = NSTextField(); name.placeholderString = "Name"
+    let session = NSTextField(string: "velocitty"); session.placeholderString = "Herdr session"
+    let target = NSTextField(); target.placeholderString = "user@host"
+    let fields = NSStackView(views: remote ? [name, target, session] : [name, session]); fields.orientation = .vertical; fields.alignment = .leading; fields.spacing = 8
+    fields.frame = NSRect(x: 0, y: 0, width: 350, height: remote ? 90 : 60)
+    for field in [name, session, target] { field.widthAnchor.constraint(equalToConstant: 350).isActive = true }
+    alert.accessoryView = fields; alert.addButton(withTitle: "Add"); alert.addButton(withTitle: "Cancel")
+    alert.beginSheetModal(for: window) { [weak self] response in
+      guard response == .alertFirstButtonReturn else { return }
+      let value = session.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+      let profile = HerdrConnection(id: remote ? "ssh:" + UUID().uuidString : (value == "velocitty" ? "local" : "local:" + value), label: name.stringValue, session: value, target: remote ? target.stringValue : nil)
+      do { try self?.appOwner?.addConnection(profile); self?.message.stringValue = "Connection added." }
+      catch { self?.message.stringValue = error.localizedDescription }
+    }
+  }
+}

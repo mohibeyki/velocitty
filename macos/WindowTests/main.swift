@@ -21,6 +21,9 @@ if CommandLine.arguments.contains("--remote-check") {
   try runRemoteCheck()
   exit(0)
 }
+if CommandLine.arguments.contains("--mixed-connections") {
+  try runMixedConnectionsCheck(); exit(0)
+}
 if CommandLine.arguments.contains("--workspace-persistence") {
   try runWorkspacePersistenceCheck()
   exit(0)
@@ -741,7 +744,8 @@ if let executable = HerdrClient.discover() {
   drain()
   precondition((a.view!.accessibilityValue() as? String)?.contains("VELOCITTY_HERDR_STREAM") == true)
   let ids = Set(controller.allPanes.compactMap { $0.herdrTerminal?.pane.terminal_id })
-  let workspace = controller.activeNamespace.herdrID!
+  let localName = controller.activeNamespace.name
+  let workspace = controller.session!.herdrTerminal!.pane.workspace_id
   try client.rename(workspace: workspace, name: "Agents", subtitle: "Local tasks")
   controller.window?.performClose(nil)
   drain()
@@ -752,7 +756,7 @@ if let executable = HerdrClient.discover() {
   waitMux()
   let restored = delegate.windows.last!
   precondition(Set(restored.allPanes.compactMap { $0.herdrTerminal?.pane.terminal_id }) == ids)
-  precondition(restored.namespaces.contains { $0.name == "Agents" && $0.subtitle == "Local tasks" })
+  precondition(restored.namespaces.contains { $0.name == localName }, "Backend names must not overwrite local space names")
   precondition(restored.namespaces.flatMap(\.tabs).contains { $0.panes.count == 3 })
   restored.selectNamespace(at: 1)
   let exiting = restored.session!
@@ -1476,7 +1480,7 @@ func runWorkspacePersistenceCheck() throws {
   let order = window.tabs.map { $0.herdrID! }
   window.selectTab(window.tabs.first { $0.herdrID == splitTabID }!)
   window.newNamespace(); wait(first, window)
-  let selectedNamespace = window.activeNamespace.herdrID!
+  let selectedNamespace = window.activeNamespace.id!
   window.workspaceView.restoreSidebarState(.init(width: 276, compact: true))
   window.workspaceView.layoutSubtreeIfNeeded()
   first.scheduleWorkspaceSave(window)
@@ -1490,7 +1494,7 @@ func runWorkspacePersistenceCheck() throws {
   second.newWindow(); wait(second)
   let restored = second.windows.last!
   restored.workspaceView.layoutSubtreeIfNeeded()
-  precondition(restored.activeNamespace.herdrID == selectedNamespace)
+  precondition(restored.activeNamespace.id == selectedNamespace)
   precondition(restored.namespaces[0].tabs.map { $0.herdrID! } == order)
   let split = restored.namespaces[0].tabs.first { $0.herdrID == splitTabID }!
   precondition(split.selected.herdrTerminal!.pane.pane_id == selectedPane)
@@ -1523,18 +1527,18 @@ func runWorkspacePersistenceCheck() throws {
   second.newWindow(); wait(second)
   let extra = second.windows.first { $0 !== restored }!
   let extraID = extra.workspaceWindowID
-  let extraNamespace = extra.activeNamespace.herdrID
+  let extraNamespace = extra.activeNamespace.id
   extra.window?.setFrame(NSRect(x: 100, y: 100, width: 850, height: 650), display: true)
   second.scheduleWorkspaceSave(extra); second.flushWorkspaceSave()
   extra.window?.performClose(nil)
   second.synchronizeHerdr(try client.snapshot(), client: client)
-  precondition(!restored.namespaces.contains { $0.herdrID == extraNamespace }, "Detached windows must stay detached")
+  precondition(!restored.namespaces.contains { $0.id == extraNamespace }, "Detached windows must stay detached")
   restored.window?.performClose(nil)
   let third = try makeOwner()
   third.newWindow(); wait(third)
   precondition(third.windows.count == 2, "Window assignments must survive relaunch")
   let extraRestored = third.windows.first { $0.workspaceWindowID == extraID }!
-  precondition(extraRestored.activeNamespace.herdrID == extraNamespace)
+  precondition(extraRestored.activeNamespace.id == extraNamespace)
   precondition(extraRestored.window!.frame.width == 850)
   let sourceWindow = third.windows.first { $0 !== extraRestored }!
   let movingTab = sourceWindow.namespaces.flatMap(\.tabs).first { $0.panes.count > 1 }!
@@ -1637,7 +1641,7 @@ func runRemoteCheck() throws {
     remoteEnvironment: ["HERDR_CONFIG_PATH": config.path])
   defer { remote.disconnectTransport() }
   let scoped = try remote.snapshot()
-  precondition(Set(scoped.panes.map(\.terminal_id)) == Set(raw.panes.map { remote.qualify($0.terminal_id) }))
+  precondition(Set(scoped.panes.map(\.terminal_id)) == Set(raw.panes.map { remote.qualify($0.terminal_id.components(separatedBy: "::").last!) }))
   let settings = try AppConfiguration.parse(Data("[terminal]\nconfirm_close_surface=false\nundo_timeout='2s'\ntheme=''\n".utf8))
   let owner = AppDelegate()
   owner.workspaceStateURL = root.appendingPathComponent("workspace.json")
@@ -1728,4 +1732,71 @@ func runRemoteCheck() throws {
   precondition(localPane.surface == retainedSurface && !owner.windows.isEmpty)
   for controller in Array(owner.windows) { controller.closing = true; controller.window?.close() }
   print("Remote transport, comparison and close undo tests passed.")
+}
+
+func runMixedConnectionsCheck() throws {
+  guard let executable = HerdrClient.discover() else { fatalError("herdr is required") }
+  let directory = FileManager.default.temporaryDirectory.appendingPathComponent("velo-mixed-" + UUID().uuidString)
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  let config = directory.appendingPathComponent("herdr.toml")
+  try Data("[terminal]\ndefault_shell='/bin/zsh'\n".utf8).write(to: config)
+  let previous = ProcessInfo.processInfo.environment["HERDR_CONFIG_PATH"]
+  setenv("HERDR_CONFIG_PATH", config.path, 1)
+  let first = HerdrClient(executable: executable, sessionName: "vt-" + UUID().uuidString.lowercased())
+  let second = HerdrClient(executable: executable, sessionName: "vt-" + UUID().uuidString.lowercased())
+  defer {
+    for client in [first, second] { _ = try? client.run(["server", "stop"]); _ = try? client.run(["session", "delete", client.sessionName]) }
+    if let previous { setenv("HERDR_CONFIG_PATH", previous, 1) } else { unsetenv("HERDR_CONFIG_PATH") }
+    try? FileManager.default.removeItem(at: directory)
+  }
+  let profiles = [first, second].map { HerdrConnection(id: $0.endpointID, label: $0.sessionName, session: $0.sessionName) }
+  try HerdrConnectionStore(url: directory.appendingPathComponent("connections.json")).save(profiles)
+  let file = directory.appendingPathComponent("workspace.json")
+  let settings = try AppConfiguration.parse(Data("[terminal]\nconfirm_close_surface=false\nundo_timeout='0s'\ntheme=''\n".utf8))
+  func owner() throws -> AppDelegate {
+    let result = AppDelegate(); result.workspaceStateURL = file; result.runtime = try TerminalRuntime(settings: settings)
+    result.herdr = HerdrClient(executable: executable, sessionName: first.sessionName)
+    result.loadConnections(); return result
+  }
+  func wait(_ app: AppDelegate, _ window: TerminalWindowController? = nil) {
+    let deadline = Date(timeIntervalSinceNow: 15)
+    repeat { pumpEvents(until: Date(timeIntervalSinceNow: 0.05)) }
+    while (app.muxOpening || window?.muxBusy == true) && Date() < deadline
+    precondition(!app.muxOpening && window?.muxBusy != true)
+  }
+  let app = try owner(); app.newWindow(); wait(app)
+  let window = app.windows.first!
+  // A fresh second server can be empty, so explicitly create its first tab.
+  let client = app.client(for: second.endpointID)!
+  window.newTab(using: client); wait(app, window)
+  precondition(window.namespaces.count == 1 && window.tabs.count == 2)
+  let remoteTab = window.activeTab, pane = remoteTab.selected
+  let terminalID = pane.herdrTerminal!.pane.terminal_id
+  let spaceID = window.activeNamespace.id!
+  window.activeNamespace.name = "Mixed Project"
+  app.scheduleWorkspaceSave(window); app.flushWorkspaceSave()
+  app.synchronizeHerdr(try first.snapshot(), client: app.herdr!)
+  app.synchronizeHerdr(try client.snapshot(), client: client)
+  precondition(window.namespaces.count == 1 && window.tabs.count == 2 && window.activeNamespace.name == "Mixed Project")
+  app.setConnectionEnabled(client.endpointID, enabled: false)
+  precondition(pane.surface == nil && pane.connectionSuspended && window.tabs.count == 2)
+  let running = try second.snapshot()
+  precondition(running.panes.contains { $0.terminal_id == terminalID })
+  app.flushWorkspaceSave()
+  for controller in Array(app.windows) { controller.closing = true; controller.window?.close() }
+  let restored = try owner(); restored.newWindow(); wait(restored)
+  let restoredWindow = restored.windows.first!
+  precondition(restoredWindow.activeNamespace.id == spaceID && restoredWindow.tabs.count == 2)
+  precondition(restoredWindow.activeNamespace.name == "Mixed Project")
+  let placeholder = restoredWindow.tabs.first { $0.selected.herdrTerminal?.client.endpointID == second.endpointID }!.selected
+  precondition(placeholder.connectionSuspended && placeholder.surface == nil)
+  restored.setConnectionEnabled(second.endpointID, enabled: true); wait(restored)
+  let deadline = Date(timeIntervalSinceNow: 8)
+  while placeholder.surface == nil && Date() < deadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.05)) }
+  precondition(placeholder.surface != nil && placeholder.herdrTerminal!.pane.terminal_id == terminalID)
+  restored.scheduleWorkspaceSave(restoredWindow); restored.flushWorkspaceSave()
+  let saved = try WorkspaceStateStore(url: file).load()
+  precondition(saved.namespaces[0].tabs.count == 2)
+  for controller in Array(restored.windows) { controller.closing = true; controller.window?.close() }
+  print("Mixed connection tests passed.")
 }

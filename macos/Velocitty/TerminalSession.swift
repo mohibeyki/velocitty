@@ -14,6 +14,7 @@ final class TerminalSession {
   private var appliedConfig: ghostty_config_t?
   private(set) var opacityOverride: Double?
   private var closed = false
+  private(set) var connectionSuspended = false
   var herdrTerminal: HerdrClient.Terminal?
   var initialDirectory: URL?
   var initialInput: String?
@@ -48,6 +49,7 @@ final class TerminalSession {
     if let view, surface != nil { return view }
     let terminalView = view ?? TerminalView(session: self)
     view = terminalView
+    if connectionSuspended { return terminalView }
     var options = velokit_surface_config_new()
     let pointer = Unmanaged.passUnretained(terminalView).toOpaque()
     options.userdata = pointer
@@ -78,13 +80,24 @@ final class TerminalSession {
     return terminalView
   }
 
+  func suspendConnection(_ message: String) {
+    connectionSuspended = true
+    recoveryTimer?.invalidate(); recoveryGeneration = UUID(); recovering = false
+    view?.inputContext?.discardMarkedText(); view?.clipboard.cancel(); links.cancel()
+    let old = surface; surface = nil
+    if let old { velokit_surface_free(old) }
+    if view == nil { _ = createView() }
+    if chrome == nil, let view { chrome = TerminalChrome(view) }
+    chrome?.showConnectionStatus(message, retry: herdrTerminal?.client.isEnabled == true)
+  }
+
   private var recoveryTimer: Timer?
   private var recoveryGeneration = UUID()
   private var recoveryAttempts = 0
   private(set) var recovering = false
 
   func attachmentExited() {
-    guard !closed, herdrTerminal != nil, windowController?.closing == false,
+    guard !closed, !connectionSuspended, herdrTerminal?.client.isEnabled == true, windowController?.closing == false,
       windowController?.owner?.terminating != true, !recovering else { return }
     recovering = true
     recoveryGeneration = UUID()
@@ -92,7 +105,8 @@ final class TerminalSession {
   }
 
   func retryAttachment() {
-    guard !closed, herdrTerminal != nil else { return }
+    guard !closed, herdrTerminal?.client.isEnabled == true else { return }
+    connectionSuspended = false
     recoveryTimer?.invalidate()
     recoveryAttempts = 0
     recovering = true
@@ -101,7 +115,7 @@ final class TerminalSession {
   }
 
   private func checkAttachment(generation: UUID) {
-    guard !closed, let terminal = herdrTerminal else { return }
+    guard !closed, let terminal = herdrTerminal, terminal.client.isEnabled else { return }
     chrome?.showConnectionStatus("Reconnecting…", retry: false)
     terminal.client.perform({ try $0.snapshot(timeout: 2) }) { [weak self] result in
       guard let self, !self.closed, self.recoveryGeneration == generation,

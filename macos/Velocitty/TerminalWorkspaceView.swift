@@ -163,8 +163,9 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     guard now - lastAgentPoll >= (client.eventsConnected ? 10 : 2) else { return }
     lastAgentPoll = now
     pollingAgents = true
-    let clients = controller.allPanes.compactMap { $0.herdrTerminal?.client }.reduce(into: [String: HerdrClient]()) { $0[$1.endpointID] = $1 }.values
+    let clients = controller.allPanes.compactMap { $0.herdrTerminal?.client }.filter(\.isEnabled).reduce(into: [String: HerdrClient]()) { $0[$1.endpointID] = $1 }.values
     var remaining = clients.count
+    if remaining == 0 { pollingAgents = false; return }
     for client in clients {
       client.perform({ try $0.statusSnapshot() }) { [weak self, weak client] result in
         guard let self, let client else { return }

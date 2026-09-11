@@ -2,6 +2,9 @@
 import XCTest
 
 final class WindowTests: XCTestCase {
+  func testMixedConnections() throws {
+    try runCheck("WindowChecks", arguments: ["--mixed-connections"], success: "Mixed connection tests passed.")
+  }
   func testWorkspacePersistence() throws {
     try runCheck("WindowChecks", arguments: ["--workspace-persistence"], success: "Workspace persistence tests passed.")
   }
