@@ -41,3 +41,18 @@ final class ConfigurationDocumentTests: XCTestCase {
     XCTAssertTrue(document.text.hasSuffix("# Draft\n"))
   }
 }
+
+
+extension ConfigurationDocumentTests {
+  func testResetPreservesOtherValuesAndComments() throws {
+    let document = try ConfigurationDocument(url: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+    document.text = "[terminal]\nfont-size = 13 # keep this comment\nfont_family = [\n  \"Menlo\",\n]\ncursor_style = 'bar'\n"
+    try document.removeValue(table: "terminal", key: "font_size")
+    try document.removeValue(table: "terminal", key: "font_family")
+    XCTAssertNil(document.value(table: "terminal", key: "font_size"))
+    XCTAssertNil(document.value(table: "terminal", key: "font_family"))
+    XCTAssertTrue(document.text.contains("# keep this comment"))
+    XCTAssertEqual(document.value(table: "terminal", key: "cursor_style"), "'bar'")
+    _ = try AppConfiguration.parse(Data(document.text.utf8))
+  }
+}

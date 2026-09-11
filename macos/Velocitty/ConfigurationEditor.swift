@@ -41,13 +41,42 @@ struct ConfigurationEditor {
 
 // Native settings retain the source document, including comments and includes.
 final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSTextViewDelegate, NSWindowDelegate {
-  private struct Setting { let table: String; let key: String }
+  private struct Setting {
+    let table: String; let key: String
+    var category: String {
+      if table == "interface" { return "Workspace" }
+      if key.hasPrefix("font") || key.hasPrefix("adjust_") { return "Font" }
+      if ["theme", "background", "foreground", "palette", "cursor", "selection", "unfocused"].contains(where: { key.hasPrefix($0) }) { return "Colors & Appearance" }
+      if ["keybind", "mouse", "clipboard", "copy", "paste", "click", "link"].contains(where: { key.hasPrefix($0) }) { return "Input & Clipboard" }
+      if ["window", "macos", "tab", "resize", "focus", "split", "quit", "confirm", "undo"].contains(where: { key.hasPrefix($0) }) { return "Windows & Tabs" }
+      if ["shell", "command", "initial_command", "working_directory", "env", "term", "scrollback"].contains(where: { key.hasPrefix($0) }) { return "Shell & Terminal" }
+      return "Advanced"
+    }
+    var summary: String {
+      switch key {
+      case "font_family": return "Typeface for terminal text. Font fallback remains available in Advanced."
+      case "font_size": return "Terminal font size in points."
+      case "theme": return "Use a bundled theme, a file path, or light:Name,dark:Name for automatic appearance."
+      case "working_directory": return "Starting directory for new terminals when directory inheritance does not apply."
+      case "command", "initial_command": return "An explicit command creates standalone terminals instead of herdr sessions."
+      case "keybind": return "Keyboard bindings. This repeatable setting accepts an array of bindings."
+      case "quit_after_last_window_closed": return "Quit after closing the last window. Herdr terminals keep running."
+      case "undo_timeout": return "How long explicit terminal closes can be undone before ending the process."
+      case "background_opacity": return "Terminal background opacity, from 0 (transparent) to 1 (opaque)."
+      case "cursor_style": return "Shape of the terminal cursor. Applications can request a different shape."
+      default: return table == "interface" ? "Workspace appearance. Terminal colors are configured separately." : "Edit the value below or use the source document for advanced syntax."
+      }
+    }
+  }
   private weak var appOwner: AppDelegate?
   private var configDocument: ConfigurationDocument
   private let defaults: ConfigurationDocument
   private var files: [URL]
   private let filePicker = NSPopUpButton()
   private let search = NSSearchField()
+  private let category = NSPopUpButton()
+  private let choices = NSComboBox()
+  private let reset = NSButton(title: "Use Default", target: nil, action: nil)
   private let table = NSTableView()
   private let detail = NSTextField(wrappingLabelWithString: "")
   private let value = NSTextField()
@@ -89,6 +118,11 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
     search.delegate = self
     search.target = self
     search.action = #selector(filterSettings)
+    category.addItems(withTitles: ["All Settings", "Font", "Colors & Appearance", "Input & Clipboard", "Windows & Tabs", "Shell & Terminal", "Workspace", "Advanced"])
+    category.target = self; category.action = #selector(filterSettings)
+    choices.target = self; choices.action = #selector(chooseValue)
+    choices.completes = true
+    reset.target = self; reset.action = #selector(resetValue)
     filePicker.addItems(withTitles: files.map(\.path))
     filePicker.target = self
     filePicker.action = #selector(selectFile)
@@ -128,16 +162,19 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
     let revert = NSButton(title: "Reload File", target: self, action: #selector(revertDocument))
     let external = NSButton(title: "Open in Editor", target: self, action: #selector(openExternal))
     status.textColor = .secondaryLabelColor
-    for view in [filePicker, search, list, detail, value, enabled, apply, rawLabel, advanced, status, save, revert, external] {
+    for view in [filePicker, search, category, list, detail, value, choices, enabled, reset, apply, rawLabel, advanced, status, save, revert, external] {
       view.translatesAutoresizingMaskIntoConstraints = false
       root.addSubview(view)
     }
     NSLayoutConstraint.activate([
       filePicker.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16), filePicker.topAnchor.constraint(equalTo: root.topAnchor, constant: 14), filePicker.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
       search.topAnchor.constraint(equalTo: filePicker.bottomAnchor, constant: 12), search.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16), search.widthAnchor.constraint(equalToConstant: 245),
-      list.topAnchor.constraint(equalTo: search.bottomAnchor, constant: 8), list.leadingAnchor.constraint(equalTo: search.leadingAnchor), list.widthAnchor.constraint(equalTo: search.widthAnchor), list.bottomAnchor.constraint(equalTo: save.topAnchor, constant: -16),
-      detail.leadingAnchor.constraint(equalTo: list.trailingAnchor, constant: 16), detail.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16), detail.topAnchor.constraint(equalTo: search.topAnchor), detail.heightAnchor.constraint(equalToConstant: 78),
+      category.topAnchor.constraint(equalTo: search.bottomAnchor, constant: 8), category.leadingAnchor.constraint(equalTo: search.leadingAnchor), category.widthAnchor.constraint(equalTo: search.widthAnchor),
+      list.topAnchor.constraint(equalTo: category.bottomAnchor, constant: 8), list.leadingAnchor.constraint(equalTo: search.leadingAnchor), list.widthAnchor.constraint(equalTo: search.widthAnchor), list.bottomAnchor.constraint(equalTo: save.topAnchor, constant: -16),
+      detail.leadingAnchor.constraint(equalTo: list.trailingAnchor, constant: 16), detail.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16), detail.topAnchor.constraint(equalTo: search.topAnchor), detail.heightAnchor.constraint(equalToConstant: 116),
       value.leadingAnchor.constraint(equalTo: detail.leadingAnchor), value.trailingAnchor.constraint(equalTo: detail.trailingAnchor), value.topAnchor.constraint(equalTo: detail.bottomAnchor, constant: 8),
+      choices.leadingAnchor.constraint(equalTo: value.leadingAnchor), choices.trailingAnchor.constraint(equalTo: value.trailingAnchor), choices.topAnchor.constraint(equalTo: value.topAnchor),
+      reset.centerXAnchor.constraint(equalTo: detail.centerXAnchor), reset.centerYAnchor.constraint(equalTo: enabled.centerYAnchor),
       enabled.leadingAnchor.constraint(equalTo: detail.leadingAnchor), enabled.topAnchor.constraint(equalTo: value.bottomAnchor, constant: 8),
       apply.trailingAnchor.constraint(equalTo: detail.trailingAnchor), apply.topAnchor.constraint(equalTo: value.bottomAnchor, constant: 8),
       rawLabel.leadingAnchor.constraint(equalTo: detail.leadingAnchor), rawLabel.topAnchor.constraint(equalTo: apply.bottomAnchor, constant: 12),
@@ -152,45 +189,85 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
   func numberOfRows(in tableView: NSTableView) -> Int { filtered.count }
   func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-    NSTextField(labelWithString: filtered[row].table + "." + filtered[row].key)
+    guard filtered.indices.contains(row) else { return nil }
+    return NSTextField(labelWithString: filtered[row].key.replacingOccurrences(of: "_", with: " "))
   }
   @objc private func filterSettings() {
-    filtered = settings.filter { search.stringValue.isEmpty || ($0.table + "." + $0.key).localizedCaseInsensitiveContains(search.stringValue.replacingOccurrences(of: "-", with: "_")) }
+    let selected = filtered.indices.contains(table.selectedRow) ? filtered[table.selectedRow].key : nil
+    let query = search.stringValue.replacingOccurrences(of: "-", with: "_").replacingOccurrences(of: " ", with: "_")
+    filtered = settings.filter {
+      (category.indexOfSelectedItem == 0 || $0.category == category.titleOfSelectedItem) &&
+      (query.isEmpty || ($0.table + "." + $0.key).localizedCaseInsensitiveContains(query) || $0.summary.localizedCaseInsensitiveContains(search.stringValue))
+    }
     table.reloadData()
-    if !filtered.isEmpty { table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false) }
+    if !filtered.isEmpty { table.selectRowIndexes(IndexSet(integer: filtered.firstIndex { $0.key == selected } ?? 0), byExtendingSelection: false) }
+    else { detail.stringValue = "No matching settings"; value.isEnabled = false; choices.isHidden = true; enabled.isHidden = true; reset.isEnabled = false }
   }
   func controlTextDidChange(_ obj: Notification) { filterSettings() }
   func tableViewSelectionDidChange(_ notification: Notification) {
     guard filtered.indices.contains(table.selectedRow) else { return }
     let setting = filtered[table.selectedRow]
+    value.isEnabled = true; reset.isEnabled = true
     let fallback = defaults.value(table: setting.table, key: setting.key) ?? "\"\""
     value.stringValue = configDocument.value(table: setting.table, key: setting.key) ?? fallback
     let normalized = value.stringValue.trimmingCharacters(in: CharacterSet(charactersIn: "\" "))
     enabled.isHidden = !["true", "false"].contains(normalized)
     enabled.state = normalized == "true" ? .on : .off
+    choices.removeAllItems()
+    var suggestions: [String] = []
+    switch setting.key {
+    case "font_family": suggestions = NSFontManager.shared.availableFontFamilies.sorted()
+    case "theme": suggestions = ["Rose Pine", "Rose Pine Moon", "Rose Pine Dawn", "TokyoNight Moon", "TokyoNight Night", "TokyoNight Storm", "TokyoNight Day", "Catppuccin Latte", "Catppuccin Frappe", "Catppuccin Macchiato", "Catppuccin Mocha"]
+    case "cursor_style": suggestions = ["block", "bar", "underline", "block_hollow"]
+    default: break
+    }
+    if value.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("[") { suggestions = [] }
+    choices.addItems(withObjectValues: suggestions)
+    choices.stringValue = normalized
+    choices.isHidden = suggestions.isEmpty
+    value.isHidden = !choices.isHidden
     let terminalSources = appOwner?.runtime?.settings.options.filter { $0.key == setting.key.replacingOccurrences(of: "_", with: "-") }.compactMap { $0.source?.path } ?? []
     let sources = setting.table == "interface" ? [appOwner?.runtime?.settings.interfaceSources[setting.key]?.path].compactMap { $0 } : terminalSources
-    detail.stringValue = setting.table + "." + setting.key + "\nDefault: " + String(fallback.prefix(180)) + "\n" + (sources.isEmpty ? "Editing this file; includes may override it." : "Contributing source: " + Array(Set(sources)).sorted().joined(separator: ", "))
+    detail.stringValue = setting.table + "." + setting.key + "\n" + setting.summary + "\nDefault: " + String(fallback.prefix(180)) + "\n" + (sources.isEmpty ? "Editing this file; includes may override it." : "Contributing source: " + Array(Set(sources)).sorted().joined(separator: ", "))
   }
   func textDidChange(_ notification: Notification) {
     configDocument.text = editor.string
     window?.isDocumentEdited = configDocument.hasChanges
   }
+  @objc private func chooseValue() {
+    // JSON string escaping is also valid TOML basic-string escaping.
+    let encoder = JSONEncoder(); encoder.outputFormatting = [.withoutEscapingSlashes]
+    if let data = try? encoder.encode(choices.stringValue), let quoted = String(data: data, encoding: .utf8) { value.stringValue = quoted }
+  }
+  @objc private func resetValue() {
+    guard filtered.indices.contains(table.selectedRow) else { return }
+    let setting = filtered[table.selectedRow]
+    do {
+      try configDocument.removeValue(table: setting.table, key: setting.key)
+      editor.string = configDocument.text; window?.isDocumentEdited = configDocument.hasChanges
+      tableViewSelectionDidChange(Notification(name: NSTableView.selectionDidChangeNotification))
+      status.textColor = .secondaryLabelColor
+      status.stringValue = "Override removed from this file. Included files may still supply a value."
+    } catch { showError(error) }
+  }
+  private func showError(_ error: Error) { status.textColor = .systemRed; status.stringValue = error.localizedDescription; status.toolTip = status.stringValue }
   @objc private func toggleValue() { value.stringValue = enabled.state == .on ? "true" : "false"; applyValue() }
   @objc private func applyValue() {
     guard filtered.indices.contains(table.selectedRow) else { return }
     let setting = filtered[table.selectedRow]
+    if !choices.isHidden { chooseValue() }
     do {
       let fragment = try AppConfiguration.parse(Data("[\(setting.table)]\n\(setting.key) = \(value.stringValue)\n".utf8), source: configDocument.url)
-      var diagnostics: [String] = []
+      var diagnostics: [String] = fragment.diagnostics
       let prepared = try TerminalRuntime.makeConfig(fragment, diagnostic: { diagnostics.append($0) })
       velokit_config_free(prepared)
       guard diagnostics.isEmpty else { throw ConfigurationError(diagnostics.joined(separator: "\n")) }
       try configDocument.setValue(table: setting.table, key: setting.key, toml: value.stringValue)
       editor.string = configDocument.text
       window?.isDocumentEdited = configDocument.hasChanges
+      status.textColor = .secondaryLabelColor
       status.stringValue = "Draft updated. Save & Reload to apply."
-    } catch { status.stringValue = error.localizedDescription }
+    } catch { showError(error) }
   }
   @objc private func saveDocument() {
     do {
@@ -198,8 +275,11 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
       try configDocument.save()
       window?.isDocumentEdited = false
       appOwner?.reloadConfiguration(nil)
-      status.stringValue = "Saved. Process settings apply to new terminals."
-    } catch { status.stringValue = error.localizedDescription }
+      let diagnostics = appOwner?.runtime?.settings.diagnostics ?? []
+      status.textColor = diagnostics.isEmpty ? .secondaryLabelColor : .systemOrange
+      status.stringValue = diagnostics.isEmpty ? "Saved. Process settings apply to new terminals." : "Saved with configuration warnings. " + diagnostics.joined(separator: "\n")
+      status.toolTip = status.stringValue
+    } catch { showError(error) }
   }
   private func confirmDiscard(_ proceed: @escaping () -> Void) {
     guard configDocument.hasChanges, let window else { proceed(); return }
@@ -224,7 +304,7 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
       window?.isDocumentEdited = false
       tableViewSelectionDidChange(Notification(name: NSTableView.selectionDidChangeNotification))
       status.stringValue = ""
-    } catch { status.stringValue = error.localizedDescription }
+    } catch { showError(error) }
   }
   @objc private func revertDocument() { confirmDiscard { [weak self] in guard let self else { return }; self.loadFile(self.currentFile) } }
   @objc private func openExternal() { ConfigurationEditor().open(configDocument.url) { [weak self] error in if let error { self?.status.stringValue = error.localizedDescription } } }

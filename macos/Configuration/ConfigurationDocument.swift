@@ -18,7 +18,7 @@ public final class ConfigurationDocument {
   }
   public var hasChanges: Bool { text != baselineText }
 
-  private struct Assignment { let table: String; let key: String; let value: Range<Int> }
+  private struct Assignment { let table: String; let key: String; let start: Int; let value: Range<Int> }
   private func assignments() -> ([Assignment], [String: Int]) {
     let bytes = Array(text.utf8)
     var table = "", position = 0
@@ -41,7 +41,7 @@ public final class ConfigurationDocument {
           var start = equals + 1
           while start < bytes.count && [9, 32].contains(bytes[start]) { start += 1 }
           if let end = Self.valueEnd(bytes, from: start) {
-            entries.append(.init(table: table, key: key.replacingOccurrences(of: "-", with: "_"), value: start..<end))
+            entries.append(.init(table: table, key: key.replacingOccurrences(of: "-", with: "_"), start: lineStart, value: start..<end))
             position = end
             while position < bytes.count && bytes[position] != 10 { position += 1 }
             position = min(bytes.count, position + 1)
@@ -109,6 +109,16 @@ public final class ConfigurationDocument {
     } else {
       bytes.append(contentsOf: "\n[\(table)]\n\(key) = \(toml)\n".utf8)
     }
+    text = String(decoding: bytes, as: UTF8.self)
+  }
+
+  /// Remove this file's override while retaining trailing and unrelated comments.
+  public func removeValue(table: String, key: String) throws {
+    let matches = assignments().0.filter { $0.table == table && $0.key == key.replacingOccurrences(of: "-", with: "_") }
+    guard matches.count <= 1 else { throw ConfigurationError("Duplicate assignments; resolve them in the advanced editor.") }
+    guard let assignment = matches.first else { return }
+    var bytes = Array(text.utf8)
+    bytes.removeSubrange(assignment.start..<assignment.value.upperBound)
     text = String(decoding: bytes, as: UTF8.self)
   }
 
