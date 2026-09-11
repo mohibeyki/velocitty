@@ -68,3 +68,37 @@ final class WorkspaceStateTests: XCTestCase {
     XCTAssertEqual(try Data(contentsOf: store.url), future)
   }
 }
+
+extension WorkspaceStateTests {
+  func testMixedSpaceReconciliationKeepsOfflineTabsAndLocalNames() {
+    var saved = WorkspaceState()
+    var space = WorkspaceState.Namespace(id: "project", tabs: [.init(id: "tab", selectedPaneID: nil), .init(id: "ssh:gpu::tab", selectedPaneID: nil)], selectedTabID: "ssh:gpu::tab")
+    space.name = "My Project"; saved.namespaces = [space]
+    let live = WorkspaceState.Namespace(id: "backend", tabs: [.init(id: "tab", selectedPaneID: nil)], selectedTabID: nil)
+    let restored = saved.reconciled(endpoint: "local", live: [live])
+    XCTAssertEqual(restored.namespaces.count, 1)
+    XCTAssertEqual(restored.namespaces[0].id, "project")
+    XCTAssertEqual(restored.namespaces[0].name, "My Project")
+    XCTAssertEqual(restored.namespaces[0].tabs.map(\.id), ["tab", "ssh:gpu::tab"])
+    let gone = restored.reconciled(endpoint: "local", live: [])
+    XCTAssertEqual(gone.namespaces[0].tabs.map(\.id), ["ssh:gpu::tab"])
+  }
+
+  func testAdditionalLocalEndpointCannotRemoveDefaultLocalTabs() {
+    var saved = WorkspaceState()
+    saved.namespaces = [.init(id: "project", tabs: [.init(id: "tab", selectedPaneID: nil), .init(id: "local:other::tab", selectedPaneID: nil)], selectedTabID: "tab")]
+    let restored = saved.reconciled(endpoint: "local:other", live: [])
+    XCTAssertEqual(restored.namespaces[0].tabs.map(\.id), ["tab"])
+  }
+
+  func testMigrationKeepsBackup() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = WorkspaceStateStore(url: directory.appendingPathComponent("workspace.json"))
+    var old = WorkspaceState(); old.version = 2
+    try store.save(old)
+    var updated = try store.load(); updated.version = 3
+    try store.save(updated)
+    XCTAssertEqual(try JSONDecoder().decode(WorkspaceState.self, from: Data(contentsOf: store.url.appendingPathExtension("v2.backup"))), old)
+  }
+}

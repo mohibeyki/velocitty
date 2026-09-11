@@ -2,16 +2,29 @@
 import Foundation
 
 public struct WorkspaceState: Codable, Equatable, Sendable {
+  public struct Pane: Codable, Equatable, Sendable {
+    public var id: String
+    public var terminalID: String
+    public var workspaceID: String
+    public var cwd: String?
+    public init(id: String, terminalID: String, workspaceID: String, cwd: String?) {
+      self.id = id; self.terminalID = terminalID; self.workspaceID = workspaceID; self.cwd = cwd
+    }
+  }
   public struct Tab: Codable, Equatable, Sendable {
     public var id: String
     public var selectedPaneID: String?
     public var zoomed: Bool?
+    public var panes: [Pane]?
+    public var title: String?
+    public var connectionID: String { id.range(of: "::").map { String(id[..<$0.lowerBound]) } ?? "local" }
     public init(id: String, selectedPaneID: String?, zoomed: Bool? = nil) {
       self.id = id; self.selectedPaneID = selectedPaneID; self.zoomed = zoomed
     }
   }
   public struct Namespace: Codable, Equatable, Sendable {
     public var id: String
+    public var name: String?
     public var tabs: [Tab]
     public var selectedTabID: String?
     public init(id: String, tabs: [Tab], selectedTabID: String?) {
@@ -47,7 +60,7 @@ public struct WorkspaceState: Codable, Equatable, Sendable {
   public var pendingTerminalClosures: [String]?
   public var windows: [Window]?
   public var activeWindowID: String?
-  public var version = 2
+  public var version = 3
   public var namespaces: [Namespace] = []
   public var selectedNamespaceID: String?
   public var sidebar: Sidebar?
@@ -99,6 +112,56 @@ public struct WorkspaceState: Codable, Equatable, Sendable {
     return result
   }
 
+  /// Reconcile one successful endpoint snapshot without changing local space membership.
+  /// Unavailable endpoints are deliberately absent from this operation.
+  public func reconciled(endpoint: String, live: [Namespace]) -> Self {
+    var result = self
+    let liveTabs = Dictionary(uniqueKeysWithValues: live.flatMap(\.tabs).map { ($0.id, $0) })
+    var assigned = Set<String>()
+    for index in result.namespaces.indices {
+      result.namespaces[index].tabs = result.namespaces[index].tabs.compactMap { saved in
+        guard saved.connectionID == endpoint else { assigned.insert(saved.id); return saved }
+        guard var current = liveTabs[saved.id] else { return nil }
+        current.zoomed = saved.zoomed
+        if let selected = saved.selectedPaneID, current.panes?.contains(where: { $0.id == selected }) == true { current.selectedPaneID = selected }
+        assigned.insert(current.id)
+        return current
+      }
+    }
+    for workspace in live {
+      let added = workspace.tabs.filter { !assigned.contains($0.id) }
+      guard !added.isEmpty else { continue }
+      // Backend workspaces only provide an initial destination for unknown tabs.
+      let index = result.namespaces.firstIndex { space in
+        space.id == workspace.id || space.tabs.contains { tab in tab.panes?.contains { $0.workspaceID == workspace.id } == true }
+      }
+      if let index { result.namespaces[index].tabs += added }
+      else {
+        var space = workspace
+        space.tabs = added
+        result.namespaces.append(space)
+      }
+      assigned.formUnion(added.map(\.id))
+    }
+    result.namespaces.removeAll { $0.tabs.isEmpty }
+    for index in result.namespaces.indices {
+      if !result.namespaces[index].tabs.contains(where: { $0.id == result.namespaces[index].selectedTabID }) {
+        result.namespaces[index].selectedTabID = result.namespaces[index].tabs.first?.id
+      }
+    }
+    let ids = Set(result.namespaces.map(\.id))
+    if !ids.contains(result.selectedNamespaceID ?? "") { result.selectedNamespaceID = result.namespaces.first?.id }
+    if var windows = result.windows {
+      for index in windows.indices {
+        windows[index].namespaceIDs.removeAll { !ids.contains($0) }
+        if !windows[index].namespaceIDs.contains(windows[index].selectedNamespaceID ?? "") { windows[index].selectedNamespaceID = windows[index].namespaceIDs.first }
+      }
+      result.windows = windows.filter { !$0.namespaceIDs.isEmpty }
+    }
+    result.version = 3
+    return result
+  }
+
   /// Update the namespaces owned by one window. Detached windows remain saved;
   /// namespaces explicitly removed by this window are removed from its saved scope.
   public mutating func update(_ current: [Namespace], replacing ownedIDs: Set<String>) {
@@ -124,7 +187,7 @@ public struct WorkspaceStateStore {
     do { data = try Data(contentsOf: url) }
     catch let error as CocoaError where error.code == .fileReadNoSuchFile { return WorkspaceState() }
     let state = try JSONDecoder().decode(WorkspaceState.self, from: data)
-    guard (1...2).contains(state.version) else { throw ConfigurationError("Unsupported workspace state version: \(state.version)") }
+    guard (1...3).contains(state.version) else { throw ConfigurationError("Unsupported workspace state version: \(state.version)") }
     // Reject malformed state rather than overwriting it during this run.
     let namespaces = state.namespaces.map(\.id)
     let tabs = state.namespaces.flatMap(\.tabs).map(\.id)
@@ -149,6 +212,52 @@ public struct WorkspaceStateStore {
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     let data = try encoder.encode(state)
     try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    if let previous = try? Data(contentsOf: url),
+      let old = try? JSONDecoder().decode(WorkspaceState.self, from: previous), old.version < 3 {
+      let backup = url.appendingPathExtension("v\(old.version).backup")
+      if !FileManager.default.fileExists(atPath: backup.path) { try previous.write(to: backup, options: .withoutOverwriting) }
+    }
     try data.write(to: url, options: .atomic)
+  }
+}
+
+/// Velocitty connection preferences do not change herdr's global machine catalog.
+public struct HerdrConnection: Codable, Equatable, Sendable {
+  public var id: String
+  public var label: String
+  public var session: String
+  public var target: String?
+  public var enabled: Bool
+  public init(id: String, label: String, session: String, target: String? = nil, enabled: Bool = true) {
+    self.id = id; self.label = label; self.session = session; self.target = target; self.enabled = enabled
+  }
+  public static let local = HerdrConnection(id: "local", label: "Local", session: "velocitty")
+  public func validate() throws {
+    guard !id.isEmpty, !id.contains("::"), (id != "local" || (target == nil && session == "velocitty")), !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+      !session.isEmpty, session.range(of: "^[a-zA-Z0-9_-]+$", options: .regularExpression) != nil,
+      target.map({ !$0.isEmpty && !$0.hasPrefix("-") && !$0.contains(where: { $0.isWhitespace || $0.isNewline }) }) ?? true
+    else { throw ConfigurationError("Use a name, a session containing letters, numbers, hyphens or underscores, and an SSH destination such as user@host.") }
+  }
+}
+
+public struct HerdrConnectionStore {
+  public let url: URL
+  public init(url: URL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Velocitty/connections.json")) { self.url = url }
+  public func load() throws -> [HerdrConnection] {
+    guard FileManager.default.fileExists(atPath: url.path) else { return [.local] }
+    let values = try JSONDecoder().decode([HerdrConnection].self, from: Data(contentsOf: url))
+    try validate(values)
+    return values
+  }
+  private func validate(_ values: [HerdrConnection]) throws {
+    guard Set(values.map(\.id)).count == values.count,
+      Set(values.map { ($0.target ?? "local") + " / " + $0.session }).count == values.count else { throw ConfigurationError("Each herdr connection must have a unique server and session.") }
+    for value in values { try value.validate() }
+  }
+  public func save(_ values: [HerdrConnection]) throws {
+    try validate(values)
+    let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try encoder.encode(values).write(to: url, options: .atomic)
   }
 }
