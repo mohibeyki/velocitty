@@ -131,7 +131,7 @@ final class HerdrClient {
   private var eventStarting = false
   private var eventPaneIDs: Set<String> = []
   private var eventGeneration = UUID()
-  var eventsConnected: Bool { eventStream?.isActive == true }
+  var eventsConnected: Bool { eventStream?.isSubscribed == true && eventStream?.isActive == true }
   var onWorkspaceEvent: (() -> Void)?
   private var cachedStatus: (TimeInterval, Snapshot)?
 
@@ -148,7 +148,7 @@ final class HerdrClient {
 
   func observeEvents(panes: [Pane]) {
     let ids = Set(panes.map(\.pane_id))
-    guard isEnabled, !eventStarting, !eventsConnected || eventPaneIDs != ids else { return }
+    guard isEnabled, !eventStarting, eventStream?.isActive != true || eventPaneIDs != ids else { return }
     eventStarting = true
     let generation = UUID()
     eventGeneration = generation
@@ -641,6 +641,7 @@ private final class HerdrEventStream {
   private let source: DispatchSourceRead
   private var buffer = Data()
   private var stopped = false
+  private(set) var isSubscribed = false
   var isActive: Bool { !stopped }
   init(path: String, paneIDs: Set<String>, changed: @escaping () -> Void, ended: @escaping () -> Void) throws {
     var address = sockaddr_un()
@@ -684,6 +685,7 @@ private final class HerdrEventStream {
         self.buffer.removeSubrange(...end)
         if let json = try? JSONSerialization.jsonObject(with: line) as? [String: Any] {
           if json["error"] != nil { self.stop(); ended(); return }
+          if let result = json["result"] as? [String: Any], result["type"] as? String == "subscription_started" { self.isSubscribed = true }
           if json["event"] != nil { updated = true }
         }
       }

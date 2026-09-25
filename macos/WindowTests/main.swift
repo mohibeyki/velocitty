@@ -1425,10 +1425,19 @@ func runWorkspacePersistenceCheck() throws {
   let window = first.windows.last!
   let integrationMarker = directory.appendingPathComponent("integration")
   pumpEvents(until: Date(timeIntervalSinceNow: 0.5))
-  let integrationCommand = "(( $+_ghostty_state )) && printf ok > " + HerdrClient.quote(integrationMarker.path) + "\n"
-  integrationCommand.withCString { velokit_surface_text(window.session!.surface!, $0, UInt(integrationCommand.utf8.count)) }
+  func enterCommand(_ command: String, in pane: TerminalSession) {
+    command.withCString { velokit_surface_text(pane.surface!, $0, UInt(command.utf8.count)) }
+    var enter = ghostty_input_key_s()
+    enter.action = GHOSTTY_ACTION_PRESS; enter.keycode = 36
+    _ = velokit_surface_key(pane.surface!, enter)
+  }
+  let integrationCommand = "(( $+_ghostty_state )) && printf ok > " + HerdrClient.quote(integrationMarker.path)
+  enterCommand(integrationCommand, in: window.session!)
   let shellDeadline = Date(timeIntervalSinceNow: 5)
   while !FileManager.default.fileExists(atPath: integrationMarker.path) && Date() < shellDeadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.02)) }
+  if !FileManager.default.fileExists(atPath: integrationMarker.path), let output = window.session?.view?.accessibilityValue() as? String {
+    FileHandle.standardError.write(Data(output.utf8))
+  }
   precondition(FileManager.default.fileExists(atPath: integrationMarker.path), "New herdr shells must load integration")
   let running = try client.hasRunningTask(paneID: window.session!.herdrTerminal!.pane.pane_id)
   precondition(running == false, "An idle shell should not prompt to close")
@@ -1441,8 +1450,8 @@ func runWorkspacePersistenceCheck() throws {
   precondition(!recoveredPane.recovering && window.session === recoveredPane)
   precondition(recoveredPane.herdrTerminal!.pane.terminal_id == terminalID)
   let recoveryMarker = directory.appendingPathComponent("recovered")
-  let recoveredCommand = "printf ok > " + HerdrClient.quote(recoveryMarker.path) + "\n"
-  recoveredCommand.withCString { velokit_surface_text(recoveredPane.surface!, $0, UInt(recoveredCommand.utf8.count)) }
+  let recoveredCommand = "printf ok > " + HerdrClient.quote(recoveryMarker.path)
+  enterCommand(recoveredCommand, in: recoveredPane)
   let inputDeadline = Date(timeIntervalSinceNow: 5)
   while !FileManager.default.fileExists(atPath: recoveryMarker.path) && Date() < inputDeadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.02)) }
   precondition(FileManager.default.fileExists(atPath: recoveryMarker.path), "Recovered attachment must accept input in the same shell")
@@ -1503,6 +1512,9 @@ func runWorkspacePersistenceCheck() throws {
   // External changes must attach exactly once without importing backend focus.
   let localSelection = restored.session!
   let previousTabs = Set(restored.namespaces.flatMap(\.tabs).compactMap(\.herdrID))
+  let subscriptionDeadline = Date(timeIntervalSinceNow: 3)
+  while !client.eventsConnected && Date() < subscriptionDeadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.02)) }
+  precondition(client.eventsConnected, "Event subscription must be acknowledged before changing the workspace")
   var eventReceived = false
   let eventHandler = client.onWorkspaceEvent
   client.onWorkspaceEvent = { eventReceived = true; eventHandler?() }
@@ -1752,7 +1764,7 @@ func runMixedConnectionsCheck() throws {
   let profiles = [first, second].map { HerdrConnection(id: $0.endpointID, label: $0.sessionName, session: $0.sessionName) }
   try HerdrConnectionStore(url: directory.appendingPathComponent("connections.json")).save(profiles)
   let file = directory.appendingPathComponent("workspace.json")
-  let settings = try AppConfiguration.parse(Data("[terminal]\nconfirm_close_surface=false\nundo_timeout='0s'\ntheme=''\n".utf8))
+  let settings = try AppConfiguration.parse(Data("[terminal]\nconfirm_close_surface=false\nundo_timeout='2s'\ntheme=''\n".utf8))
   func owner() throws -> AppDelegate {
     let result = AppDelegate(); result.workspaceStateURL = file; result.runtime = try TerminalRuntime(settings: settings)
     result.herdr = HerdrClient(executable: executable, sessionName: first.sessionName)
@@ -1782,6 +1794,11 @@ func runMixedConnectionsCheck() throws {
   precondition(pane.surface == nil && pane.connectionSuspended && window.tabs.count == 2)
   let running = try second.snapshot()
   precondition(running.panes.contains { $0.terminal_id == terminalID })
+  window.closePane(pane, confirm: false)
+  precondition(!window.allPanes.contains { $0 === pane })
+  app.undoClose()
+  precondition(window.allPanes.contains { $0 === pane } && pane.connectionSuspended, "Undo must restore a disabled terminal without connecting")
+  app.scheduleWorkspaceSave(window)
   app.flushWorkspaceSave()
   for controller in Array(app.windows) { controller.closing = true; controller.window?.close() }
   let restored = try owner(); restored.newWindow(); wait(restored)
@@ -1790,6 +1807,7 @@ func runMixedConnectionsCheck() throws {
   precondition(restoredWindow.activeNamespace.name == "Mixed Project")
   let placeholder = restoredWindow.tabs.first { $0.selected.herdrTerminal?.client.endpointID == second.endpointID }!.selected
   precondition(placeholder.connectionSuspended && placeholder.surface == nil)
+  precondition(restoredWindow.session === placeholder, "Restore the selected disabled tab")
   restored.setConnectionEnabled(second.endpointID, enabled: true); wait(restored)
   let deadline = Date(timeIntervalSinceNow: 8)
   while placeholder.surface == nil && Date() < deadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.05)) }
@@ -1797,6 +1815,17 @@ func runMixedConnectionsCheck() throws {
   restored.scheduleWorkspaceSave(restoredWindow); restored.flushWorkspaceSave()
   let saved = try WorkspaceStateStore(url: file).load()
   precondition(saved.namespaces[0].tabs.count == 2)
+  restored.setConnectionEnabled(second.endpointID, enabled: false)
+  restoredWindow.closePane(placeholder, confirm: false)
+  pumpEvents(until: Date(timeIntervalSinceNow: 2.3))
+  restored.connectEndpoint(restored.herdr!); wait(restored)
+  precondition(restoredWindow.tabs.count == 1, "A pending close must not reappear as an offline placeholder")
+  restored.setConnectionEnabled(first.endpointID, enabled: false)
+  restored.scheduleWorkspaceSave(restoredWindow); restored.flushWorkspaceSave()
   for controller in Array(restored.windows) { controller.closing = true; controller.window?.close() }
+  let disabled = try owner(); disabled.newWindow(); wait(disabled)
+  precondition(disabled.windows.count == 1 && disabled.windows[0].tabs.count == 1, "All-disabled startup retains the saved workspace")
+  precondition(disabled.windows[0].session!.connectionSuspended)
+  for controller in Array(disabled.windows) { controller.closing = true; controller.window?.close() }
   print("Mixed connection tests passed.")
 }

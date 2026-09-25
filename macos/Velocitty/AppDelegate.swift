@@ -129,10 +129,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   }
 
   @objc func newWindow() {
+    if let herdr { loadWorkspaceState(for: herdr) }
     let customCommand = runtime?.settings.options.contains {
       ["command", "initial-command"].contains($0.key) && !$0.value.isEmpty
     } == true
-    if !customCommand, let client = ([herdr].compactMap { $0 } + Array(remoteClients.values)).first(where: { $0.isEnabled }) {
+    if !customCommand, let client = ([herdr].compactMap { $0 } + remoteClients.values.sorted { $0.endpointID < $1.endpointID }).first(where: { $0.isEnabled }) {
       openHerdrWindow(using: client); return
     }
     if !customCommand, herdr != nil { restoreUnavailableTabs(); showConnections(); return }
@@ -1791,6 +1792,8 @@ extension AppDelegate {
         }
         self.workspaceState = restored
         self.restoringWorkspace = false
+        self.connectionStatus[client.endpointID] = "Connected"
+        self.restoreUnavailableTabs()
         for controller in opened {
           controller.persistenceReady = self.workspaceStore != nil
           controller.persistedNamespaceIDs = Set(controller.namespaces.compactMap(\.id))
@@ -2408,7 +2411,16 @@ extension AppDelegate {
       // Preserve individual unavailable tabs until their endpoint confirms deletion.
       if let old = state.namespaces.first(where: { $0.id == id }) {
         let attached = Set(windows.flatMap(\.namespaces).flatMap(\.tabs).compactMap(\.herdrID))
-        space.tabs += old.tabs.filter { !attached.contains($0.id) && !clientIsAvailable($0.connectionID) }
+        space.tabs += old.tabs.compactMap { tab in
+          guard !attached.contains(tab.id), !clientIsAvailable(tab.connectionID) else { return nil }
+          var saved = tab
+          if let panes = saved.panes {
+            saved.panes = panes.filter { !hiddenTerminalIDs.contains($0.terminalID) }
+            if saved.panes?.isEmpty == true { return nil }
+          }
+          return saved
+        }
+        if let selected = old.selectedTabID, space.tabs.contains(where: { $0.id == selected }), !attached.contains(selected) { space.selectedTabID = selected }
       }
       return space
     }
@@ -2503,6 +2515,11 @@ extension TerminalWindowController {
 
 
 extension AppDelegate {
+  func connectionFailed(_ client: HerdrClient, error: Error) {
+    guard client.isEnabled else { return }
+    connectionStatus[client.endpointID] = error.localizedDescription
+  }
+
   func client(for id: String) -> HerdrClient? {
     if herdr?.endpointID == id { return herdr }
     return remoteClients.values.first { $0.endpointID == id }
@@ -2585,7 +2602,7 @@ extension AppDelegate {
     if enabled { connectEndpoint(client) }
     else {
       for pane in windows.flatMap(\.allPanes) + closedOperations.flatMap(\.panes) where pane.herdrTerminal?.client === client {
-        pane.suspendConnection("" + client.endpointLabel + " · Disabled")
+        pane.suspendConnection(client.endpointLabel + " · Disabled")
       }
       windows.forEach { $0.workspaceView.present(); scheduleWorkspaceSave($0) }
     }
@@ -2610,9 +2627,9 @@ extension AppDelegate {
           try? self.connectionStore?.save(self.connections)
         }
         self.restoreUnavailableTabs()
-        self.connectRemaining(Array(self.remoteClients.values.filter(\.isEnabled)))
+        self.connectRemaining(self.remoteClients.values.filter(\.isEnabled).sorted { $0.endpointID < $1.endpointID })
       }
-    } else { connectRemaining(Array(remoteClients.values.filter(\.isEnabled))) }
+    } else { connectRemaining(remoteClients.values.filter(\.isEnabled).sorted { $0.endpointID < $1.endpointID }) }
   }
 
   private func connectRemaining(_ clients: [HerdrClient]) {
@@ -2654,7 +2671,8 @@ extension AppDelegate {
           guard !scoped.panes.isEmpty else { continue }
           if let existing = self.windows.first(where: { $0.workspaceWindowID == group.id }) {
             try existing.addHerdrTerminals(scoped, excluding: [], restoring: true, client: client)
-            existing.restoreWorkspaceState(saved)
+            var selection = saved; selection.selectedNamespaceID = group.selectedNamespaceID; selection.sidebar = group.sidebar
+            existing.restoreWorkspaceState(selection)
             self.scheduleWorkspaceSave(existing)
           } else {
             let opened = try self.attachHerdrWindow(scoped, client: client, presentation: group, state: saved)
@@ -2687,15 +2705,18 @@ extension AppDelegate {
 
   private func restoreUnavailableTabs() {
     guard let state = workspaceState, let runtime else { return }
+    let wasRestoring = restoringWorkspace
     restoringWorkspace = true
-    defer { restoringWorkspace = false }
+    defer { restoringWorkspace = wasRestoring }
     for group in state.windows ?? [] {
       var controller = windows.first { $0.workspaceWindowID == group.id }
       for saved in state.namespaces where group.namespaceIDs.contains(saved.id) {
         for tab in saved.tabs {
           guard !windows.flatMap(\.namespaces).flatMap(\.tabs).contains(where: { $0.herdrID == tab.id }),
-            let client = client(for: tab.connectionID), !clientIsAvailable(tab.connectionID), let records = tab.panes, !records.isEmpty,
-            !records.contains(where: { retainedTerminalIDs.contains($0.terminalID) }) else { continue }
+            let client = client(for: tab.connectionID), !clientIsAvailable(tab.connectionID), let allRecords = tab.panes,
+            !allRecords.contains(where: { retainedTerminalIDs.contains($0.terminalID) }) else { continue }
+          let records = allRecords.filter { !hiddenTerminalIDs.contains($0.terminalID) }
+          guard !records.isEmpty else { continue }
           var panes: [TerminalSession] = []
           for record in records {
             let pane = runtime.makeSession()
@@ -2722,7 +2743,11 @@ extension AppDelegate {
           panes.forEach { $0.windowController = controller }
         }
       }
-      if let controller { controller.restoreWorkspaceState(state); controller.persistedNamespaceIDs = Set(controller.namespaces.compactMap(\.id)) }
+      if let controller {
+        var selection = state; selection.selectedNamespaceID = group.selectedNamespaceID; selection.sidebar = group.sidebar
+        controller.restoreWorkspaceState(selection)
+        controller.persistedNamespaceIDs = Set(controller.namespaces.compactMap(\.id))
+      }
     }
   }
 }
@@ -2862,6 +2887,7 @@ extension AppDelegate {
 
   private func validateUndo(_ operation: ClosedTerminals, clients: [HerdrClient]) {
     guard let client = clients.first else { restoreUndo(operation); return }
+    if !client.isEnabled { validateUndo(operation, clients: Array(clients.dropFirst())); return }
     client.perform({ try $0.snapshot() }) { [weak self, weak operation] result in
       guard let self, let operation, !self.terminating else { return }
       switch result {
