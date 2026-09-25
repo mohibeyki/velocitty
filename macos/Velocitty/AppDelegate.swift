@@ -1904,7 +1904,7 @@ extension AppDelegate {
     observeHerdr(client, snapshot: serverSnapshot)
     let visibleNamespaces = Set(windows.flatMap(\.namespaces).compactMap(\.id))
     let detached = Set((workspaceState?.namespaces ?? []).filter { !visibleNamespaces.contains($0.id) }.flatMap(\.tabs).map(\.id))
-    let snapshot = serverSnapshot.excluding(terminals: retainedTerminalIDs.union(serverSnapshot.panes.filter { detached.contains($0.tab_id) }.map(\.terminal_id)))
+    let snapshot = serverSnapshot.excluding(terminals: retainedTerminalIDs.union(serverSnapshot.panes.filter { detached.contains(localTabID($0)) }.map(\.terminal_id)))
     let currentRecords = targets.flatMap(\.allPanes).filter { $0.herdrTerminal?.client === client }.compactMap { $0.herdrTerminal?.pane }
     let structureMatches = Set(currentRecords.map(\.terminal_id)) == Set(snapshot.panes.map(\.terminal_id))
       && currentRecords.allSatisfy { old in snapshot.panes.contains { $0.terminal_id == old.terminal_id && $0.tab_id == old.tab_id && $0.workspace_id == old.workspace_id } }
@@ -2442,11 +2442,13 @@ extension AppDelegate {
       if let old = state.namespaces.first(where: { $0.id == id }) {
         let attached = Set(windows.flatMap(\.namespaces).flatMap(\.tabs).compactMap(\.herdrID))
         space.tabs += old.tabs.compactMap { tab in
-          guard !attached.contains(tab.id), !clientIsAvailable(tab.connectionID) else { return nil }
+          let unavailable = tab.panes?.contains { !clientIsAvailable($0.connectionID) } ?? !clientIsAvailable(tab.connectionID)
+          guard !attached.contains(tab.id), unavailable else { return nil }
           var saved = tab
           if let panes = saved.panes {
             saved.panes = panes.filter { !hiddenTerminalIDs.contains($0.terminalID) }
             if saved.panes?.isEmpty == true { return nil }
+            saved.layout = saved.layout?.retaining(Set(saved.panes?.map(\.terminalID) ?? []))
           }
           return saved
         }

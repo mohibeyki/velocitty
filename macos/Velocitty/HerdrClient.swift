@@ -509,10 +509,11 @@ final class HerdrClient {
     let version = String(decoding: try run(["--version"]), as: UTF8.self)
     let match = version.range(of: #"^herdr\s+v?([0-9]+\.[0-9]+\.[0-9]+)"#, options: .regularExpression)
     let numbers = match.map { version[$0].split(whereSeparator: { !$0.isNumber }).compactMap { Int($0) } } ?? []
+    let minimum = machine == nil ? [0, 8, 2] : [0, 9, 0]
     guard numbers.count >= 3,
-      Array(numbers.prefix(3)).lexicographicallyPrecedes([0, 8, 2]) == false
+      Array(numbers.prefix(3)).lexicographicallyPrecedes(minimum) == false
     else {
-      throw ConfigurationError("herdr 0.8.2 or newer is required for direct terminal attachment.")
+      throw ConfigurationError("herdr \(minimum.map(String.init).joined(separator: ".")) or newer is required for this connection.")
     }
     do { return try snapshot() }
     catch let error as RequestError where error.code == "server_not_running" { /* Start only an absent server. */ }
@@ -563,6 +564,11 @@ final class HerdrClient {
       let output = try ssh("/bin/sh -lc " + Self.quote(lookup))
       executable = String(decoding: output, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
       guard !executable.isEmpty, !executable.contains("\n") else { throw ConfigurationError("herdr was not found on " + machine.label) }
+    }
+    let remoteVersion = String(decoding: try ssh(Self.quote(executable) + " --version"), as: UTF8.self)
+    let versionParts = remoteVersion.split(whereSeparator: { !$0.isNumber }).compactMap { Int($0) }
+    guard versionParts.count >= 3, !Array(versionParts.prefix(3)).lexicographicallyPrecedes([0, 9, 0]) else {
+      throw ConfigurationError("Upgrade herdr to 0.9 or newer on " + machine.label + ". Found: " + remoteVersion.trimmingCharacters(in: .whitespacesAndNewlines))
     }
     let command = (["/usr/bin/env"] + remoteEnvironment.sorted { $0.key < $1.key }.map { $0.key + "=" + $0.value } + [executable, "--session", machine.session, "session", "list", "--json"]).map(Self.quote).joined(separator: " ")
     let response = try JSONSerialization.jsonObject(with: ssh(command)) as? [String: Any]

@@ -1599,6 +1599,9 @@ func runWorkspacePersistenceCheck() throws {
   movedWindow.toggleDecorations()
   precondition(movedWindow.window!.styleMask.contains(.titled) != titled)
   movedWindow.toggleDecorations()
+  extraRestored.window?.performClose(nil)
+  third.synchronizeHerdr(try client.snapshot(), client: client)
+  precondition(!third.windows.flatMap(\.allPanes).contains { $0.herdrTerminal?.pane.terminal_id == detachedID }, "Locally detached tabs must not leak into another window during reconciliation")
   for controller in Array(third.windows) { controller.closing = true; controller.window?.close() }
   print("Workspace persistence tests passed.")
 }
