@@ -7,8 +7,8 @@ engine, and uses [herdr](https://github.com/herdrdev/herdr) for persistent sessi
 
 Namespaces group projects, tabs group work, and panes show individual terminals.
 Velocitty owns spaces, presentation, and focus; herdr owns running processes.
-A space can mix tabs from local and remote connections. Each tab’s panes use one
-connection. Tabs can move between spaces or appear side by side without moving
+A space can mix tabs from local and remote connections. Each tab’s panes can span
+connections. Tabs can move between spaces or appear side by side without moving
 or restarting their processes.
 
 ## Roadmap

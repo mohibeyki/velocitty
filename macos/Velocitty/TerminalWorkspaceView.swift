@@ -320,16 +320,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   }
 
   private func applyPolledLayouts(_ snapshot: HerdrClient.Snapshot) {
-    guard let controller, !controller.muxBusy else { return }
-    var changed = false
-    for tab in controller.namespaces.flatMap(\.tabs) {
-      guard let layout = snapshot.layouts.first(where: { $0.tab_id == tab.herdrID }),
-        Set(layout.panes.map(\.pane_id)) == Set(tab.panes.compactMap { $0.herdrTerminal?.pane.pane_id }),
-        layout != tab.layout else { continue }
-      tab.layout = layout
-      changed = true
-    }
-    if changed { needsLayout = true }
+    // Backend geometry must not override the local workspace.
   }
 
   func agent(for pane: TerminalSession) -> Agent? {
@@ -396,27 +387,21 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
         let split = region.width * controller.companionRatio
         region = position == 0 ? NSRect(x: 0, y: 0, width: split - 3, height: region.height) : NSRect(x: split + 3, y: 0, width: region.width - split - 3, height: region.height)
       }
-    let completeLayout = tab.layout.map { layout in
-      layout.area.width > 0 && layout.area.height > 0 && layout.panes.count == tab.panes.count && tab.panes.allSatisfy { pane in
-        layout.panes.contains { $0.pane_id == pane.herdrTerminal?.pane.pane_id && $0.rect.width > 0 && $0.rect.height > 0 }
+    tab.ensureLayout()
+    var frames: [String: NSRect] = [:]
+    func place(_ node: PaneLayout, in frame: NSRect) {
+      switch node {
+      case .terminal(let id): frames[id] = frame.insetBy(dx: 2, dy: 2)
+      case .split(let direction, let ratio, let first, let second):
+        var a = frame, b = frame
+        if direction == "right" { a.size.width *= ratio; b.origin.x = a.maxX; b.size.width -= a.width }
+        else { a.size.height *= ratio; a.origin.y = frame.maxY - a.height; b.size.height -= a.height }
+        place(first, in: a); place(second, in: b)
       }
-    } ?? false
-    for (index, pane) in tab.panes.enumerated() {
-      // A missing snapshot must never stack interactive terminals on top of one another.
-      var frame = NSRect(x: CGFloat(index) * region.width / CGFloat(tab.panes.count), y: 0,
-        width: region.width / CGFloat(tab.panes.count), height: region.height)
-      if completeLayout, let layout = tab.layout, tab.panes.count > 1,
-        let rect = layout.panes.first(where: { $0.pane_id == pane.herdrTerminal?.pane.pane_id })?.rect {
-        let sx = region.width / max(1, CGFloat(layout.area.width))
-        let sy = region.height / max(1, CGFloat(layout.area.height))
-        frame = NSRect(x: CGFloat(rect.x - layout.area.x) * sx,
-          y: region.height - CGFloat(rect.y - layout.area.y + rect.height) * sy,
-          width: CGFloat(rect.width) * sx, height: CGFloat(rect.height) * sy).insetBy(dx: 2, dy: 2)
-      }
-      if tab.zoomed { frame = NSRect(origin: .zero, size: region.size) }
-      frame.origin.x += region.minX
-      frame.origin.y += region.minY
-      pane.chrome?.frame = frame
+    }
+    if let tree = tab.localLayout { place(tree, in: region) }
+    for pane in tab.panes {
+      pane.chrome?.frame = tab.zoomed ? region : frames[pane.herdrTerminal?.pane.terminal_id ?? ""] ?? region
     }
     layoutDividers(tab, region: region)
     }
@@ -437,10 +422,10 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
 
   private func layoutDividers(_ tab: TerminalTab, region: NSRect) {
     guard !paneDividers.contains(where: \.dragging) else { return }
-    guard !tab.zoomed, tab.layout?.panes.count == tab.panes.count, let root = tab.layoutTree, tab.treeLayout == tab.layout, let tabID = tab.herdrID else { return }
-    func visit(_ node: HerdrClient.LayoutNode, frame: NSRect, path: [Bool]) {
-      guard let first = node.first, let second = node.second, let direction = node.direction else { return }
-      let ratio = CGFloat(node.ratio ?? 0.5)
+    guard !tab.zoomed, let root = tab.localLayout, let tabID = tab.herdrID else { return }
+    func visit(_ node: PaneLayout, frame: NSRect, path: [Bool]) {
+      guard case .split(let direction, let value, let first, let second) = node else { return }
+      let ratio = CGFloat(value)
       let vertical = direction == "right"
       var firstFrame = frame, secondFrame = frame
       let divider = PaneDivider()

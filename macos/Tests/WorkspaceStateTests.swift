@@ -119,3 +119,22 @@ extension WorkspaceStateTests {
     XCTAssertEqual(try store.load(), WorkspaceState())
   }
 }
+
+extension WorkspaceStateTests {
+  func testMixedPaneReconciliationAndLocalGeometry() {
+    let a = WorkspaceState.Pane(id: "a", terminalID: "ta", workspaceID: "wa", cwd: nil)
+    let b = WorkspaceState.Pane(id: "b", terminalID: "gpu::tb", workspaceID: "gpu::wb", cwd: nil)
+    var tab = WorkspaceState.Tab(id: "local-tab", selectedPaneID: "b")
+    tab.panes = [a, b]
+    tab.layout = .terminal(a.terminalID).inserting(b.terminalID, beside: a.terminalID, direction: "down").settingRatio(path: [], ratio: 0.3)
+    var state = WorkspaceState(); state.namespaces = [.init(id: "project", tabs: [tab], selectedTabID: tab.id)]
+    var live = WorkspaceState.Tab(id: "backend-tab", selectedPaneID: "a"); live.panes = [a]
+    let updated = state.reconciled(endpoint: "local", live: [.init(id: "backend-space", tabs: [live], selectedTabID: nil)])
+    XCTAssertEqual(updated.namespaces, state.namespaces)
+    let deleted = updated.reconciled(endpoint: "local", live: [])
+    XCTAssertEqual(deleted.namespaces[0].tabs[0].panes, [b])
+    XCTAssertEqual(deleted.namespaces[0].tabs[0].layout, .terminal(b.terminalID))
+    XCTAssertTrue(tab.layout!.validated())
+    XCTAssertFalse(PaneLayout.split(direction: "right", ratio: 0.5, first: .terminal("a"), second: .terminal("a")).validated())
+  }
+}

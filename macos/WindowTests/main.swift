@@ -1471,11 +1471,11 @@ func runWorkspacePersistenceCheck() throws {
   precondition(abs(velokit_surface_font_size(window.session!.surface!) - inheritedFont) < 0.01, "Split must inherit the current font size")
   let splitTabID = window.activeTab.herdrID!
   window.setSplitRatio(tabID: splitTabID, path: [], ratio: 0.3); wait(first, window)
-  let resizedTree = try client.layoutTree(tabID: splitTabID)
-  precondition(abs((resizedTree.ratio ?? 0) - 0.3) < 0.01)
+  guard case .split(_, let resizedRatio, _, _) = window.activeTab.localLayout else { fatalError("Missing local tree") }
+  precondition(abs(resizedRatio - 0.3) < 0.01)
   window.equalizePanes(); wait(first, window)
-  let equalTree = try client.layoutTree(tabID: splitTabID)
-  precondition(abs((equalTree.ratio ?? 0) - 0.5) < 0.01)
+  guard case .split(_, let equalRatio, _, _) = window.activeTab.localLayout else { fatalError("Missing local tree") }
+  precondition(abs(equalRatio - 0.5) < 0.01)
   let originalPane = window.session!
   window.splitPane("left"); wait(first, window)
   window.workspaceView.layoutSubtreeIfNeeded()
@@ -1511,7 +1511,6 @@ func runWorkspacePersistenceCheck() throws {
   precondition(restored.workspaceView.savedSidebarState == .init(width: 276, compact: true))
   // External changes must attach exactly once without importing backend focus.
   let localSelection = restored.session!
-  let previousTabs = Set(restored.namespaces.flatMap(\.tabs).compactMap(\.herdrID))
   let subscriptionDeadline = Date(timeIntervalSinceNow: 3)
   while !client.eventsConnected && Date() < subscriptionDeadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.02)) }
   precondition(client.eventsConnected, "Event subscription must be acknowledged before changing the workspace")
@@ -1519,7 +1518,8 @@ func runWorkspacePersistenceCheck() throws {
   let eventHandler = client.onWorkspaceEvent
   client.onWorkspaceEvent = { eventReceived = true; eventHandler?() }
   let external = try client.create(workspace: selectedNamespace, name: "External", directory: directory.path)
-  let added = external.panes.first { !previousTabs.contains($0.tab_id) }!
+  let oldTerminalIDs = Set(restored.allPanes.compactMap { $0.herdrTerminal?.pane.terminal_id })
+  let added = external.panes.first { !oldTerminalIDs.contains($0.terminal_id) }!
   let beforeRollback = restored.allPanes.count
   let invalid = HerdrClient.Snapshot(layouts: external.layouts, workspaces: external.workspaces, tabs: external.tabs, panes: [added, added])
   do { try restored.addHerdrTerminals(invalid, excluding: []); preconditionFailure("Expected duplicate rejection") }
@@ -1531,7 +1531,7 @@ func runWorkspacePersistenceCheck() throws {
   let count = restored.allPanes.count
   second.synchronizeHerdr(external, client: client)
   precondition(restored.allPanes.count == count && restored.session === localSelection)
-  let externalTab = external.tabs.first { !previousTabs.contains($0.tab_id) }!
+  let externalTab = external.tabs.first { $0.tab_id == added.tab_id }!
   _ = try client.request(["tab", "close", externalTab.tab_id])
   second.synchronizeHerdr(try client.snapshot(), client: client)
   precondition(restored.allPanes.count == count - 1 && restored.session === localSelection)
@@ -1834,5 +1834,30 @@ func runMixedConnectionsCheck() throws {
   precondition(disabled.windows.count == 1 && disabled.windows[0].tabs.count == 1, "All-disabled startup retains the saved workspace")
   precondition(disabled.windows[0].session!.connectionSuspended)
   for controller in Array(disabled.windows) { controller.closing = true; controller.window?.close() }
+  profiles = profiles.map { var profile = $0; profile.enabled = true; return profile }
+  let mixed = try owner(); mixed.newWindow(); wait(mixed)
+  let mixedWindow = mixed.windows[0]
+  let original = mixedWindow.session!
+  let originalID = original.herdrTerminal!.pane.terminal_id
+  mixedWindow.splitPane("right", using: mixed.client(for: second.endpointID)!); wait(mixed, mixedWindow)
+  let splitID = mixedWindow.session!.herdrTerminal!.pane.terminal_id
+  precondition(mixedWindow.activeTab.panes.count == 2)
+  precondition(Set(mixedWindow.activeTab.panes.compactMap { $0.herdrTerminal?.client.endpointID }).count == 2)
+  let mixedTabID = mixedWindow.activeTab.herdrID!
+  mixed.scheduleWorkspaceSave(mixedWindow); mixed.flushWorkspaceSave()
+  for controller in Array(mixed.windows) { controller.closing = true; controller.window?.close() }
+  let reopened = try owner(); reopened.newWindow(); wait(reopened)
+  let restoredMixed = reopened.windows.flatMap(\.namespaces).flatMap(\.tabs).first { $0.herdrID == mixedTabID }!
+  precondition(Set(restoredMixed.panes.compactMap { $0.herdrTerminal?.pane.terminal_id }) == Set([originalID, splitID]), "Mixed panes must remain in one tab after relaunch")
+  precondition(Set(restoredMixed.localLayout!.terminals) == Set([originalID, splitID]))
+  let ownerWindow = restoredMixed.selected.windowController!
+  enable(reopened, second.endpointID, false)
+  precondition(restoredMixed.panes.count == 2 && restoredMixed.panes.contains { $0.connectionSuspended })
+  reopened.scheduleWorkspaceSave(ownerWindow); reopened.flushWorkspaceSave()
+  for controller in Array(reopened.windows) { controller.closing = true; controller.window?.close() }
+  let offline = try owner(); offline.newWindow(); wait(offline)
+  let offlineTab = offline.windows.flatMap(\.namespaces).flatMap(\.tabs).first { $0.herdrID == mixedTabID }!
+  precondition(offlineTab.panes.count == 2 && offlineTab.panes.contains { $0.connectionSuspended }, "Unavailable pane must retain its position in a mixed tab")
+  for controller in Array(offline.windows) { controller.closing = true; controller.window?.close() }
   print("Mixed connection tests passed.")
 }

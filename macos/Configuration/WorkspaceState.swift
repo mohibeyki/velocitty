@@ -7,6 +7,8 @@ public struct WorkspaceState: Codable, Equatable, Sendable {
     public var terminalID: String
     public var workspaceID: String
     public var cwd: String?
+    public var tabID: String? = nil
+    public var connectionID: String { terminalID.range(of: "::").map { String(terminalID[..<$0.lowerBound]) } ?? "local" }
     public init(id: String, terminalID: String, workspaceID: String, cwd: String?) {
       self.id = id; self.terminalID = terminalID; self.workspaceID = workspaceID; self.cwd = cwd
     }
@@ -17,6 +19,7 @@ public struct WorkspaceState: Codable, Equatable, Sendable {
     public var zoomed: Bool?
     public var panes: [Pane]?
     public var title: String?
+    public var layout: PaneLayout? = nil
     public var connectionID: String { id.range(of: "::").map { String(id[..<$0.lowerBound]) } ?? "local" }
     public init(id: String, selectedPaneID: String?, zoomed: Bool? = nil) {
       self.id = id; self.selectedPaneID = selectedPaneID; self.zoomed = zoomed
@@ -60,7 +63,7 @@ public struct WorkspaceState: Codable, Equatable, Sendable {
   public var pendingTerminalClosures: [String]?
   public var windows: [Window]?
   public var activeWindowID: String?
-  public var version = 3
+  public var version = 4
   public var namespaces: [Namespace] = []
   public var selectedNamespaceID: String?
   public var sidebar: Sidebar?
@@ -117,31 +120,48 @@ public struct WorkspaceState: Codable, Equatable, Sendable {
   public func reconciled(endpoint: String, live: [Namespace]) -> Self {
     var result = self
     let liveTabs = Dictionary(uniqueKeysWithValues: live.flatMap(\.tabs).map { ($0.id, $0) })
+    let livePanes = Dictionary(uniqueKeysWithValues: live.flatMap(\.tabs).flatMap { $0.panes ?? [] }.map { ($0.terminalID, $0) })
     var assigned = Set<String>()
+    var assignedTabs = Set<String>()
     for index in result.namespaces.indices {
       result.namespaces[index].tabs = result.namespaces[index].tabs.compactMap { saved in
-        guard saved.connectionID == endpoint else { assigned.insert(saved.id); return saved }
-        guard var current = liveTabs[saved.id] else { return nil }
-        current.zoomed = saved.zoomed
-        if let selected = saved.selectedPaneID, current.panes?.contains(where: { $0.id == selected }) == true { current.selectedPaneID = selected }
-        assigned.insert(current.id)
+        var current = saved
+        if let panes = saved.panes {
+          current.panes = panes.compactMap { pane in
+            pane.connectionID == endpoint ? livePanes[pane.terminalID] : pane
+          }
+          guard let surviving = current.panes, !surviving.isEmpty else { return nil }
+          assigned.formUnion(surviving.map(\.terminalID))
+          current.layout = saved.layout?.retaining(Set(surviving.map(\.terminalID)))
+          if !surviving.contains(where: { $0.id == current.selectedPaneID }) { current.selectedPaneID = surviving.first?.id }
+        } else if saved.connectionID == endpoint {
+          guard let replacement = liveTabs[saved.id] else { return nil }
+          current.panes = replacement.panes
+          assigned.formUnion(replacement.panes?.map(\.terminalID) ?? [])
+        }
+        assignedTabs.insert(current.id)
         return current
       }
     }
     for workspace in live {
-      let added = workspace.tabs.filter { !assigned.contains($0.id) }
+      let added = workspace.tabs.compactMap { tab -> Tab? in
+        var tab = tab
+        if let panes = tab.panes {
+          tab.panes = panes.filter { !assigned.contains($0.terminalID) }
+          guard tab.panes?.isEmpty == false else { return nil }
+        } else if assignedTabs.contains(tab.id) { return nil }
+        return tab
+      }
       guard !added.isEmpty else { continue }
-      // Backend workspaces only provide an initial destination for unknown tabs.
       let index = result.namespaces.firstIndex { space in
         space.id == workspace.id || space.tabs.contains { tab in tab.panes?.contains { $0.workspaceID == workspace.id } == true }
       }
-      if let index { result.namespaces[index].tabs += added }
-      else {
-        var space = workspace
-        space.tabs = added
-        result.namespaces.append(space)
-      }
-      assigned.formUnion(added.map(\.id))
+      if let index {
+        for tab in added {
+          if let ti = result.namespaces[index].tabs.firstIndex(where: { $0.id == tab.id }) { result.namespaces[index].tabs[ti].panes = (result.namespaces[index].tabs[ti].panes ?? []) + (tab.panes ?? []) }
+          else { result.namespaces[index].tabs.append(tab) }
+        }
+      } else { var space = workspace; space.tabs = added; result.namespaces.append(space) }
     }
     result.namespaces.removeAll { $0.tabs.isEmpty }
     for index in result.namespaces.indices {
@@ -158,7 +178,7 @@ public struct WorkspaceState: Codable, Equatable, Sendable {
       }
       result.windows = windows.filter { !$0.namespaceIDs.isEmpty }
     }
-    result.version = 3
+    result.version = 4
     return result
   }
 
@@ -187,7 +207,7 @@ public struct WorkspaceStateStore {
     do { data = try Data(contentsOf: url) }
     catch let error as CocoaError where error.code == .fileReadNoSuchFile { return WorkspaceState() }
     let state = try JSONDecoder().decode(WorkspaceState.self, from: data)
-    guard (1...3).contains(state.version) else { throw ConfigurationError("Unsupported workspace state version: \(state.version)") }
+    guard (1...4).contains(state.version) else { throw ConfigurationError("Unsupported workspace state version: \(state.version)") }
     // Reject malformed state rather than overwriting it during this run.
     let namespaces = state.namespaces.map(\.id)
     let tabs = state.namespaces.flatMap(\.tabs).map(\.id)
@@ -195,6 +215,11 @@ public struct WorkspaceStateStore {
       namespaces.allSatisfy({ !$0.isEmpty }), tabs.allSatisfy({ !$0.isEmpty }),
       state.sidebar.map({ $0.width.isFinite && (160...400).contains($0.width) }) ?? true
     else { throw ConfigurationError("Invalid workspace state.") }
+    let terminals = state.namespaces.flatMap(\.tabs).flatMap { $0.panes ?? [] }.map(\.terminalID)
+    guard Set(terminals).count == terminals.count,
+      state.namespaces.flatMap(\.tabs).allSatisfy({ tab in
+        tab.layout.map { $0.validated() && Set($0.terminals) == Set(tab.panes?.map(\.terminalID) ?? []) } ?? true
+      }) else { throw ConfigurationError("Invalid pane layout in workspace state.") }
     if let windows = state.windows {
       guard Set(windows.map(\.id)).count == windows.count,
         Set(windows.flatMap(\.namespaceIDs)).count == windows.flatMap(\.namespaceIDs).count,
@@ -219,7 +244,7 @@ public struct WorkspaceStateStore {
     let data = try encoder.encode(state)
     try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
     if let previous = try? Data(contentsOf: url),
-      let old = try? JSONDecoder().decode(WorkspaceState.self, from: previous), old.version < 3 {
+      let old = try? JSONDecoder().decode(WorkspaceState.self, from: previous), old.version < 4 {
       let backup = url.appendingPathExtension("v\(old.version).backup")
       if !FileManager.default.fileExists(atPath: backup.path) { try previous.write(to: backup, options: .withoutOverwriting) }
     }
