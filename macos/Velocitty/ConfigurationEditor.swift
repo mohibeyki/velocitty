@@ -81,6 +81,11 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
   private let table = NSTableView()
   private let detail = NSTextField(wrappingLabelWithString: "")
   private let value = NSTextField()
+  private let number = NSStepper()
+  private let color = NSColorWell()
+  private let addEntry = NSButton(title: "Add Entry…", target: nil, action: nil)
+  private let removeEntry = NSButton(title: "Remove Entry…", target: nil, action: nil)
+  private let diagnostics = NSButton(title: "Diagnostics…", target: nil, action: nil)
   private let enabled = NSButton(checkboxWithTitle: "Enabled", target: nil, action: nil)
   private let editor = NSTextView()
   private let status = NSTextField(wrappingLabelWithString: "")
@@ -121,6 +126,11 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
     search.action = #selector(filterSettings)
     category.addItems(withTitles: ["All Settings", "Font", "Colors & Appearance", "Input & Clipboard", "Windows & Tabs", "Shell & Terminal", "Workspace", "Advanced"])
     category.target = self; category.action = #selector(filterSettings)
+    number.target = self; number.action = #selector(stepValue); number.minValue = -1_000_000; number.maxValue = 1_000_000
+    color.target = self; color.action = #selector(colorValue)
+    addEntry.target = self; addEntry.action = #selector(appendEntry)
+    removeEntry.target = self; removeEntry.action = #selector(deleteEntry)
+    diagnostics.target = self; diagnostics.action = #selector(showDiagnostics)
     choices.target = self; choices.action = #selector(chooseValue)
     choices.completes = true
     reset.target = self; reset.action = #selector(resetValue)
@@ -163,7 +173,7 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
     let revert = NSButton(title: "Reload File", target: self, action: #selector(revertDocument))
     let external = NSButton(title: "Open in Editor", target: self, action: #selector(openExternal))
     status.textColor = .secondaryLabelColor
-    for view in [filePicker, search, category, list, detail, value, choices, enabled, reset, apply, rawLabel, advanced, status, save, revert, external] {
+    for view in [filePicker, search, category, list, detail, value, choices, enabled, reset, apply, rawLabel, advanced, status, save, revert, external, number, color, addEntry, removeEntry, diagnostics] {
       view.translatesAutoresizingMaskIntoConstraints = false
       root.addSubview(view)
     }
@@ -172,19 +182,26 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
       search.topAnchor.constraint(equalTo: filePicker.bottomAnchor, constant: 12), search.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16), search.widthAnchor.constraint(equalToConstant: 245),
       category.topAnchor.constraint(equalTo: search.bottomAnchor, constant: 8), category.leadingAnchor.constraint(equalTo: search.leadingAnchor), category.widthAnchor.constraint(equalTo: search.widthAnchor),
       list.topAnchor.constraint(equalTo: category.bottomAnchor, constant: 8), list.leadingAnchor.constraint(equalTo: search.leadingAnchor), list.widthAnchor.constraint(equalTo: search.widthAnchor), list.bottomAnchor.constraint(equalTo: save.topAnchor, constant: -16),
-      detail.leadingAnchor.constraint(equalTo: list.trailingAnchor, constant: 16), detail.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16), detail.topAnchor.constraint(equalTo: search.topAnchor), detail.heightAnchor.constraint(equalToConstant: 116),
-      value.leadingAnchor.constraint(equalTo: detail.leadingAnchor), value.trailingAnchor.constraint(equalTo: detail.trailingAnchor), value.topAnchor.constraint(equalTo: detail.bottomAnchor, constant: 8),
+      detail.leadingAnchor.constraint(equalTo: list.trailingAnchor, constant: 16), detail.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16), detail.topAnchor.constraint(equalTo: search.topAnchor), detail.heightAnchor.constraint(equalToConstant: 158),
+      value.leadingAnchor.constraint(equalTo: detail.leadingAnchor), value.trailingAnchor.constraint(equalTo: detail.trailingAnchor, constant: -38), value.topAnchor.constraint(equalTo: detail.bottomAnchor, constant: 8),
+      number.trailingAnchor.constraint(equalTo: detail.trailingAnchor), number.centerYAnchor.constraint(equalTo: value.centerYAnchor),
+      color.trailingAnchor.constraint(equalTo: detail.trailingAnchor), color.centerYAnchor.constraint(equalTo: value.centerYAnchor), color.widthAnchor.constraint(equalToConstant: 30), color.heightAnchor.constraint(equalToConstant: 24),
+      addEntry.leadingAnchor.constraint(equalTo: detail.leadingAnchor), addEntry.topAnchor.constraint(equalTo: value.bottomAnchor, constant: 8),
+      removeEntry.leadingAnchor.constraint(equalTo: addEntry.trailingAnchor, constant: 8), removeEntry.centerYAnchor.constraint(equalTo: addEntry.centerYAnchor),
+      diagnostics.leadingAnchor.constraint(equalTo: detail.leadingAnchor), diagnostics.centerYAnchor.constraint(equalTo: rawLabel.centerYAnchor),
       choices.leadingAnchor.constraint(equalTo: value.leadingAnchor), choices.trailingAnchor.constraint(equalTo: value.trailingAnchor), choices.topAnchor.constraint(equalTo: value.topAnchor),
       reset.centerXAnchor.constraint(equalTo: detail.centerXAnchor), reset.centerYAnchor.constraint(equalTo: enabled.centerYAnchor),
       enabled.leadingAnchor.constraint(equalTo: detail.leadingAnchor), enabled.topAnchor.constraint(equalTo: value.bottomAnchor, constant: 8),
       apply.trailingAnchor.constraint(equalTo: detail.trailingAnchor), apply.topAnchor.constraint(equalTo: value.bottomAnchor, constant: 8),
-      rawLabel.leadingAnchor.constraint(equalTo: detail.leadingAnchor), rawLabel.topAnchor.constraint(equalTo: apply.bottomAnchor, constant: 12),
+      rawLabel.leadingAnchor.constraint(equalTo: diagnostics.trailingAnchor, constant: 12), rawLabel.topAnchor.constraint(equalTo: apply.bottomAnchor, constant: 12),
       advanced.leadingAnchor.constraint(equalTo: detail.leadingAnchor), advanced.trailingAnchor.constraint(equalTo: detail.trailingAnchor), advanced.topAnchor.constraint(equalTo: rawLabel.bottomAnchor, constant: 6), advanced.bottomAnchor.constraint(equalTo: list.bottomAnchor),
       save.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16), save.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -14),
       revert.trailingAnchor.constraint(equalTo: save.leadingAnchor, constant: -8), revert.centerYAnchor.constraint(equalTo: save.centerYAnchor),
       external.trailingAnchor.constraint(equalTo: revert.leadingAnchor, constant: -8), external.centerYAnchor.constraint(equalTo: save.centerYAnchor),
       status.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16), status.trailingAnchor.constraint(equalTo: external.leadingAnchor, constant: -12), status.centerYAnchor.constraint(equalTo: save.centerYAnchor), status.heightAnchor.constraint(lessThanOrEqualToConstant: 46),
     ])
+    detail.font = .systemFont(ofSize: 12)
+    detail.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
     filterSettings()
   }
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -202,7 +219,7 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
     }
     table.reloadData()
     if !filtered.isEmpty { table.selectRowIndexes(IndexSet(integer: filtered.firstIndex { $0.table + "." + $0.key == selected } ?? 0), byExtendingSelection: false) }
-    else { detail.stringValue = "No matching settings"; value.isEnabled = false; choices.isHidden = true; enabled.isHidden = true; reset.isEnabled = false }
+    else { number.isHidden = true; color.isHidden = true; addEntry.isHidden = true; removeEntry.isHidden = true; detail.stringValue = "No matching settings"; value.isEnabled = false; choices.isHidden = true; enabled.isHidden = true; reset.isEnabled = false }
   }
   func controlTextDidChange(_ obj: Notification) { filterSettings() }
   func tableViewSelectionDidChange(_ notification: Notification) {
@@ -230,14 +247,81 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
     choices.stringValue = normalized
     choices.isHidden = suggestions.isEmpty
     value.isHidden = !choices.isHidden
-    let terminalSources = appOwner?.runtime?.settings.options.filter { $0.key == setting.key.replacingOccurrences(of: "_", with: "-") }.compactMap { $0.source?.path } ?? []
-    let sources = setting.table == "interface" ? [appOwner?.runtime?.settings.interfaceSources[setting.key]?.path].compactMap { $0 } : terminalSources
-    detail.stringValue = setting.table + "." + setting.key + "\n" + setting.summary + "\nDefault: " + String(fallback.prefix(180)) + "\n" + (sources.isEmpty ? "Editing this file; includes may override it." : "Contributing source: " + Array(Set(sources)).sorted().joined(separator: ", "))
+    number.isHidden = Double(normalized).map { !$0.isFinite } ?? true
+    if let numeric = Double(normalized), numeric.isFinite {
+      number.doubleValue = numeric; number.increment = normalized.contains(".") ? 0.1 : 1
+    }
+    let isColor = normalized.hasPrefix("#") && normalized.count == 7 && UInt32(normalized.dropFirst(), radix: 16) != nil
+    color.isHidden = !isColor
+    if isColor, let hex = UInt32(normalized.dropFirst(), radix: 16) {
+      color.color = NSColor(srgbRed: CGFloat(hex >> 16 & 255) / 255, green: CGFloat(hex >> 8 & 255) / 255, blue: CGFloat(hex & 255) / 255, alpha: 1)
+    }
+    let repeatable = setting.table == "terminal" && TerminalSettings.repeatable.contains(setting.key.replacingOccurrences(of: "_", with: "-"))
+    addEntry.isHidden = !repeatable; removeEntry.isHidden = !repeatable
+    if repeatable { enabled.isHidden = true; reset.isHidden = true } else { reset.isHidden = false }
+    let config = appOwner?.runtime?.settings
+    let key = setting.key.replacingOccurrences(of: "_", with: "-")
+    let sources = setting.table == "interface" ? [config?.interfaceSources[setting.key]?.path].compactMap { $0 } : config?.options.filter { $0.key == key }.compactMap { $0.source?.path } ?? []
+    var effective = fallback
+    if setting.table == "interface" { effective = config?.interface[setting.key] ?? NamespaceAppearance.defaults[setting.key] ?? fallback }
+    else if let config = appOwner?.runtime?.config, let raw = key.withCString({ velokit_config_format(config, $0) }) { effective = String(cString: raw).trimmingCharacters(in: .whitespacesAndNewlines) }
+    let newTerminal = ["command", "initial_command", "working_directory", "env", "shell_integration", "term"].contains(setting.key)
+    let effect = newTerminal ? "Applies to new terminals; herdr owns existing processes." : "Reload applies supported changes to open terminals. Window creation options apply to new windows."
+    let override = configDocument.value(table: setting.table, key: setting.key).map { String($0.prefix(90)) } ?? "None in this file"
+    detail.stringValue = setting.table + "." + setting.key + "\n" + setting.summary
+      + "\nEffective: " + String(effective.prefix(160)) + "\nFile override: " + override
+      + "\nSource: " + (sources.last ?? "Built-in default") + "\n" + effect
+    detail.toolTip = "Default: " + fallback + "\nEffective: " + effective + "\nSources in load order: " + sources.joined(separator: " → ")
+
   }
   func textDidChange(_ notification: Notification) {
     configDocument.text = editor.string
     window?.isDocumentEdited = configDocument.hasChanges
   }
+  @objc private func stepValue() { value.stringValue = String(format: "%g", number.doubleValue); applyValue() }
+  @objc private func colorValue() {
+    guard let rgb = color.color.usingColorSpace(.sRGB) else { return }
+    value.stringValue = String(format: "\"#%02X%02X%02X\"", Int((rgb.redComponent * 255).rounded()), Int((rgb.greenComponent * 255).rounded()), Int((rgb.blueComponent * 255).rounded()))
+    applyValue()
+  }
+  private func entries() -> [String] {
+    guard filtered.indices.contains(table.selectedRow) else { return [] }
+    let setting = filtered[table.selectedRow]
+    return (try? AppConfiguration.parse(Data("[terminal]\n\(setting.key)=\(value.stringValue)".utf8)).options.map(\.value)) ?? []
+  }
+  private func setEntries(_ values: [String]) {
+    if let data = try? JSONEncoder().encode(values), let text = String(data: data, encoding: .utf8) {
+      value.stringValue = text; choices.isHidden = true; value.isHidden = false; applyValue()
+    }
+  }
+  @objc private func appendEntry() {
+    guard let window, filtered.indices.contains(table.selectedRow) else { return }
+    let alert = NSAlert(); alert.messageText = "Add " + filtered[table.selectedRow].key.replacingOccurrences(of: "_", with: " ")
+    let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
+    field.placeholderString = filtered[table.selectedRow].key == "keybind" ? "super+shift+t=new_tab" : "Entry value"
+    alert.accessoryView = field; alert.addButton(withTitle: "Add"); alert.addButton(withTitle: "Cancel")
+    alert.beginSheetModal(for: window) { [weak self] response in
+      guard response == .alertFirstButtonReturn, let self else { return }; self.setEntries(self.entries() + [field.stringValue])
+    }
+    window.attachedSheet?.makeFirstResponder(field)
+  }
+  @objc private func deleteEntry() {
+    guard let window else { return }; let values = entries(); guard !values.isEmpty else { return }
+    let alert = NSAlert(); alert.messageText = "Remove Entry"
+    let picker = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 360, height: 26)); picker.addItems(withTitles: values)
+    alert.accessoryView = picker; alert.addButton(withTitle: "Remove"); alert.addButton(withTitle: "Cancel")
+    alert.beginSheetModal(for: window) { [weak self] response in
+      guard response == .alertFirstButtonReturn, values.indices.contains(picker.indexOfSelectedItem) else { return }
+      var updated = values; updated.remove(at: picker.indexOfSelectedItem); self?.setEntries(updated)
+    }
+  }
+  @objc private func showDiagnostics() {
+    guard let window else { return }
+    let messages = appOwner?.runtime?.settings.diagnostics ?? []
+    let alert = NSAlert(); alert.messageText = messages.isEmpty ? "No configuration warnings" : "Configuration warnings"
+    alert.informativeText = messages.joined(separator: "\n"); alert.addButton(withTitle: "OK"); alert.beginSheetModal(for: window)
+  }
+
   @objc private func chooseValue() {
     // JSON string escaping is also valid TOML basic-string escaping.
     let encoder = JSONEncoder(); encoder.outputFormatting = [.withoutEscapingSlashes]
@@ -283,6 +367,7 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
       status.textColor = diagnostics.isEmpty ? .secondaryLabelColor : .systemOrange
       status.stringValue = diagnostics.isEmpty ? "Saved. Process settings apply to new terminals." : "Saved with configuration warnings. " + diagnostics.joined(separator: "\n")
       status.toolTip = status.stringValue
+      tableViewSelectionDidChange(Notification(name: NSTableView.selectionDidChangeNotification))
     } catch { showError(error) }
   }
   private func confirmDiscard(_ proceed: @escaping () -> Void) {
