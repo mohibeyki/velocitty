@@ -53,6 +53,7 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
       return "Advanced"
     }
     var summary: String {
+      if table == "interface" { return "Workspace appearance. Terminal colors are configured separately." }
       switch key {
       case "font_family": return "Typeface for terminal text. Font fallback remains available in Advanced."
       case "font_size": return "Terminal font size in points."
@@ -193,14 +194,14 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
     return NSTextField(labelWithString: filtered[row].key.replacingOccurrences(of: "_", with: " "))
   }
   @objc private func filterSettings() {
-    let selected = filtered.indices.contains(table.selectedRow) ? filtered[table.selectedRow].key : nil
+    let selected = filtered.indices.contains(table.selectedRow) ? filtered[table.selectedRow].table + "." + filtered[table.selectedRow].key : nil
     let query = search.stringValue.replacingOccurrences(of: "-", with: "_").replacingOccurrences(of: " ", with: "_")
     filtered = settings.filter {
       (category.indexOfSelectedItem == 0 || $0.category == category.titleOfSelectedItem) &&
       (query.isEmpty || ($0.table + "." + $0.key).localizedCaseInsensitiveContains(query) || $0.summary.localizedCaseInsensitiveContains(search.stringValue))
     }
     table.reloadData()
-    if !filtered.isEmpty { table.selectRowIndexes(IndexSet(integer: filtered.firstIndex { $0.key == selected } ?? 0), byExtendingSelection: false) }
+    if !filtered.isEmpty { table.selectRowIndexes(IndexSet(integer: filtered.firstIndex { $0.table + "." + $0.key == selected } ?? 0), byExtendingSelection: false) }
     else { detail.stringValue = "No matching settings"; value.isEnabled = false; choices.isHidden = true; enabled.isHidden = true; reset.isEnabled = false }
   }
   func controlTextDidChange(_ obj: Notification) { filterSettings() }
@@ -210,7 +211,9 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
     value.isEnabled = true; reset.isEnabled = true
     let fallback = defaults.value(table: setting.table, key: setting.key) ?? "\"\""
     value.stringValue = configDocument.value(table: setting.table, key: setting.key) ?? fallback
-    let normalized = value.stringValue.trimmingCharacters(in: CharacterSet(charactersIn: "\" "))
+    let fragment = try? AppConfiguration.parse(Data("[\(setting.table)]\n\(setting.key) = \(value.stringValue)\n".utf8), source: configDocument.url)
+    let decoded = setting.table == "interface" ? fragment?.interface[setting.key] : fragment?.options.first { $0.key == setting.key.replacingOccurrences(of: "_", with: "-") }?.value
+    let normalized = decoded ?? value.stringValue
     enabled.isHidden = !["true", "false"].contains(normalized)
     enabled.state = normalized == "true" ? .on : .off
     choices.removeAllItems()
@@ -221,6 +224,7 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
     case "cursor_style": suggestions = ["block", "bar", "underline", "block_hollow"]
     default: break
     }
+    if setting.table == "interface", setting.key == "theme" { suggestions = ["auto", "light", "dark"] }
     if value.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("[") { suggestions = [] }
     choices.addItems(withObjectValues: suggestions)
     choices.stringValue = normalized

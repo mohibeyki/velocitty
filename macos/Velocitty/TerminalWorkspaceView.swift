@@ -74,6 +74,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   private let tabMaterial = NSVisualEffectView()
   let tabScroll = NSScrollView()
   let tabButtons = NSStackView()
+  private weak var scrolledTab: TerminalTab?
   let addTab = NSButton(title: "+", target: nil, action: nil)
   let panes = NSView()
 
@@ -177,7 +178,8 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
           self.controller?.owner?.synchronizeHerdr(snapshot, client: client)
           self.updateAgents(snapshot)
           self.applyPolledLayouts(snapshot)
-        case .failure:
+        case .failure(let error):
+          self.controller?.owner?.connectionFailed(client, error: error)
           let stale = self.agents.mapValues { $0 }
           for (id, agent) in stale where client.owns(id) { self.agents[id] = Agent(name: agent.name, status: "unknown") }
           self.refreshTabs()
@@ -205,7 +207,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     }
     pollBranches(directories: directories)
     for namespace in controller?.namespaces ?? [] {
-      guard let terminal = namespace.selected.selected.herdrTerminal, terminal.client.machine != nil else { continue }
+      guard let terminal = namespace.selected.selected.herdrTerminal, terminal.client.machine != nil, terminal.client.isEnabled else { continue }
       let path = directories[terminal.pane.pane_id] ?? directory(for: namespace)
       let key = terminal.client.endpointID + "::" + path
       let now = ProcessInfo.processInfo.systemUptime
@@ -332,7 +334,8 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
 
   func agent(for pane: TerminalSession) -> Agent? {
     guard let id = pane.herdrTerminal?.pane.pane_id else { return nil }
-    return agents[id]
+    guard let agent = agents[id] else { return nil }
+    return pane.connectionSuspended || pane.recovering || pane.herdrTerminal?.client.isEnabled == false ? Agent(name: agent.name, status: "unknown") : agent
   }
 
   func present() {
@@ -375,7 +378,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     tabMaterial.frame = NSRect(x: 0, y: height - tabHeight, width: width, height: tabHeight)
     toggleSidebar.frame = NSRect(x: 4, y: height - 29, width: 26, height: 24)
     tabScroll.frame = NSRect(x: 34, y: height - 32, width: max(0, width - 72), height: 30)
-    let tabWidth = max(150, tabScroll.bounds.width / CGFloat(max(1, tabButtons.arrangedSubviews.count)))
+    let tabWidth = max(160, min(260, tabScroll.bounds.width / CGFloat(max(1, tabButtons.arrangedSubviews.count))))
     for item in tabButtons.arrangedSubviews {
       item.constraints.first { $0.identifier == "tabWidth" }?.constant = tabWidth
     }
@@ -471,9 +474,9 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   override func draw(_ dirtyRect: NSRect) {
     super.draw(dirtyRect)
     guard let controller, controller.visiblePanes.count > 1, let chrome = controller.session?.chrome else { return }
-    NSColor.controlAccentColor.setStroke()
-    let path = NSBezierPath(rect: convert(chrome.bounds, from: chrome).insetBy(dx: -1, dy: -1))
-    path.lineWidth = 2
+    (window?.isKeyWindow == true ? NSColor.controlAccentColor : .secondaryLabelColor).withAlphaComponent(0.8).setStroke()
+    let path = NSBezierPath(rect: convert(chrome.bounds, from: chrome).insetBy(dx: 0.75, dy: 0.75))
+    path.lineWidth = 1.5
     path.stroke()
   }
   func refreshTabs() {
@@ -484,6 +487,11 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     var contentWidth: CGFloat = 0
     for (index, tab) in controller.tabs.enumerated() {
       let label = title(for: tab)
+      let client = tab.selected.herdrTerminal?.client
+      let unavailable = client?.isEnabled == false || tab.selected.connectionSuspended || tab.selected.recovering
+      let state = client?.isEnabled == false ? "Disabled" : unavailable ? "Disconnected" : "Connected"
+      let location = client?.machine?.target ?? "Local"
+      let connection = [client?.endpointLabel ?? "Standalone", location, client?.sessionName ?? "", state].joined(separator: " · ")
       let item = WorkspaceTabItem(frame: NSRect(x: 0, y: 0, width: 160, height: 28))
       item.selected = controller.activeTab === tab
       let button = WorkspaceActionButton(title: (tab.hasBell ? "● " : "") + label,
@@ -493,7 +501,8 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
       button.font = .systemFont(ofSize: 12, weight: controller.activeTab === tab ? .medium : .regular)
       button.contentTintColor = controller.activeTab === tab ? .labelColor : .secondaryLabelColor
       button.lineBreakMode = .byTruncatingTail
-      button.toolTip = label
+      button.toolTip = label + "\n" + connection
+      button.setAccessibilityLabel(label + ", " + connection)
       button.target = button
       button.action = #selector(WorkspaceActionButton.invoke)
       button.onPress = { [weak controller, weak tab] in
@@ -529,6 +538,11 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
       badge.target = badge
       badge.action = #selector(WorkspaceActionButton.invoke)
       badge.onPress = button.onPress
+      let connectionIcon = NSImageView(frame: NSRect(x: 28, y: 8, width: 12, height: 12))
+      connectionIcon.image = NSImage(systemSymbolName: unavailable ? "network.slash" : client?.machine == nil ? "desktopcomputer" : "network", accessibilityDescription: connection)
+      connectionIcon.contentTintColor = unavailable ? .systemOrange : .tertiaryLabelColor
+      connectionIcon.toolTip = connection
+      item.addSubview(connectionIcon)
       item.addSubview(button)
       item.addSubview(close)
       item.addSubview(badge)
@@ -540,6 +554,14 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
       tabButtons.addArrangedSubview(item)
     }
     tabButtons.frame = NSRect(origin: .zero, size: NSSize(width: contentWidth, height: 30))
+    if scrolledTab !== controller.activeTab, let index = controller.tabs.firstIndex(where: { $0 === controller.activeTab }), tabButtons.arrangedSubviews.indices.contains(index) {
+      scrolledTab = controller.activeTab
+      DispatchQueue.main.async { [weak self, weak controller] in
+        guard let self, let controller, let index = controller.tabs.firstIndex(where: { $0 === self.scrolledTab }), self.tabButtons.arrangedSubviews.indices.contains(index) else { return }
+        self.layoutSubtreeIfNeeded(); self.tabButtons.layoutSubtreeIfNeeded()
+        self.tabButtons.arrangedSubviews[index].scrollToVisible(self.tabButtons.arrangedSubviews[index].bounds)
+      }
+    }
     needsLayout = true
   }
   private func title(for tab: TerminalTab) -> String {
@@ -585,7 +607,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     guard let namespace = namespace(for: item) else { return 34 }
     let hasBranch = branch(for: namespace) != nil
     let hasAgents = namespace.tabs.flatMap(\.panes).contains { agent(for: $0) != nil }
-    return 50 + (hasBranch ? 18 : 0) + (hasAgents ? metric("agent_icon_size") + 8 : 0)
+    return 46 + (hasBranch ? 16 : 0) + (hasAgents ? metric("agent_icon_size") + 8 : 0)
   }
   func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
     guard let namespace = namespace(for: item) else { return nil }
@@ -599,7 +621,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     title.translatesAutoresizingMaskIntoConstraints = false
     cell.addSubview(title)
     cell.textField = title
-    cell.toolTip = namespace.name + " — " + (namespace.selected.selected.herdrTerminal?.client.endpointLabel ?? "Local")
+    cell.toolTip = namespace.name + " — " + Set(namespace.tabs.compactMap { $0.selected.herdrTerminal?.client.endpointLabel }).sorted().joined(separator: ", ")
     let members = namespace.tabs.flatMap(\.panes).filter { agent(for: $0) != nil }
     NSLayoutConstraint.activate([
       title.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
@@ -626,13 +648,14 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
         label.topAnchor.constraint(equalTo: cell.topAnchor, constant: top),
       ])
     }
-    var detailTop: CGFloat = 27
+    var detailTop: CGFloat = 25
     if let branch = branch(for: namespace) {
       detail(branch, top: detailTop)
-      detailTop += 18
+      detailTop += 16
     }
-    let host = namespace.selected.selected.herdrTerminal?.client.machine?.label
-    detail(host.map { $0 + ": " + displayDirectory } ?? displayDirectory, top: detailTop, tooltip: cwd)
+    let host = namespace.selected.selected.herdrTerminal?.client
+    let hostLabel = host.flatMap { $0.endpointID == "local" ? nil : $0.endpointLabel }
+    detail(hostLabel.map { $0 + ": " + displayDirectory } ?? displayDirectory, top: detailTop, tooltip: cwd)
     guard !members.isEmpty else { return cell }
     let size = metric("agent_icon_size")
     let statusScroll = NSScrollView()

@@ -45,6 +45,7 @@ final class CommandPalette: NSPanel, NSTextFieldDelegate, NSWindowDelegate, NSTa
     }
     if provider == nil, terminal.session?.herdrTerminal != nil {
       entries += [
+        Entry(title: "Herdr Connections…", detail: "Enable connections, reconnect, or create a tab on another server.", action: "velocitty:connections"),
         Entry(title: "Show Tab Alongside…", detail: "Show another namespace or server beside this tab.", action: "velocitty:alongside"),
         Entry(title: "Stop Showing Alongside", detail: "Return to one presented tab without closing terminals.", action: "velocitty:stop-alongside"),
         Entry(title: "Move Tab to Namespace…", detail: "Move all panes while retaining their running processes.", action: "velocitty:move-tab"),
@@ -253,6 +254,7 @@ final class CommandPalette: NSPanel, NSTextFieldDelegate, NSWindowDelegate, NSTa
     if let run = entry.run { run(); return }
     terminal?.window?.makeFirstResponder(terminal)
     switch action {
+    case "velocitty:connections": terminal?.session?.windowController?.owner?.showConnections()
     case "velocitty:alongside": terminal?.session?.windowController?.chooseCompanion()
     case "velocitty:stop-alongside": terminal?.session?.windowController?.stopAlongside()
     case "velocitty:move-tab": terminal?.session?.windowController?.chooseTabNamespace()
