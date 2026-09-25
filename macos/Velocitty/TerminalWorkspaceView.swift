@@ -59,6 +59,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   private var agentTimer: Timer?
   private var pollingAgents = false
   private var lastAgentPoll = -Double.infinity
+  private var accessibilityObserver: NSObjectProtocol?
 
   var showsTabBar: Bool {
     guard muxEnabled else { return false }
@@ -81,6 +82,10 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   init(controller: TerminalWindowController) {
     self.controller = controller
     super.init(frame: NSRect(x: 0, y: 0, width: 960, height: 640))
+    accessibilityObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+      guard let self, let controller = self.controller else { return }
+      self.refreshNamespaces(controller)
+    }
     autoresizingMask = [.width, .height]
     wantsLayer = true
     splitView.isVertical = true
@@ -146,7 +151,10 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   }
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-  deinit { agentTimer?.invalidate(); sidebarAnimation?.invalidate(); gitRefresh?.invalidate(); gitWatchers.values.forEach { $0.cancel() } }
+  deinit {
+    agentTimer?.invalidate(); sidebarAnimation?.invalidate(); gitRefresh?.invalidate(); gitWatchers.values.forEach { $0.cancel() }
+    if let accessibilityObserver { NSWorkspace.shared.notificationCenter.removeObserver(accessibilityObserver) }
+  }
 
   override func viewDidMoveToWindow() {
     super.viewDidMoveToWindow()
@@ -329,7 +337,9 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   func agent(for pane: TerminalSession) -> Agent? {
     guard let id = pane.herdrTerminal?.pane.pane_id else { return nil }
     guard let agent = agents[id] else { return nil }
-    return pane.connectionSuspended || pane.recovering || pane.herdrTerminal?.client.isEnabled == false ? Agent(name: agent.name, status: "unknown") : agent
+    let failed: Bool
+    if let endpoint = pane.herdrTerminal?.client.endpointID, case .failed = controller?.owner?.connectionStatus[endpoint] { failed = true } else { failed = false }
+    return failed || pane.connectionSuspended || pane.recovering || pane.herdrTerminal?.client.isEnabled == false ? Agent(name: agent.name, status: "unknown") : agent
   }
 
   func present() {

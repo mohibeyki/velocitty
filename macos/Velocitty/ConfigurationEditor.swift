@@ -53,6 +53,7 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
       return "Advanced"
     }
     var summary: String {
+      if key == "agent_notifications" { return "Notify when an agent needs input or finishes. Notifications focus its terminal when clicked." }
       if table == "interface" { return "Workspace appearance. Terminal colors are configured separately." }
       switch key {
       case "font_family": return "Typeface for terminal text. Font fallback remains available in Advanced."
@@ -77,7 +78,7 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
   private let search = NSSearchField()
   private let category = NSPopUpButton()
   private let choices = NSComboBox()
-  private let reset = NSButton(title: "Use Default", target: nil, action: nil)
+  private let reset = NSButton(title: "Reset Override", target: nil, action: nil)
   private let table = NSTableView()
   private let detail = NSTextField(wrappingLabelWithString: "")
   private let value = NSTextField()
@@ -190,7 +191,7 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
       removeEntry.leadingAnchor.constraint(equalTo: addEntry.trailingAnchor, constant: 8), removeEntry.centerYAnchor.constraint(equalTo: addEntry.centerYAnchor),
       diagnostics.leadingAnchor.constraint(equalTo: detail.leadingAnchor), diagnostics.centerYAnchor.constraint(equalTo: rawLabel.centerYAnchor),
       choices.leadingAnchor.constraint(equalTo: value.leadingAnchor), choices.trailingAnchor.constraint(equalTo: value.trailingAnchor), choices.topAnchor.constraint(equalTo: value.topAnchor),
-      reset.centerXAnchor.constraint(equalTo: detail.centerXAnchor), reset.centerYAnchor.constraint(equalTo: enabled.centerYAnchor),
+      reset.trailingAnchor.constraint(equalTo: detail.trailingAnchor), reset.centerYAnchor.constraint(equalTo: rawLabel.centerYAnchor),
       enabled.leadingAnchor.constraint(equalTo: detail.leadingAnchor), enabled.topAnchor.constraint(equalTo: value.bottomAnchor, constant: 8),
       apply.trailingAnchor.constraint(equalTo: detail.trailingAnchor), apply.topAnchor.constraint(equalTo: value.bottomAnchor, constant: 8),
       rawLabel.leadingAnchor.constraint(equalTo: diagnostics.trailingAnchor, constant: 12), rawLabel.topAnchor.constraint(equalTo: apply.bottomAnchor, constant: 12),
@@ -258,7 +259,8 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
     }
     let repeatable = setting.table == "terminal" && TerminalSettings.repeatable.contains(setting.key.replacingOccurrences(of: "_", with: "-"))
     addEntry.isHidden = !repeatable; removeEntry.isHidden = !repeatable
-    if repeatable { enabled.isHidden = true; reset.isHidden = true } else { reset.isHidden = false }
+    if repeatable { enabled.isHidden = true }
+    reset.isHidden = false
     let config = appOwner?.runtime?.settings
     let key = setting.key.replacingOccurrences(of: "_", with: "-")
     let sources = setting.table == "interface" ? [config?.interfaceSources[setting.key]?.path].compactMap { $0 } : config?.options.filter { $0.key == key }.compactMap { $0.source?.path } ?? []
@@ -287,6 +289,7 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
   private func entries() -> [String] {
     guard filtered.indices.contains(table.selectedRow) else { return [] }
     let setting = filtered[table.selectedRow]
+    if value.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) == "[]" { return [] }
     return (try? AppConfiguration.parse(Data("[terminal]\n\(setting.key)=\(value.stringValue)".utf8)).options.map(\.value)) ?? []
   }
   private func setEntries(_ values: [String]) {
@@ -363,6 +366,13 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
       try configDocument.save()
       window?.isDocumentEdited = false
       appOwner?.reloadConfiguration(nil)
+      if let config = appOwner?.runtime?.settings {
+        let edited = configDocument.url
+        files = [config.source] + config.sourceFiles.filter { $0 != config.source }
+        if !files.contains(edited) { files.append(edited) }
+        filePicker.removeAllItems(); filePicker.addItems(withTitles: files.map(\.path))
+        currentFile = files.firstIndex(of: edited) ?? 0; filePicker.selectItem(at: currentFile)
+      }
       let diagnostics = appOwner?.runtime?.settings.diagnostics ?? []
       status.textColor = diagnostics.isEmpty ? .secondaryLabelColor : .systemOrange
       status.stringValue = diagnostics.isEmpty ? "Saved. Process settings apply to new terminals." : "Saved with configuration warnings. " + diagnostics.joined(separator: "\n")

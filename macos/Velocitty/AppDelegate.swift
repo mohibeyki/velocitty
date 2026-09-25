@@ -83,9 +83,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     let id = response.notification.request.content.userInfo["terminalID"] as? String
     DispatchQueue.main.async { [weak self] in
       defer { complete() }
-      guard let self, let pane = self.windows.flatMap(\.allPanes).first(where: { $0.herdrTerminal?.pane.terminal_id == id }), let window = pane.windowController else { return }
+      guard let self, let id, let pane = self.windows.flatMap(\.allPanes).first(where: { $0.herdrTerminal?.pane.terminal_id == id }), let window = pane.windowController else { return }
       window.selectTab(pane); window.window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
     }
+  }
+
+  func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler complete: @escaping (UNNotificationPresentationOptions) -> Void) {
+    guard let id = notification.request.content.userInfo["terminalID"] as? String else { complete([]); return }
+    let focused = activeWindow?.session?.herdrTerminal?.pane.terminal_id == id && activeWindow?.window?.isKeyWindow == true
+    complete(focused ? [] : [.banner, .sound])
   }
 
   var activeWindow: TerminalWindowController? {
