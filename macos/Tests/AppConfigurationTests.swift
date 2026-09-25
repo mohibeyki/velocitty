@@ -395,3 +395,39 @@ final class AppConfigurationTests: XCTestCase {
     XCTAssertTrue(config.diagnostics.first?.contains("terminal.font_siz") == true)
   }
 }
+
+extension AppConfigurationTests {
+  func testConnectionDefinitions() throws {
+    let settings = try parse("""
+      [[connections]]
+      id = "local"
+      [[connections]]
+      id = "gpu"
+      name = "GPU"
+      host = "me@cluster"
+      session = "work"
+      enabled = false
+      [terminal]
+      font_size = 14
+      """)
+    XCTAssertTrue(settings.diagnostics.isEmpty)
+    XCTAssertEqual(settings.connections?.count, 2)
+    XCTAssertEqual(settings.connections?.last?.target, "me@cluster")
+    XCTAssertEqual(settings.connections?.last?.enabled, false)
+    XCTAssertEqual(try parse("connections = []").connections, [])
+    XCTAssertNil(try parse("").connections)
+    let duplicate = try parse("[[connections]]\nid='local'\n[[connections]]\nid='local'")
+    XCTAssertNil(duplicate.connections)
+    XCTAssertEqual(duplicate.diagnostics.count, 1)
+  }
+
+  func testIncludedConnectionsReplaceWholeList() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let file = directory.appendingPathComponent("config.toml")
+    try "[[connections]]\nid='local'\n[terminal]\nconfig_file='included.toml'".write(to: file, atomically: true, encoding: .utf8)
+    try "connections=[]".write(to: directory.appendingPathComponent("included.toml"), atomically: true, encoding: .utf8)
+    XCTAssertEqual(AppConfiguration.load(from: file).connections, [])
+  }
+}

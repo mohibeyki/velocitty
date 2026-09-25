@@ -102,3 +102,20 @@ extension WorkspaceStateTests {
     XCTAssertEqual(try JSONDecoder().decode(WorkspaceState.self, from: Data(contentsOf: store.url.appendingPathExtension("v2.backup"))), old)
   }
 }
+
+extension WorkspaceStateTests {
+  func testDamagedStateIsPreservedBeforeFreshSave() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = WorkspaceStateStore(url: directory.appendingPathComponent("workspace.json"))
+    let original = Data("broken json".utf8)
+    try original.write(to: store.url)
+    XCTAssertThrowsError(try store.load())
+    try store.preserveDamagedState()
+    try store.save(WorkspaceState())
+    let backup = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).first { $0.lastPathComponent.contains("damaged-") }!
+    XCTAssertEqual(try Data(contentsOf: backup), original)
+    XCTAssertEqual(try store.load(), WorkspaceState())
+  }
+}

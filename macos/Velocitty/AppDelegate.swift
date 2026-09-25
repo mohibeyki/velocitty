@@ -47,10 +47,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   private var remoteClients: [String: HerdrClient] = [:]
   private var remoteRestoreAttempted = false
   private var connectionsLoaded = false
-  private var connectionStore: HerdrConnectionStore?
+  
   private var connectionsWindow: ConnectionsWindow?
   var connections: [HerdrConnection] = []
-  var connectionStatus: [String: String] = [:]
+  var connectionStatus: [String: ConnectionStatus] = [:]
   fileprivate var tabSpaceOverrides: [String: String] = [:]
   var muxOpening = false
   var muxError: String?
@@ -73,9 +73,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
   func applicationWillFinishLaunching(_ notification: Notification) {
     herdr = discoverHerdr().map { HerdrClient(executable: $0) }
-    if let herdr { loadWorkspaceState(for: herdr); loadConnections() }
+    if let herdr { loadWorkspaceState(for: herdr) }
     do {
       runtime = try TerminalRuntime(settings: AppConfiguration.load())
+      loadConnections()
       updateRestorationPolicy()
     } catch { NSLog("Could not prepare window restoration: %@", error.localizedDescription) }
   }
@@ -418,6 +419,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   @objc func reloadConfiguration(_ sender: Any?) {
     do {
       try runtime?.updateConfiguration(AppConfiguration.load())
+      loadConnections(reload: true)
       showConfigurationDiagnostics()
     } catch { configurationAlert(error).runModal() }
   }
@@ -1792,7 +1794,7 @@ extension AppDelegate {
         }
         self.workspaceState = restored
         self.restoringWorkspace = false
-        self.connectionStatus[client.endpointID] = "Connected"
+        self.connectionStatus[client.endpointID] = .connected
         self.restoreUnavailableTabs()
         for controller in opened {
           controller.persistenceReady = self.workspaceStore != nil
@@ -1804,12 +1806,12 @@ extension AppDelegate {
         }
         self.observeHerdr(client, snapshot: snapshot)
         self.muxError = nil
-        self.connectionStatus[client.endpointID] = "Connected"
+        self.connectionStatus[client.endpointID] = .connected
         self.restoreUnavailableTabs()
         self.restoreRemoteConnections()
       } catch {
         self.muxError = error.localizedDescription
-        self.connectionStatus[client.endpointID] = error.localizedDescription
+        self.connectionStatus[client.endpointID] = .failed(error.localizedDescription)
         self.restoreUnavailableTabs()
         self.restoreRemoteConnections()
         if self.windows.isEmpty { self.newLocalWindow() }
@@ -1836,7 +1838,7 @@ extension AppDelegate {
 
   func synchronizeHerdr(_ incoming: HerdrClient.Snapshot, client: HerdrClient) {
     guard client.isEnabled else { return }
-    connectionStatus[client.endpointID] = "Connected"
+    connectionStatus[client.endpointID] = .connected
     retryPendingClosures(client, snapshot: incoming)
     let serverSnapshot = incoming.excluding(terminals: hiddenTerminalIDs)
     let targets = windows.filter { $0.allPanes.contains { $0.herdrTerminal?.client === client } && !$0.closing }
@@ -2391,8 +2393,12 @@ extension AppDelegate {
       pendingEnds = Set(workspaceState?.pendingTerminalClosures ?? [])
       workspaceStore = store
     } catch {
-      // Preserve unreadable, malformed, or future-version state for recovery.
-      NSLog("Workspace persistence disabled for this run: %@", error.localizedDescription)
+      do {
+        try store.preserveDamagedState()
+        workspaceState = WorkspaceState()
+        workspaceStore = store
+        NSLog("Started a fresh workspace after preserving damaged state: %@", error.localizedDescription)
+      } catch { NSLog("Could not preserve damaged workspace; persistence disabled: %@", error.localizedDescription) }
     }
   }
 
@@ -2517,7 +2523,7 @@ extension TerminalWindowController {
 extension AppDelegate {
   func connectionFailed(_ client: HerdrClient, error: Error) {
     guard client.isEnabled else { return }
-    connectionStatus[client.endpointID] = error.localizedDescription
+    connectionStatus[client.endpointID] = .failed(error.localizedDescription)
   }
 
   func client(for id: String) -> HerdrClient? {
@@ -2526,27 +2532,59 @@ extension AppDelegate {
   }
 
   private func clientIsAvailable(_ id: String) -> Bool {
-    client(for: id)?.isEnabled == true && connectionStatus[id] == "Connected"
+    client(for: id)?.isEnabled == true && connectionStatus[id] == .connected
   }
 
-  func loadConnections() {
-    guard !connectionsLoaded, let herdr else { return }
+  func loadConnections(reload: Bool = false) {
+    guard (!connectionsLoaded || reload), let executable = herdr?.executable else { return }
     connectionsLoaded = true
-    let store = workspaceStateURL.map { HerdrConnectionStore(url: $0.deletingLastPathComponent().appendingPathComponent("connections.json")) } ?? HerdrConnectionStore()
-    do {
-      connections = try store.load()
-      connectionStore = store
-      for profile in connections {
-        let client: HerdrClient
-        if profile.id == herdr.endpointID { client = herdr }
-        else {
-          client = makeClient(profile, executable: herdr.executable)
-          remoteClients[profile.id] = client
-        }
-        client.setEnabled(profile.enabled)
-        connectionStatus[profile.id] = profile.enabled ? "Not connected" : "Disabled"
+    let next = runtime?.settings.connections ?? [.local]
+    let previous = connections
+    connections = next
+    for client in [herdr].compactMap({ $0 }) + Array(remoteClients.values) where !next.contains(where: { $0.id == client.endpointID && $0.enabled }) {
+      suspendConnection(client)
+    }
+    for profile in next {
+      if let old = client(for: profile.id), old.sessionName != "missing",
+        old.machine?.target != profile.target || old.sessionName != profile.session {
+        // Saved terminal references belong to their original server, even when offline.
+        if let client = client(for: profile.id) { suspendConnection(client) }
+        connectionStatus[profile.id] = .failed("Host/session changed. Use a new connection id to retain the original terminals.")
+        continue
       }
-    } catch { NSLog("Connection preferences could not be loaded: %@", error.localizedDescription) }
+      let existing = client(for: profile.id)
+      let client = existing?.sessionName == "missing" ? makeClient(profile, executable: executable) : existing ?? makeClient(profile, executable: executable)
+      client.updateLabel(profile.label)
+      if let existing, existing !== client {
+        for pane in windows.flatMap(\.allPanes) + closedOperations.flatMap(\.panes) where pane.herdrTerminal?.client === existing {
+          if let record = pane.herdrTerminal?.pane { pane.herdrTerminal = .init(client: client, pane: record) }
+        }
+      }
+      if client !== herdr { remoteClients[profile.id] = client }
+      let changed = client.isEnabled != profile.enabled
+      if changed { client.setEnabled(profile.enabled) }
+      if !profile.enabled { suspendConnection(client) }
+      else if connectionStatus[profile.id] == nil || changed { connectionStatus[profile.id] = .notConnected }
+      if reload, profile.enabled, changed || !previous.contains(where: { $0.id == profile.id }) { connectEndpoint(client) }
+    }
+    // Missing definitions still get non-executable placeholders, preserving membership.
+    for id in Set(workspaceState?.namespaces.flatMap(\.tabs).map(\.connectionID) ?? []) where client(for: id) == nil {
+      let missing = HerdrClient(executable: executable, sessionName: "missing", identity: id, label: "Missing: " + id)
+      missing.setEnabled(false); remoteClients[id] = missing
+      connectionStatus[id] = .failed("Connection is missing from config.toml")
+    }
+    restoreUnavailableTabs()
+    connectionsWindow?.refresh()
+  }
+
+  private func suspendConnection(_ client: HerdrClient) {
+    client.setEnabled(false)
+    eventRefresh.removeValue(forKey: client.endpointID)?.invalidate()
+    connectionStatus[client.endpointID] = .disabled
+    for pane in windows.flatMap(\.allPanes) + closedOperations.flatMap(\.panes) where pane.herdrTerminal?.client === client {
+      pane.suspendConnection(client.endpointLabel + " · Disabled")
+    }
+    windows.forEach { $0.workspaceView.present(); scheduleWorkspaceSave($0) }
   }
 
   private func makeClient(_ profile: HerdrConnection, executable: URL) -> HerdrClient {
@@ -2556,80 +2594,16 @@ extension AppDelegate {
   }
 
   @objc func showConnections() {
-    guard let herdr else { showMuxError(ConfigurationError("Install herdr to manage connections.")); return }
+    guard herdr != nil else { showMuxError(ConfigurationError("Install herdr to manage connections.")); return }
     loadConnections()
     if connectionsWindow == nil { connectionsWindow = ConnectionsWindow(owner: self) }
     connectionsWindow?.showWindow(nil); connectionsWindow?.window?.makeKeyAndOrderFront(nil)
-    // Import machine definitions once; toggles here never change herdr's catalog.
-    herdr.perform({ try $0.machines() }) { [weak self] result in
-      guard let self, case .success(let machines) = result else { return }
-      self.importMachines(machines)
-    }
-  }
-
-  private func importMachines(_ machines: [HerdrClient.Machine]) {
-    guard let herdr else { return }
-    for machine in machines where !connections.contains(where: { $0.id == "ssh:" + machine.id || ($0.target == machine.target && $0.session == machine.session) }) {
-      let profile = HerdrConnection(id: "ssh:" + machine.id, label: machine.label, session: machine.session, target: machine.target, enabled: false)
-      connections.append(profile)
-      let client = makeClient(profile, executable: herdr.executable); client.setEnabled(false)
-      remoteClients[profile.id] = client
-      connectionStatus[profile.id] = "Disabled"
-    }
-    do { try connectionStore?.save(connections) } catch { showMuxError(error) }
-    connectionsWindow?.refresh()
-  }
-
-  func addConnection(_ profile: HerdrConnection) throws {
-    guard let herdr, let connectionStore else { throw ConfigurationError("Connection preferences are unavailable.") }
-    let next = connections + [profile]
-    try connectionStore.save(next)
-    connections = next
-    let client = makeClient(profile, executable: herdr.executable)
-    client.setEnabled(profile.enabled); remoteClients[profile.id] = client
-    connectionsWindow?.refresh()
-    if profile.enabled { connectEndpoint(client) }
-  }
-
-  func setConnectionEnabled(_ id: String, enabled: Bool) {
-    guard let index = connections.firstIndex(where: { $0.id == id }), let client = client(for: id), let connectionStore else { return }
-    var next = connections; next[index].enabled = enabled
-    do { try connectionStore.save(next) } catch { showMuxError(error); return }
-    connections = next
-    client.setEnabled(enabled)
-    eventRefresh.removeValue(forKey: id)?.invalidate()
-    connectionStatus[id] = enabled ? "Connecting…" : "Disabled"
-    if enabled { connectEndpoint(client) }
-    else {
-      for pane in windows.flatMap(\.allPanes) + closedOperations.flatMap(\.panes) where pane.herdrTerminal?.client === client {
-        pane.suspendConnection(client.endpointLabel + " · Disabled")
-      }
-      windows.forEach { $0.workspaceView.present(); scheduleWorkspaceSave($0) }
-    }
-    connectionsWindow?.refresh()
   }
 
   private func restoreRemoteConnections() {
-    guard !remoteRestoreAttempted, let herdr else { return }
+    guard !remoteRestoreAttempted else { return }
     remoteRestoreAttempted = true
-    // The legacy state may refer to machine catalog entries not imported yet.
-    let missing = Set(workspaceState?.namespaces.flatMap(\.tabs).map(\.connectionID) ?? []).subtracting(connections.map(\.id))
-    if missing.contains(where: { $0.hasPrefix("ssh:") }) {
-      herdr.perform({ try $0.machines() }) { [weak self] result in
-        guard let self else { return }
-        if case .success(let machines) = result {
-          self.importMachines(machines)
-          for id in missing {
-            if let index = self.connections.firstIndex(where: { $0.id == id }), machines.contains(where: { "ssh:" + $0.id == id && $0.enabled }) {
-              self.connections[index].enabled = true; self.client(for: id)?.setEnabled(true)
-            }
-          }
-          try? self.connectionStore?.save(self.connections)
-        }
-        self.restoreUnavailableTabs()
-        self.connectRemaining(self.remoteClients.values.filter(\.isEnabled).sorted { $0.endpointID < $1.endpointID })
-      }
-    } else { connectRemaining(remoteClients.values.filter(\.isEnabled).sorted { $0.endpointID < $1.endpointID }) }
+    connectRemaining(remoteClients.values.filter(\.isEnabled).sorted { $0.endpointID < $1.endpointID })
   }
 
   private func connectRemaining(_ clients: [HerdrClient]) {
@@ -2648,7 +2622,7 @@ extension AppDelegate {
     guard let runtime else { completion?(); return }
     if herdr !== client { remoteClients[client.endpointID] = client }
     muxOpening = true
-    connectionStatus[client.endpointID] = "Connecting…"; connectionsWindow?.refresh()
+    connectionStatus[client.endpointID] = .connecting; connectionsWindow?.refresh()
     let directory = runtime.settings.workingDirectory
     client.perform({ try $0.connect(directory: directory) }) { [weak self] result in
       guard let self else { completion?(); return }
@@ -2657,7 +2631,7 @@ extension AppDelegate {
       guard !self.terminating, client.isEnabled else { return }
       do {
         let incoming = try result.get()
-        self.connectionStatus[client.endpointID] = "Connected"
+        self.connectionStatus[client.endpointID] = .connected
         self.retryPendingClosures(client, snapshot: incoming)
         let authoritative = incoming.excluding(terminals: self.hiddenTerminalIDs)
         let snapshot = authoritative.excluding(terminals: self.retainedTerminalIDs)
@@ -2697,7 +2671,7 @@ extension AppDelegate {
         self.observeHerdr(client, snapshot: snapshot)
         self.restoreUnavailableTabs()
       } catch {
-        self.connectionStatus[client.endpointID] = error.localizedDescription
+        self.connectionStatus[client.endpointID] = .failed(error.localizedDescription)
         self.restoreUnavailableTabs()
       }
     }

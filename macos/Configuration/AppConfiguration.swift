@@ -10,6 +10,7 @@ public struct TerminalOption: Equatable, Sendable {
 }
 
 public struct AppConfiguration: Equatable, Sendable {
+  public var connections: [HerdrConnection]? = nil
   public var interface: [String: String] = [:]
   public var sourceFiles: [URL] = []
   public var interfaceSources: [String: URL] = [:]
@@ -53,6 +54,7 @@ public struct AppConfiguration: Equatable, Sendable {
     var sourceFiles: [URL] = []
     var interfaceSources: [String: URL] = [:]
     var interface: [String: String] = [:]
+    var connections: [HerdrConnection]?
     var options: [TerminalOption] = []
     var diagnostics: [String] = []
     var index = -1
@@ -73,6 +75,7 @@ public struct AppConfiguration: Equatable, Sendable {
         for key in own.interface.keys { interfaceSources[key] = file }
         interface.merge(own.interface) { _, new in new }
         diagnostics += own.diagnostics
+        if let configured = own.connections { connections = configured }
         for option in own.options {
           if option.key == "config-file" {
             guard !option.value.isEmpty else {
@@ -97,7 +100,7 @@ public struct AppConfiguration: Equatable, Sendable {
     let directory = options.last { $0.key == "working-directory" }
       .map { URL(fileURLWithPath: $0.value, isDirectory: true) }
       ?? defaults(home: home).workingDirectory
-    return Self(interface: interface, sourceFiles: sourceFiles, interfaceSources: interfaceSources, workingDirectory: directory, options: options, diagnostics: diagnostics,
+    return Self(connections: connections, interface: interface, sourceFiles: sourceFiles, interfaceSources: interfaceSources, workingDirectory: directory, options: options, diagnostics: diagnostics,
       source: url, home: home)
   }
 
@@ -211,8 +214,16 @@ public struct AppConfiguration: Equatable, Sendable {
           }
         } catch { diagnostics.append("\(source.path): \(error.localizedDescription)") }
       }
+      var connections: [HerdrConnection]?
+      if let definitions = document.connections {
+        do {
+          let values = try definitions.map { try $0.connection() }
+          try HerdrConnection.validateList(values)
+          connections = values
+        } catch { diagnostics.append("\(source.path): Connections: \(error.localizedDescription)") }
+      }
       return Self(
-        interface: interface, workingDirectory: directory.standardizedFileURL, options: options,
+        connections: connections, interface: interface, workingDirectory: directory.standardizedFileURL, options: options,
         diagnostics: diagnostics, source: source, home: home)
     } catch let error as DecodingError {
       let detail: String
@@ -276,13 +287,14 @@ private struct Key: CodingKey {
 }
 
 private struct Document: Decodable {
+  let connections: [ConnectionDefinition]?
   let terminal: [String: Value]?
   let interface: [String: Value]?
   let diagnostics: [String]
-  enum CodingKeys: String, CodingKey { case terminal, interface }
+  enum CodingKeys: String, CodingKey { case terminal, interface, connections }
   init(from decoder: Decoder) throws {
     let keys = try decoder.container(keyedBy: Key.self).allKeys.map(\.stringValue)
-    diagnostics = keys.sorted().filter { $0 != "terminal" && $0 != "interface" }.map {
+    diagnostics = keys.sorted().filter { $0 != "terminal" && $0 != "interface" && $0 != "connections" }.map {
       "Unknown configuration key: \($0)"
     }
     let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -290,6 +302,7 @@ private struct Document: Decodable {
     // dictionary using the enclosing table's keys.
     if container.contains(.terminal) { _ = try container.decode(TOMLTable.self, forKey: .terminal) }
     if container.contains(.interface) { _ = try container.decode(TOMLTable.self, forKey: .interface) }
+    connections = try container.decodeIfPresent([ConnectionDefinition].self, forKey: .connections)
     interface = try container.decodeIfPresent([String: Value].self, forKey: .interface)
     terminal = try container.decodeIfPresent([String: Value].self, forKey: .terminal)
   }

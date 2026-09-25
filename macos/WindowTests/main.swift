@@ -1761,12 +1761,12 @@ func runMixedConnectionsCheck() throws {
     if let previous { setenv("HERDR_CONFIG_PATH", previous, 1) } else { unsetenv("HERDR_CONFIG_PATH") }
     try? FileManager.default.removeItem(at: directory)
   }
-  let profiles = [first, second].map { HerdrConnection(id: $0.endpointID, label: $0.sessionName, session: $0.sessionName) }
-  try HerdrConnectionStore(url: directory.appendingPathComponent("connections.json")).save(profiles)
+  var profiles = [first, second].map { HerdrConnection(id: $0.endpointID, label: $0.sessionName, session: $0.sessionName) }
   let file = directory.appendingPathComponent("workspace.json")
   let settings = try AppConfiguration.parse(Data("[terminal]\nconfirm_close_surface=false\nundo_timeout='2s'\ntheme=''\n".utf8))
   func owner() throws -> AppDelegate {
-    let result = AppDelegate(); result.workspaceStateURL = file; result.runtime = try TerminalRuntime(settings: settings)
+    var configuration = settings; configuration.connections = profiles
+    let result = AppDelegate(); result.workspaceStateURL = file; result.runtime = try TerminalRuntime(settings: configuration)
     result.herdr = HerdrClient(executable: executable, sessionName: first.sessionName)
     result.loadConnections(); return result
   }
@@ -1775,6 +1775,13 @@ func runMixedConnectionsCheck() throws {
     repeat { pumpEvents(until: Date(timeIntervalSinceNow: 0.05)) }
     while (app.muxOpening || window?.muxBusy == true) && Date() < deadline
     precondition(!app.muxOpening && window?.muxBusy != true)
+  }
+  func enable(_ app: AppDelegate, _ id: String, _ enabled: Bool) {
+    let index = profiles.firstIndex { $0.id == id }!
+    profiles[index].enabled = enabled
+    var updated = app.runtime!.settings; updated.connections = profiles
+    try! app.runtime!.updateConfiguration(updated)
+    app.loadConnections(reload: true)
   }
   let app = try owner(); app.newWindow(); wait(app)
   let window = app.windows.first!
@@ -1790,7 +1797,7 @@ func runMixedConnectionsCheck() throws {
   app.synchronizeHerdr(try first.snapshot(), client: app.herdr!)
   app.synchronizeHerdr(try client.snapshot(), client: client)
   precondition(window.namespaces.count == 1 && window.tabs.count == 2 && window.activeNamespace.name == "Mixed Project")
-  app.setConnectionEnabled(client.endpointID, enabled: false)
+  enable(app, client.endpointID, false)
   precondition(pane.surface == nil && pane.connectionSuspended && window.tabs.count == 2)
   let running = try second.snapshot()
   precondition(running.panes.contains { $0.terminal_id == terminalID })
@@ -1808,19 +1815,19 @@ func runMixedConnectionsCheck() throws {
   let placeholder = restoredWindow.tabs.first { $0.selected.herdrTerminal?.client.endpointID == second.endpointID }!.selected
   precondition(placeholder.connectionSuspended && placeholder.surface == nil)
   precondition(restoredWindow.session === placeholder, "Restore the selected disabled tab")
-  restored.setConnectionEnabled(second.endpointID, enabled: true); wait(restored)
+  enable(restored, second.endpointID, true); wait(restored)
   let deadline = Date(timeIntervalSinceNow: 8)
   while placeholder.surface == nil && Date() < deadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.05)) }
   precondition(placeholder.surface != nil && placeholder.herdrTerminal!.pane.terminal_id == terminalID)
   restored.scheduleWorkspaceSave(restoredWindow); restored.flushWorkspaceSave()
   let saved = try WorkspaceStateStore(url: file).load()
   precondition(saved.namespaces[0].tabs.count == 2)
-  restored.setConnectionEnabled(second.endpointID, enabled: false)
+  enable(restored, second.endpointID, false)
   restoredWindow.closePane(placeholder, confirm: false)
   pumpEvents(until: Date(timeIntervalSinceNow: 2.3))
   restored.connectEndpoint(restored.herdr!); wait(restored)
   precondition(restoredWindow.tabs.count == 1, "A pending close must not reappear as an offline placeholder")
-  restored.setConnectionEnabled(first.endpointID, enabled: false)
+  enable(restored, first.endpointID, false)
   restored.scheduleWorkspaceSave(restoredWindow); restored.flushWorkspaceSave()
   for controller in Array(restored.windows) { controller.closing = true; controller.window?.close() }
   let disabled = try owner(); disabled.newWindow(); wait(disabled)

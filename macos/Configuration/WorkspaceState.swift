@@ -207,6 +207,12 @@ public struct WorkspaceStateStore {
     return state
   }
 
+  public func preserveDamagedState() throws {
+    guard FileManager.default.fileExists(atPath: url.path) else { return }
+    let backup = url.appendingPathExtension("damaged-" + UUID().uuidString)
+    try FileManager.default.copyItem(at: url, to: backup)
+  }
+
   public func save(_ state: WorkspaceState) throws {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -240,24 +246,3 @@ public struct HerdrConnection: Codable, Equatable, Sendable {
   }
 }
 
-public struct HerdrConnectionStore {
-  public let url: URL
-  public init(url: URL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Velocitty/connections.json")) { self.url = url }
-  public func load() throws -> [HerdrConnection] {
-    guard FileManager.default.fileExists(atPath: url.path) else { return [.local] }
-    let values = try JSONDecoder().decode([HerdrConnection].self, from: Data(contentsOf: url))
-    try validate(values)
-    return values
-  }
-  private func validate(_ values: [HerdrConnection]) throws {
-    guard Set(values.map(\.id)).count == values.count,
-      Set(values.map { ($0.target ?? "local") + " / " + $0.session }).count == values.count else { throw ConfigurationError("Each herdr connection must have a unique server and session.") }
-    for value in values { try value.validate() }
-  }
-  public func save(_ values: [HerdrConnection]) throws {
-    try validate(values)
-    let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-    try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-    try encoder.encode(values).write(to: url, options: .atomic)
-  }
-}

@@ -77,23 +77,39 @@ Use the command palette for **Show Tab Alongside**, pane moves, zoom, equalizati
 and the remaining window actions. Agent icons reflect herdr’s reported state;
 unknown status is shown when a server cannot be reached.
 
-Choose **Velocitty → Connections** to add local sessions or SSH destinations,
-enable/disable connections, retry, or create a tab on a selected connection.
-Existing herdr machine profiles are imported as disabled entries; Velocitty’s
-switches do not change herdr’s global machine catalog. SSH uses existing keys and
-known hosts; start the selected herdr session on the destination first.
+Define connections in `config.toml`. **Velocitty → Connections** shows their
+status and lets you retry or create a tab. SSH uses existing keys and known hosts;
+start the selected herdr session on the destination first.
 
-Enabled connections reconnect on launch. Disabling detaches their terminals but
-preserves running processes and space membership; unavailable tabs remain visible.
+```toml
+[[connections]]
+id = "local"
+name = "Laptop"
+session = "velocitty"
+
+[[connections]]
+id = "gpu"
+name = "GPU cluster"
+host = "user@cluster"
+session = "work"
+enabled = true
+```
+
+Connection IDs are stable references in saved workspaces: keep the ID when renaming
+an entry, and use a new ID when changing its host or session. Reload configuration
+to apply changes. Disabling or removing an entry preserves its running processes
+and offline tabs; restoring the same entry reconnects them. Without a connection
+list, the default local session is used. An explicit `connections = []` at the
+root disables all connections. Included files replace the entire list when they
+specify one. Old `connections.json` files are no longer read; copy desired entries
+to TOML using the same IDs.
+
 New tabs inherit the active connection unless another is selected in Connections.
-Local file drops always use the default local server.
-
-Workspace state is stored separately from preferences in
-`~/Library/Application Support/Velocitty/workspace.json`; connection preferences
-use `connections.json` alongside it. Upgrading workspace state keeps a versioned
-backup of the previous file. Shell configuration
-belongs to herdr. New local shells receive bundled integration hooks; existing
-shells and remote shell configuration are left intact.
+Local file drops always use the default local server. Workspace state lives in
+`~/Library/Application Support/Velocitty/workspace.json`. Upgrades keep a versioned
+backup; damaged state is preserved before rebuilding the workspace. Shell
+configuration belongs to herdr. New local shells receive bundled integration
+hooks; existing shells and remote shell configuration are left intact.
 
 ## Configuration
 

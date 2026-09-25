@@ -15,11 +15,12 @@ final class HerdrClient {
   }
   var endpointID: String { identity ?? machine.map { "ssh:" + $0.id } ?? (sessionName == "velocitty" ? "local" : "local:" + sessionName) }
   private let identity: String?
-  private let label: String?
+  private var label: String?
   private let availabilityLock = NSLock()
   private var enabled = true
   private var availabilityGeneration = UUID()
   var isEnabled: Bool { availabilityLock.lock(); defer { availabilityLock.unlock() }; return enabled }
+  func updateLabel(_ value: String) { label = value }
   var endpointLabel: String { label ?? machine?.label ?? (sessionName == "velocitty" ? "Local" : sessionName) }
   func owns(_ id: String) -> Bool { endpointID == "local" ? !id.contains("::") : id.hasPrefix(endpointID + "::") }
   func qualify(_ id: String) -> String { endpointID == "local" || id.isEmpty ? id : endpointID + "::" + id }
@@ -695,4 +696,19 @@ private final class HerdrEventStream {
   }
   func stop() { guard !stopped else { return }; stopped = true; source.cancel() }
   deinit { source.cancel() }
+}
+
+
+enum ConnectionStatus: Equatable {
+  case notConnected, connecting, connected, disabled
+  case failed(String)
+  var description: String {
+    switch self {
+    case .notConnected: return "Not connected"
+    case .connecting: return "Connecting…"
+    case .connected: return "Connected"
+    case .disabled: return "Disabled"
+    case .failed(let message): return message
+    }
+  }
 }
