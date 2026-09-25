@@ -21,6 +21,7 @@ if CommandLine.arguments.contains("--remote-check") {
   try runRemoteCheck()
   exit(0)
 }
+if CommandLine.arguments.contains("--scale") { try runScaleCheck(); exit(0) }
 if CommandLine.arguments.contains("--mixed-connections") {
   try runMixedConnectionsCheck(); exit(0)
 }
@@ -676,6 +677,9 @@ do {
 
 // A real isolated server verifies streaming, namespace ownership, and detach/reattach.
 if let executable = HerdrClient.discover() {
+  let stateDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("velo-check-" + UUID().uuidString)
+  delegate.workspaceStateURL = stateDirectory.appendingPathComponent("workspace.json")
+  defer { try? FileManager.default.removeItem(at: stateDirectory); delegate.workspaceStateURL = nil }
   let client = HerdrClient(executable: executable, sessionName: "velocitty-test-" + UUID().uuidString.lowercased())
   defer {
     _ = try? client.run(["server", "stop"])
@@ -736,8 +740,10 @@ if let executable = HerdrClient.discover() {
   defer { try? FileManager.default.removeItem(at: directory) }
   let marker = directory.appendingPathComponent("streamed")
   drain(); drain()
-  let command = "printf VELOCITTY_HERDR_STREAM; printf ok > " + HerdrClient.quote(marker.path) + "\r"
+  let command = "printf VELOCITTY_HERDR_STREAM; printf ok > " + HerdrClient.quote(marker.path)
   command.withCString { velokit_surface_text(a.surface!, $0, UInt(command.utf8.count)) }
+  var enter = ghostty_input_key_s(); enter.action = GHOSTTY_ACTION_PRESS; enter.keycode = 36
+  _ = velokit_surface_key(a.surface!, enter)
   let deadline = Date(timeIntervalSinceNow: 8)
   while !FileManager.default.fileExists(atPath: marker.path) && Date() < deadline { drain() }
   precondition(FileManager.default.fileExists(atPath: marker.path), "Input must reach the herdr shell")
@@ -761,7 +767,8 @@ if let executable = HerdrClient.discover() {
   restored.selectNamespace(at: 1)
   let exiting = restored.session!
   drain(); drain()
-  "exit\n".withCString { velokit_surface_text(exiting.surface!, $0, 5) }
+  "exit".withCString { velokit_surface_text(exiting.surface!, $0, 4) }
+  _ = velokit_surface_key(exiting.surface!, enter)
   let exitDeadline = Date(timeIntervalSinceNow: 8)
   while exiting.surface != nil && Date() < exitDeadline { drain() }
   precondition(exiting.surface == nil && restored.namespaces.count == 1,
@@ -1860,4 +1867,54 @@ func runMixedConnectionsCheck() throws {
   precondition(offlineTab.panes.count == 2 && offlineTab.panes.contains { $0.connectionSuspended }, "Unavailable pane must retain its position in a mixed tab")
   for controller in Array(offline.windows) { controller.closing = true; controller.window?.close() }
   print("Mixed connection tests passed.")
+}
+
+func runScaleCheck() throws {
+  guard let executable = HerdrClient.discover() else { fatalError("herdr is required") }
+  let directory = FileManager.default.temporaryDirectory.appendingPathComponent("velo-scale-" + UUID().uuidString)
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  let config = directory.appendingPathComponent("herdr.toml")
+  try "[terminal]\ndefault_shell='/bin/zsh'\n".write(to: config, atomically: true, encoding: .utf8)
+  let previous = ProcessInfo.processInfo.environment["HERDR_CONFIG_PATH"]
+  setenv("HERDR_CONFIG_PATH", config.path, 1)
+  let clients = (0..<3).map { _ in HerdrClient(executable: executable, sessionName: "velo-scale-" + UUID().uuidString.lowercased()) }
+  defer {
+    for client in clients { _ = try? client.run(["server", "stop"]); _ = try? client.run(["session", "delete", client.sessionName]) }
+    if let previous { setenv("HERDR_CONFIG_PATH", previous, 1) } else { unsetenv("HERDR_CONFIG_PATH") }
+    try? FileManager.default.removeItem(at: directory)
+  }
+  let started = ProcessInfo.processInfo.systemUptime
+  for (index, client) in clients.enumerated() {
+    _ = try client.connect(directory: directory)
+    let existing = try client.snapshot()
+    let count = index == 2 ? 16 : 17
+    for number in existing.panes.count..<count {
+      _ = try client.createPane(workspace: existing.workspaces.first?.workspace_id, name: "Scale \(number)", directory: directory.path)
+    }
+  }
+  let created = ProcessInfo.processInfo.systemUptime
+  var settings = try AppConfiguration.parse(Data("[terminal]\ntheme=''\nconfirm_close_surface=false\n".utf8))
+  settings.connections = clients.map { .init(id: $0.endpointID, label: $0.sessionName, session: $0.sessionName) }
+  let owner = AppDelegate(); owner.workspaceStateURL = directory.appendingPathComponent("workspace.json")
+  owner.runtime = try TerminalRuntime(settings: settings); owner.herdr = clients[0]; owner.loadConnections()
+  owner.newWindow()
+  let deadline = Date(timeIntervalSinceNow: 60)
+  while (owner.muxOpening || owner.windows.flatMap(\.allPanes).count < 50) && Date() < deadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.05)) }
+  precondition(owner.windows.flatMap(\.allPanes).count == 50)
+  let attached = ProcessInfo.processInfo.systemUptime
+  let controller = owner.windows[0]
+  for pane in controller.allPanes { controller.selectTab(pane) }
+  let selected = ProcessInfo.processInfo.systemUptime
+  for client in clients {
+    let endpoint = owner.client(for: client.endpointID)!
+    owner.synchronizeHerdr(try endpoint.snapshot(), client: endpoint)
+  }
+  let reconciled = ProcessInfo.processInfo.systemUptime
+  owner.windows.forEach { owner.scheduleWorkspaceSave($0) }; owner.flushWorkspaceSave()
+  let saved = try WorkspaceStateStore(url: owner.workspaceStateURL!).load()
+  precondition(saved.namespaces.flatMap(\.tabs).flatMap { $0.panes ?? [] }.count == 50)
+  var usage = rusage(); getrusage(RUSAGE_SELF, &usage)
+  print(String(format: "Scale: 50 terminals / 3 local connections; create %.2fs, attach %.2fs, select 50 %.3fs, reconcile 3 %.3fs, peak RSS %.1f MiB", created-started, attached-created, selected-attached, reconciled-selected, Double(usage.ru_maxrss) / 1_048_576))
+  for window in Array(owner.windows) { window.closing = true; window.window?.close() }
+  print("Scale check passed.")
 }

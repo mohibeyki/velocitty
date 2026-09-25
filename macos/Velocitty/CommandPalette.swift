@@ -46,6 +46,8 @@ final class CommandPalette: NSPanel, NSTextFieldDelegate, NSWindowDelegate, NSTa
     if provider == nil, terminal.session?.herdrTerminal != nil {
       let controller = terminal.session?.windowController
       entries += [
+        Entry(title: "Show Agents", detail: "Find agents across all spaces and connections.", action: "velocitty:agents", run: { [weak controller] in controller?.showAgents() }),
+        Entry(title: "Next Agent Waiting for Input", detail: "Focus the exact terminal that needs attention.", action: "velocitty:next-waiting", run: { [weak controller] in controller?.selectNextWaitingAgent() }),
         Entry(title: "New Tab on Connection…", detail: "Choose a local or remote server.", action: "velocitty:new-connected-tab", run: { [weak controller] in controller?.chooseConnection() }),
         Entry(title: "Split Right on Connection…", detail: "Add a pane from any enabled server.", action: "velocitty:split-connected-right", run: { [weak controller] in controller?.chooseConnection(split: "right") }),
         Entry(title: "Split Down on Connection…", detail: "Add a pane from any enabled server.", action: "velocitty:split-connected-down", run: { [weak controller] in controller?.chooseConnection(split: "down") }),

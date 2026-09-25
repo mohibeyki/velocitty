@@ -122,6 +122,8 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     namespaceList.intercellSpacing = NSSize(width: 0, height: 6)
     namespaceList.indentationPerLevel = 0
     namespaceList.allowsEmptySelection = false
+    namespaceList.registerForDraggedTypes([.init("app.velocitty.space"), .init("app.velocitty.tab")])
+    namespaceList.setDraggingSourceOperationMask(.move, forLocal: true)
     namespaceList.dataSource = self
     namespaceList.delegate = self
     namespaceList.setAccessibilityLabel("Namespaces")
@@ -189,6 +191,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   }
 
   func updateAgents(_ snapshot: HerdrClient.Snapshot) {
+    controller?.owner?.observeAgentStates(snapshot)
     let belongs: (String) -> Bool = { id in
       guard let endpoint = snapshot.endpointID, endpoint != "local" else { return !id.contains("::") }
       return id.hasPrefix(endpoint + "::")
@@ -473,14 +476,20 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     for (index, tab) in controller.tabs.enumerated() {
       let label = title(for: tab)
       let client = tab.selected.herdrTerminal?.client
-      let unavailable = client?.isEnabled == false || tab.selected.connectionSuspended || tab.selected.recovering
+      let unavailable = tab.panes.contains { $0.herdrTerminal?.client.isEnabled == false || $0.connectionSuspended || $0.recovering }
       let state = client?.isEnabled == false ? "Disabled" : unavailable ? "Disconnected" : "Connected"
       let location = client?.machine?.target ?? "Local"
-      let connection = [client?.endpointLabel ?? "Standalone", location, client?.sessionName ?? "", state].joined(separator: " · ")
+      let connections = Set(tab.panes.compactMap { $0.herdrTerminal?.client.endpointLabel }).sorted()
+      let connection = connections.count > 1 ? connections.joined(separator: " + ") + " · " + state : [client?.endpointLabel ?? "Standalone", location, client?.sessionName ?? "", state].joined(separator: " · ")
       let item = WorkspaceTabItem(frame: NSRect(x: 0, y: 0, width: 160, height: 28))
       item.selected = controller.activeTab === tab
+      item.onDropTab = { [weak controller, weak tab] id in
+        guard let controller, let tab else { return false }
+        return controller.placeTab(id: id, before: tab)
+      }
       let button = WorkspaceActionButton(title: (tab.hasBell ? "● " : "") + label,
         target: nil, action: nil)
+      button.dragID = tab.herdrID
       button.isBordered = false
       button.alignment = .center
       button.font = .systemFont(ofSize: 12, weight: controller.activeTab === tab ? .medium : .regular)
@@ -524,7 +533,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
       badge.action = #selector(WorkspaceActionButton.invoke)
       badge.onPress = button.onPress
       let connectionIcon = NSImageView(frame: NSRect(x: 28, y: 8, width: 12, height: 12))
-      connectionIcon.image = NSImage(systemSymbolName: unavailable ? "network.slash" : client?.machine == nil ? "desktopcomputer" : "network", accessibilityDescription: connection)
+      connectionIcon.image = NSImage(systemSymbolName: unavailable ? "network.slash" : connections.count > 1 ? "square.stack.3d.up" : client?.machine == nil ? "desktopcomputer" : "network", accessibilityDescription: connection)
       connectionIcon.contentTintColor = unavailable ? .systemOrange : .tertiaryLabelColor
       connectionIcon.toolTip = connection
       item.addSubview(connectionIcon)
@@ -569,6 +578,27 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     if let index = controller.namespaces.firstIndex(where: { $0 === controller.activeNamespace }) {
       namespaceList.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
     }
+  }
+
+  func outlineView(_ outlineView: NSOutlineView, pasteboardWriterForItem item: Any) -> NSPasteboardWriting? {
+    guard let space = namespace(for: item), let id = space.id else { return nil }
+    let value = NSPasteboardItem(); value.setString(id, forType: .init("app.velocitty.space")); return value
+  }
+  func outlineView(_ outlineView: NSOutlineView, validateDrop info: NSDraggingInfo, proposedItem item: Any?, proposedChildIndex index: Int) -> NSDragOperation {
+    if info.draggingPasteboard.string(forType: .init("app.velocitty.tab")) != nil, item is TerminalNamespace { return .move }
+    if info.draggingSource as? NSOutlineView === namespaceList, item == nil,
+      info.draggingPasteboard.string(forType: .init("app.velocitty.space")) != nil { return .move }
+    return []
+  }
+  func outlineView(_ outlineView: NSOutlineView, acceptDrop info: NSDraggingInfo, item: Any?, childIndex index: Int) -> Bool {
+    guard let controller else { return false }
+    if let id = info.draggingPasteboard.string(forType: .init("app.velocitty.tab")), let destination = item as? TerminalNamespace,
+      let spaceID = destination.id, let source = controller.owner?.windows.first(where: { $0.namespaces.flatMap(\.tabs).contains { $0.herdrID == id } }),
+      let tab = source.namespaces.flatMap(\.tabs).first(where: { $0.herdrID == id }) {
+      source.moveTab(tab, toNamespace: spaceID); return true
+    }
+    if let id = info.draggingPasteboard.string(forType: .init("app.velocitty.space")) { controller.reorderNamespace(id, to: index); return true }
+    return false
   }
 
   func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
@@ -740,6 +770,7 @@ private final class AgentIconButton: NSButton {
   var onSelect: (() -> Void)?
   private let border = CAShapeLayer()
   private let agentImage = AgentImageView()
+  private let statusImage = AgentImageView()
   private let values: [String: String]
   private let agent: TerminalWorkspaceView.Agent
   private var statusKey: String {
@@ -766,13 +797,27 @@ private final class AgentIconButton: NSButton {
     super.init(frame: .zero)
     title = ""
     isBordered = false
-    refusesFirstResponder = true
+    refusesFirstResponder = false
+    focusRingType = .exterior
     wantsLayer = true
     layer?.addSublayer(border)
     agentImage.image = AgentIconCatalog.image(for: agent.name)
     agentImage.contentTintColor = .labelColor
     agentImage.imageScaling = .scaleProportionallyUpOrDown
     addSubview(agentImage)
+    let symbol: String
+    switch statusKey {
+    case "waiting": symbol = "exclamationmark.circle.fill"
+    case "done": symbol = "checkmark.circle.fill"
+    case "idle": symbol = "pause.circle.fill"
+    case "running": symbol = "play.circle.fill"
+    default: symbol = "questionmark.circle.fill"
+    }
+    statusImage.image = NSImage(systemSymbolName: symbol, accessibilityDescription: statusLabel)
+    statusImage.contentTintColor = .labelColor
+    statusImage.wantsLayer = true; statusImage.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+    statusImage.layer?.cornerRadius = 5
+    addSubview(statusImage)
     target = self
     action = #selector(selectAgent)
   }
@@ -782,6 +827,7 @@ private final class AgentIconButton: NSButton {
   override func layout() {
     super.layout()
     agentImage.frame = bounds.insetBy(dx: 4, dy: 4)
+    statusImage.frame = NSRect(x: bounds.maxX - 10, y: 0, width: 10, height: 10)
     let width = CGFloat(Double(values["agent_border_width"] ?? "") ?? 1)
     let rect = bounds.insetBy(dx: width / 2 + 1, dy: width / 2 + 1)
     border.frame = bounds
@@ -810,7 +856,8 @@ private final class AgentIconButton: NSButton {
   }
 }
 
-private final class WorkspaceActionButton: NSButton {
+private final class WorkspaceActionButton: NSButton, NSDraggingSource {
+  var dragID: String?
   var onPress: (() -> Void)?
   override init(frame: NSRect) {
     super.init(frame: frame)
@@ -818,6 +865,21 @@ private final class WorkspaceActionButton: NSButton {
     action = #selector(invoke)
   }
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+  override func mouseDown(with event: NSEvent) {
+    guard let dragID, let window else { super.mouseDown(with: event); return }
+    while let next = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+      if next.type == .leftMouseUp { onPress?(); return }
+      if hypot(next.locationInWindow.x - event.locationInWindow.x, next.locationInWindow.y - event.locationInWindow.y) < 4 { continue }
+      let value = NSPasteboardItem(); value.setString(dragID, forType: .init("app.velocitty.tab"))
+      let item = NSDraggingItem(pasteboardWriter: value)
+      let image = NSImage(size: bounds.size)
+      image.lockFocus(); NSColor.windowBackgroundColor.setFill(); bounds.fill()
+      (title as NSString).draw(at: NSPoint(x: 6, y: 5), withAttributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.labelColor]); image.unlockFocus()
+      item.setDraggingFrame(bounds, contents: image)
+      beginDraggingSession(with: [item], event: next, source: self); return
+    }
+  }
+  func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation { context == .withinApplication ? .move : [] }
   @objc func invoke() { onPress?() }
 }
 
@@ -829,6 +891,14 @@ private final class WorkspaceSplitView: NSSplitView {
 
 /// Content tabs follow the system window-tab layout without representing NSWindows.
 private final class WorkspaceTabItem: NSView {
+  var onDropTab: ((String) -> Bool)?
+  override init(frame: NSRect) { super.init(frame: frame); registerForDraggedTypes([.init("app.velocitty.tab")]) }
+  required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+  override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { sender.draggingPasteboard.string(forType: .init("app.velocitty.tab")) == nil ? [] : .move }
+  override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+    guard let id = sender.draggingPasteboard.string(forType: .init("app.velocitty.tab")) else { return false }
+    return onDropTab?(id) ?? false
+  }
   var selected = false
   private var hovered = false
   private var hoverTracking: NSTrackingArea?

@@ -6,28 +6,28 @@ import UserNotifications
 import VeloKit
 import VelocittyConfiguration
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, UNUserNotificationCenterDelegate {
   let discoverHerdr: () -> URL?
   init(discoverHerdr: @escaping () -> URL? = HerdrClient.discover) {
     self.discoverHerdr = discoverHerdr
     super.init()
   }
 
+  private var agentNotificationStates: [String: String] = [:]
   let secureInputOwner = SecureInputOwner()
   let fullscreenPresentation = FullscreenPresentation()
   var windows: [TerminalWindowController] = []
   private var settingsWindow: SettingsWindow?
   // Test sessions do not read or overwrite the user's workspace file.
   var workspaceStateURL: URL?
-  private var workspaceStore: WorkspaceStateStore?
-  fileprivate var workspaceState: WorkspaceState?
+  private let workspacePersistence = WorkspacePersistence()
+  fileprivate var workspaceState: WorkspaceState? {
+    get { workspacePersistence.state }
+    set { workspacePersistence.state = newValue }
+  }
   private var workspaceLoadAttempted = false
   private var restoringWorkspace = false
   private var synchronizingWorkspace = false
-  private var eventRefresh: [String: Timer] = [:]
-  private var eventRefreshRunning: Set<String> = []
-  private var workspaceNeedsSave = false
-  private var workspaceSaveTimer: Timer?
 
   weak var focusedWindow: TerminalWindowController?
   var runtime: TerminalRuntime? {
@@ -44,25 +44,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   private var openingDroppedFile = false
   var terminating = false
   var herdr: HerdrClient?
-  private var remoteClients: [String: HerdrClient] = [:]
-  private var remoteRestoreAttempted = false
-  private var connectionsLoaded = false
-  
+  private let connectionCoordinator = ConnectionCoordinator()
   private var connectionsWindow: ConnectionsWindow?
   var connections: [HerdrConnection] = []
   var connectionStatus: [String: ConnectionStatus] = [:]
   fileprivate var tabSpaceOverrides: [String: String] = [:]
   var muxOpening = false
   var muxError: String?
-  private var closedOperations: [ClosedTerminals] = []
-  private var redoOperations: [ClosedTerminals] = []
-  private var pendingEnds: Set<String> = []
-  private var endingEndpoints: Set<String> = []
-  var retainedTerminalIDs: Set<String> { Set(closedOperations.filter(\.applied).flatMap(\.terminalIDs)) }
+  private let closeHistory = CloseHistory()
+  var retainedTerminalIDs: Set<String> { Set(closeHistory.closed.filter(\.applied).flatMap(\.terminalIDs)) }
   var hiddenTerminalIDs: Set<String> {
-    pendingEnds.union(closedOperations.filter { $0.applied && $0.destroy }.flatMap(\.terminalIDs))
+    closeHistory.pending.union(closeHistory.closed.filter { $0.applied && $0.destroy }.flatMap(\.terminalIDs))
   }
 
+
+  func observeAgentStates(_ snapshot: HerdrClient.Snapshot) {
+    let prefix = snapshot.endpointID == "local" || snapshot.endpointID == nil ? nil : snapshot.endpointID! + "::"
+    let live = Set(snapshot.panes.map(\.terminal_id))
+    agentNotificationStates = agentNotificationStates.filter { id, _ in
+      let belongs = prefix.map { id.hasPrefix($0) } ?? !id.contains("::")
+      return !belongs || live.contains(id)
+    }
+    for record in snapshot.panes {
+      let status = record.agent_status ?? "unknown"
+      let previous = agentNotificationStates.updateValue(status, forKey: record.terminal_id)
+      guard let previous, previous != status, ["blocked", "done"].contains(status),
+        runtime?.settings.interface["agent_notifications"] != "false",
+        let pane = windows.flatMap(\.allPanes).first(where: { $0.herdrTerminal?.pane.terminal_id == record.terminal_id }),
+        let controller = pane.windowController, !pane.connectionSuspended,
+        !(NSApp.isActive && controller.window?.isKeyWindow == true && controller.session === pane) else { continue }
+      let agent = record.display_agent ?? record.agent ?? "Agent"
+      controller.notify(title: agent + (status == "blocked" ? " needs input" : " finished"),
+        body: (controller.namespace(for: pane)?.name ?? "Workspace") + " · " + (controller.tab(for: pane)?.displayTitle ?? pane.displayTitle), terminalID: record.terminal_id)
+    }
+  }
+
+  func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler complete: @escaping () -> Void) {
+    let id = response.notification.request.content.userInfo["terminalID"] as? String
+    DispatchQueue.main.async { [weak self] in
+      defer { complete() }
+      guard let self, let pane = self.windows.flatMap(\.allPanes).first(where: { $0.herdrTerminal?.pane.terminal_id == id }), let window = pane.windowController else { return }
+      window.selectTab(pane); window.window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+    }
+  }
 
   var activeWindow: TerminalWindowController? {
     windows.first { $0.window === NSApp.keyWindow }
@@ -82,6 +106,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
   }
 
   func applicationDidFinishLaunching(_ notification: Notification) {
+    UNUserNotificationCenter.current().delegate = self
     // Load the bundled artwork directly so the running Dock tile doesn't
     // depend on Launch Services resolving an icon for a development build.
     if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
@@ -134,7 +159,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     let customCommand = runtime?.settings.options.contains {
       ["command", "initial-command"].contains($0.key) && !$0.value.isEmpty
     } == true
-    if !customCommand, let client = ([herdr].compactMap { $0 } + remoteClients.values.sorted { $0.endpointID < $1.endpointID }).first(where: { $0.isEnabled }) {
+    if !customCommand, let client = ([herdr].compactMap { $0 } + connectionCoordinator.clients.values.sorted { $0.endpointID < $1.endpointID }).first(where: { $0.isEnabled }) {
       openHerdrWindow(using: client); return
     }
     if !customCommand, herdr != nil { restoreUnavailableTabs(); showConnections(); return }
@@ -248,7 +273,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     fullscreenPresentation.update(nil)
     persistCloseIntent()
     flushWorkspaceSave()
-    for operation in closedOperations { operation.panes.forEach { $0.close() } }
+    for operation in closeHistory.closed { operation.panes.forEach { $0.close() } }
     for controller in windows {
       controller.clearProgress()
       for tab in controller.allPanes { tab.close() }
@@ -289,8 +314,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
     if [#selector(closePane), #selector(closeTab)].contains(menuItem.action), activeWindow?.muxBusy == true { return false }
     switch menuItem.action {
-    case #selector(undoClose): return NSApp.keyWindow?.firstResponder?.undoManager?.canUndo == true || closedOperations.contains { $0.applied }
-    case #selector(redoClose): return NSApp.keyWindow?.firstResponder?.undoManager?.canRedo == true || !redoOperations.isEmpty
+    case #selector(undoClose): return NSApp.keyWindow?.firstResponder?.undoManager?.canUndo == true || closeHistory.closed.contains { $0.applied }
+    case #selector(redoClose): return NSApp.keyWindow?.firstResponder?.undoManager?.canRedo == true || !closeHistory.redo.isEmpty
     case #selector(zoomPane), #selector(equalizePanes): return (activeWindow?.activeTab.panes.count ?? 0) > 1 && activeWindow?.muxBusy != true
     case #selector(closePane), #selector(newNamespace), #selector(editNamespace), #selector(closeNamespace),  #selector(closeTab), #selector(nextTab), #selector(previousTab), #selector(renameTab),
       #selector(moveTabLeft), #selector(moveTabRight), #selector(closeWindow), #selector(showCommands), #selector(findTerminal),
@@ -370,7 +395,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
           self.loadWorkspaceState(for: client)
           controller = try self.attachHerdrWindow(snapshot.excluding(terminals: old).filtered(namespaceIDs: ids), client: client,
             presentation: .init(id: UUID().uuidString, namespaceIDs: Array(ids), selectedNamespaceID: ids.first, frame: nil, sidebar: nil), state: self.workspaceState ?? WorkspaceState())
-          controller.persistenceReady = self.workspaceStore != nil
+          controller.persistenceReady = self.workspacePersistence.store != nil
         }
         self.observeHerdr(client, snapshot: snapshot)
         self.scheduleWorkspaceSave(controller)
@@ -1264,6 +1289,24 @@ final class TerminalWindowController: NSObject, NSWindowDelegate, NSToolbarDeleg
     panel.present()
   }
 
+  func showAgents() {
+    guard let terminal = session?.view, window?.attachedSheet == nil else { return }
+    palette?.close()
+    let panel = CommandPalette(terminal: terminal, entries: { [weak self] in
+      guard let self else { return [] }
+      let ids = Set((self.owner?.windows ?? [self]).flatMap { controller in controller.allPanes.filter { controller.workspaceView.agent(for: $0) != nil }.compactMap { $0.herdrTerminal?.pane.terminal_id }.map { "workspace:" + $0 } })
+      return self.workspaceSearchEntries().filter { ids.contains($0.action) }
+    })
+    panel.title = "Agents"; palette = panel; panel.present()
+  }
+
+  func selectNextWaitingAgent() {
+    let panes = (owner?.windows ?? [self]).flatMap { controller in controller.allPanes.filter { controller.workspaceView.agent(for: $0)?.status == "blocked" } }
+    guard !panes.isEmpty else { NSSound.beep(); return }
+    let index = panes.firstIndex { $0 === session }.map { ($0 + 1) % panes.count } ?? 0
+    let pane = panes[index]; pane.windowController?.selectTab(pane); pane.windowController?.window?.makeKeyAndOrderFront(nil)
+  }
+
   @objc private func workspaceSearchTyped(_ sender: NSSearchField) {
     let text = sender.stringValue
     sender.stringValue = ""
@@ -1342,7 +1385,7 @@ extension TerminalWindowController {
     chrome?.layer?.borderWidth = hasBell && native.bellFeatures & 16 != 0 ? 3 : 0
   }
 
-  func notify(title: String, body: String) {
+  func notify(title: String, body: String, terminalID: String? = nil) {
     // OSC notifications are filtered by the engine. Command-finish notifications
     // have their own policy and must not be disabled by that OSC setting.
     let center = UNUserNotificationCenter.current()
@@ -1351,6 +1394,7 @@ extension TerminalWindowController {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
+        if let terminalID { content.userInfo["terminalID"] = terminalID; content.sound = .default }
         center.add(
           UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         ) { error in
@@ -1810,7 +1854,7 @@ extension AppDelegate {
         self.connectionStatus[client.endpointID] = .connected
         self.restoreUnavailableTabs()
         for controller in opened {
-          controller.persistenceReady = self.workspaceStore != nil
+          controller.persistenceReady = self.workspacePersistence.store != nil
           controller.persistedNamespaceIDs = Set(controller.namespaces.compactMap(\.id))
           self.scheduleWorkspaceSave(controller)
         }
@@ -1835,13 +1879,13 @@ extension AppDelegate {
   func observeHerdr(_ client: HerdrClient, snapshot: HerdrClient.Snapshot) {
     client.onWorkspaceEvent = { [weak self, weak client] in
       guard let self, let client, !self.terminating else { return }
-      self.eventRefresh[client.endpointID]?.invalidate()
-      self.eventRefresh[client.endpointID] = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self, weak client] _ in
-        guard let self, let client, !self.eventRefreshRunning.contains(client.endpointID), !self.terminating else { return }
-        self.eventRefreshRunning.insert(client.endpointID)
+      self.connectionCoordinator.timers[client.endpointID]?.invalidate()
+      self.connectionCoordinator.timers[client.endpointID] = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self, weak client] _ in
+        guard let self, let client, !self.connectionCoordinator.refreshing.contains(client.endpointID), !self.terminating else { return }
+        self.connectionCoordinator.refreshing.insert(client.endpointID)
         client.perform({ try $0.snapshot(timeout: 1) }) { [weak self, weak client] result in
           guard let self, let client else { return }
-          self.eventRefreshRunning.remove(client.endpointID)
+          self.connectionCoordinator.refreshing.remove(client.endpointID)
           if case .success(let snapshot) = result { self.synchronizeHerdr(snapshot, client: client) }
         }
       }
@@ -1866,12 +1910,12 @@ extension AppDelegate {
       && currentRecords.allSatisfy { old in snapshot.panes.contains { $0.terminal_id == old.terminal_id && $0.tab_id == old.tab_id && $0.workspace_id == old.workspace_id } }
     if var saved = workspaceState {
       saved = saved.reconciled(endpoint: client.endpointID, live: savedNamespaces(serverSnapshot))
-      workspaceNeedsSave = workspaceNeedsSave || saved != workspaceState
+      workspacePersistence.dirty = workspacePersistence.dirty || saved != workspaceState
       workspaceState = saved
     }
     if structureMatches {
       for controller in targets { controller.updateHerdrLabels(snapshot) }
-      if workspaceNeedsSave { flushWorkspaceSave() }
+      if workspacePersistence.dirty { flushWorkspaceSave() }
       return
     }
     synchronizingWorkspace = true
@@ -2135,6 +2179,24 @@ extension TerminalWindowController {
     }
   }
 
+  func reorderNamespace(_ id: String, to index: Int) {
+    guard let old = namespaces.firstIndex(where: { $0.id == id }) else { return }
+    let space = namespaces.remove(at: old)
+    namespaces.insert(space, at: max(0, min(namespaces.count, index > old ? index - 1 : index)))
+    workspaceView.refreshTabs(); owner?.scheduleWorkspaceSave(self)
+  }
+
+  func placeTab(id: String, before target: TerminalTab) -> Bool {
+    guard let owner, let destination = namespace(for: target.selected),
+      let source = owner.windows.first(where: { $0.namespaces.flatMap(\.tabs).contains { $0.herdrID == id } }),
+      let tab = source.namespaces.flatMap(\.tabs).first(where: { $0.herdrID == id }), tab !== target else { return false }
+    if source.namespace(for: tab.selected) !== destination, let id = destination.id { source.moveTab(tab, toNamespace: id) }
+    destination.tabs.removeAll { $0 === tab }
+    let index = destination.tabs.firstIndex { $0 === target } ?? destination.tabs.count
+    destination.tabs.insert(tab, at: index)
+    selectTab(tab); workspaceView.refreshTabs(); owner.scheduleWorkspaceSave(self); return true
+  }
+
   func moveTab(_ tab: TerminalTab, toNamespace id: String) {
     guard let source = namespace(for: tab.selected), let owner,
       let destination = owner.windows.first(where: { $0.namespaces.contains { $0.id == id } }),
@@ -2351,20 +2413,20 @@ extension AppDelegate {
     let store = workspaceStateURL.map { WorkspaceStateStore(url: $0) } ?? WorkspaceStateStore()
     do {
       workspaceState = try store.load()
-      pendingEnds = Set(workspaceState?.pendingTerminalClosures ?? [])
-      workspaceStore = store
+      closeHistory.pending = Set(workspaceState?.pendingTerminalClosures ?? [])
+      workspacePersistence.store = store
     } catch {
       do {
         try store.preserveDamagedState()
         workspaceState = WorkspaceState()
-        workspaceStore = store
+        workspacePersistence.store = store
         NSLog("Started a fresh workspace after preserving damaged state: %@", error.localizedDescription)
       } catch { NSLog("Could not preserve damaged workspace; persistence disabled: %@", error.localizedDescription) }
     }
   }
 
   func scheduleWorkspaceSave(_ controller: TerminalWindowController) {
-    guard !restoringWorkspace, controller.persistenceReady, workspaceStore != nil, var state = workspaceState else { return }
+    guard !restoringWorkspace, controller.persistenceReady, workspacePersistence.store != nil, var state = workspaceState else { return }
     let current = controller.namespaces.compactMap { namespace -> WorkspaceState.Namespace? in
       guard let id = namespace.id else { return nil }
       var space = WorkspaceState.Namespace(id: id, tabs: namespace.tabs.compactMap { tab in
@@ -2432,20 +2494,17 @@ extension AppDelegate {
       state.selectedNamespaceID = controller.activeNamespace.id
       state.sidebar = controller.workspaceView.savedSidebarState
     }
-    guard state != workspaceState || workspaceNeedsSave else { return }
-    workspaceNeedsSave = true
+    guard state != workspaceState || workspacePersistence.dirty else { return }
+    workspacePersistence.dirty = true
     workspaceState = state
-    workspaceSaveTimer?.invalidate()
-    workspaceSaveTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
+    workspacePersistence.timer?.invalidate()
+    workspacePersistence.timer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
       self?.flushWorkspaceSave()
     }
   }
 
   func flushWorkspaceSave() {
-    workspaceSaveTimer?.invalidate()
-    workspaceSaveTimer = nil
-    guard workspaceNeedsSave, let state = workspaceState, let store = workspaceStore else { return }
-    do { try store.save(state); workspaceNeedsSave = false }
+    do { try workspacePersistence.flush() }
     catch { NSLog("Could not save workspace: %@", error.localizedDescription) }
   }
 }
@@ -2492,7 +2551,7 @@ extension AppDelegate {
 
   func client(for id: String) -> HerdrClient? {
     if herdr?.endpointID == id { return herdr }
-    return remoteClients.values.first { $0.endpointID == id }
+    return connectionCoordinator.clients.values.first { $0.endpointID == id }
   }
 
   private func clientIsAvailable(_ id: String) -> Bool {
@@ -2500,12 +2559,12 @@ extension AppDelegate {
   }
 
   func loadConnections(reload: Bool = false) {
-    guard (!connectionsLoaded || reload), let executable = herdr?.executable else { return }
-    connectionsLoaded = true
+    guard (!connectionCoordinator.loaded || reload), let executable = herdr?.executable else { return }
+    connectionCoordinator.loaded = true
     let next = runtime?.settings.connections ?? [.local]
     let previous = connections
     connections = next
-    for client in [herdr].compactMap({ $0 }) + Array(remoteClients.values) where !next.contains(where: { $0.id == client.endpointID && $0.enabled }) {
+    for client in [herdr].compactMap({ $0 }) + Array(connectionCoordinator.clients.values) where !next.contains(where: { $0.id == client.endpointID && $0.enabled }) {
       suspendConnection(client)
     }
     for profile in next {
@@ -2520,11 +2579,11 @@ extension AppDelegate {
       let client = existing?.sessionName == "missing" ? makeClient(profile, executable: executable) : existing ?? makeClient(profile, executable: executable)
       client.updateLabel(profile.label)
       if let existing, existing !== client {
-        for pane in windows.flatMap(\.allPanes) + closedOperations.flatMap(\.panes) where pane.herdrTerminal?.client === existing {
+        for pane in windows.flatMap(\.allPanes) + closeHistory.closed.flatMap(\.panes) where pane.herdrTerminal?.client === existing {
           if let record = pane.herdrTerminal?.pane { pane.herdrTerminal = .init(client: client, pane: record) }
         }
       }
-      if client !== herdr { remoteClients[profile.id] = client }
+      if client !== herdr { connectionCoordinator.clients[profile.id] = client }
       let changed = client.isEnabled != profile.enabled
       if changed { client.setEnabled(profile.enabled) }
       if !profile.enabled { suspendConnection(client) }
@@ -2534,7 +2593,7 @@ extension AppDelegate {
     // Missing definitions still get non-executable placeholders, preserving membership.
     for id in Set(workspaceState?.namespaces.flatMap(\.tabs).flatMap { tab in tab.panes?.map(\.connectionID) ?? [tab.connectionID] } ?? []) where client(for: id) == nil {
       let missing = HerdrClient(executable: executable, sessionName: "missing", identity: id, label: "Missing: " + id)
-      missing.setEnabled(false); remoteClients[id] = missing
+      missing.setEnabled(false); connectionCoordinator.clients[id] = missing
       connectionStatus[id] = .failed("Connection is missing from config.toml")
     }
     restoreUnavailableTabs()
@@ -2543,9 +2602,9 @@ extension AppDelegate {
 
   private func suspendConnection(_ client: HerdrClient) {
     client.setEnabled(false)
-    eventRefresh.removeValue(forKey: client.endpointID)?.invalidate()
+    connectionCoordinator.timers.removeValue(forKey: client.endpointID)?.invalidate()
     connectionStatus[client.endpointID] = .disabled
-    for pane in windows.flatMap(\.allPanes) + closedOperations.flatMap(\.panes) where pane.herdrTerminal?.client === client {
+    for pane in windows.flatMap(\.allPanes) + closeHistory.closed.flatMap(\.panes) where pane.herdrTerminal?.client === client {
       pane.suspendConnection(client.endpointLabel + " · Disabled")
     }
     windows.forEach { $0.workspaceView.present(); scheduleWorkspaceSave($0) }
@@ -2565,9 +2624,9 @@ extension AppDelegate {
   }
 
   private func restoreRemoteConnections() {
-    guard !remoteRestoreAttempted else { return }
-    remoteRestoreAttempted = true
-    connectRemaining(remoteClients.values.filter(\.isEnabled).sorted { $0.endpointID < $1.endpointID })
+    guard !connectionCoordinator.restored else { return }
+    connectionCoordinator.restored = true
+    connectRemaining(connectionCoordinator.clients.values.filter(\.isEnabled).sorted { $0.endpointID < $1.endpointID })
   }
 
   private func connectRemaining(_ clients: [HerdrClient]) {
@@ -2584,7 +2643,7 @@ extension AppDelegate {
       return
     }
     guard let runtime else { completion?(); return }
-    if herdr !== client { remoteClients[client.endpointID] = client }
+    if herdr !== client { connectionCoordinator.clients[client.endpointID] = client }
     muxOpening = true
     connectionStatus[client.endpointID] = .connecting; connectionsWindow?.refresh()
     let directory = runtime.settings.workingDirectory
@@ -2614,7 +2673,7 @@ extension AppDelegate {
             self.scheduleWorkspaceSave(existing)
           } else {
             let opened = try self.attachHerdrWindow(scoped, client: client, presentation: group, state: saved)
-            opened.persistenceReady = self.workspaceStore != nil
+            opened.persistenceReady = self.workspacePersistence.store != nil
             self.scheduleWorkspaceSave(opened)
           }
           attached.formUnion(scoped.panes.map(\.terminal_id))
@@ -2628,7 +2687,7 @@ extension AppDelegate {
             let spaces = saved.namespaces.filter { $0.tabs.contains { tab in remaining.panes.contains { pane in tab.id == pane.tab_id || tab.panes?.contains { $0.terminalID == pane.terminal_id } == true } } }.map(\.id)
             let group = WorkspaceState.Window(id: UUID().uuidString, namespaceIDs: spaces, selectedNamespaceID: spaces.first, frame: nil, sidebar: nil)
             let opened = try self.attachHerdrWindow(remaining, client: client, presentation: group, state: saved)
-            opened.persistenceReady = self.workspaceStore != nil; self.scheduleWorkspaceSave(opened)
+            opened.persistenceReady = self.workspacePersistence.store != nil; self.scheduleWorkspaceSave(opened)
           }
         }
         for pane in self.windows.flatMap(\.allPanes) where pane.herdrTerminal?.client === client && pane.connectionSuspended { pane.retryAttachment() }
@@ -2668,7 +2727,7 @@ extension AppDelegate {
             created.workspaceWindowID = group.id; created.activeNamespace.id = saved.id; created.activeNamespace.name = saved.name ?? "Namespace"; created.activeTab.herdrID = tab.id
             windows.append(created); created.openWindow(restoring: true)
             if let frame = group.frame { created.window?.setFrame(NSRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height), display: true) }
-            created.persistenceReady = workspaceStore != nil; controller = created
+            created.persistenceReady = workspacePersistence.store != nil; controller = created
           }
           guard let controller else { continue }
           let space = controller.namespaces.first { $0.id == saved.id } ?? TerminalNamespace(name: saved.name ?? "Namespace", session: first)
@@ -2728,7 +2787,7 @@ private final class ClosedTerminals {
 
 extension AppDelegate {
   fileprivate func endTerminal(_ terminal: HerdrClient.Terminal) {
-    pendingEnds.insert(terminal.pane.terminal_id); persistCloseIntent()
+    closeHistory.pending.insert(terminal.pane.terminal_id); persistCloseIntent()
     guard terminal.client.isEnabled else { return }
     terminal.client.perform({ try $0.snapshot() }) { [weak self] result in
       if case .success(let snapshot) = result { self?.retryPendingClosures(terminal.client, snapshot: snapshot) }
@@ -2740,8 +2799,8 @@ extension AppDelegate {
     guard timeout > 0, !panes.isEmpty, !terminating, !controller.muxBusy else { return false }
     let operation = ClosedTerminals(panes, controller: controller, destroy: destroy)
     guard !operation.slots.isEmpty else { return false }
-    redoOperations.forEach { $0.timer?.invalidate() }; redoOperations = []
-    closedOperations.append(operation)
+    closeHistory.redo.forEach { $0.timer?.invalidate() }; closeHistory.redo = []
+    closeHistory.closed.append(operation)
     operation.timer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [weak self, weak operation] _ in
       guard let self, let operation else { return }
       self.expireClose(operation)
@@ -2754,21 +2813,21 @@ extension AppDelegate {
   private func persistCloseIntent() {
     guard var state = workspaceState else { return }
     state.pendingTerminalClosures = hiddenTerminalIDs.sorted()
-    if state != workspaceState { workspaceState = state; workspaceNeedsSave = true; flushWorkspaceSave() }
+    if state != workspaceState { workspaceState = state; workspacePersistence.dirty = true; flushWorkspaceSave() }
   }
 
   private func flushClosesBeforeQuit() -> Bool {
-    let clients = ([herdr].compactMap { $0 } + Array(remoteClients.values) + closedOperations.flatMap(\.panes).compactMap { $0.herdrTerminal?.client }).reduce(into: [String: HerdrClient]()) { $0[$1.endpointID] = $1 }
-    pendingEnds.formUnion(hiddenTerminalIDs)
-    for operation in closedOperations { operation.timer?.invalidate(); operation.applied = false }
+    let clients = ([herdr].compactMap { $0 } + Array(connectionCoordinator.clients.values) + closeHistory.closed.flatMap(\.panes).compactMap { $0.herdrTerminal?.client }).reduce(into: [String: HerdrClient]()) { $0[$1.endpointID] = $1 }
+    closeHistory.pending.formUnion(hiddenTerminalIDs)
+    for operation in closeHistory.closed { operation.timer?.invalidate(); operation.applied = false }
     persistCloseIntent()
-    guard !pendingEnds.isEmpty else { return false }
+    guard !closeHistory.pending.isEmpty else { return false }
     var remaining = clients.count
     var replied = false
     let finish = { if !replied { replied = true; NSApp.reply(toApplicationShouldTerminate: true) } }
     DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: finish)
     for client in clients.values {
-      let ids = pendingEnds.filter(client.owns)
+      let ids = closeHistory.pending.filter(client.owns)
       client.perform({ client -> Set<String> in
         let deadline = Date(timeIntervalSinceNow: 4)
         let snapshot = try client.snapshot(timeout: 1)
@@ -2780,7 +2839,7 @@ extension AppDelegate {
         return completed
       }) { [weak self] result in
         guard let self, !replied else { return }
-        if case .success(let completed) = result { self.pendingEnds.subtract(completed); self.persistCloseIntent() }
+        if case .success(let completed) = result { self.closeHistory.pending.subtract(completed); self.persistCloseIntent() }
         remaining -= 1
         if remaining == 0 { finish() }
       }
@@ -2790,10 +2849,10 @@ extension AppDelegate {
 
   private func expireClose(_ operation: ClosedTerminals) {
     operation.timer?.invalidate()
-    closedOperations.removeAll { $0 === operation }
-    redoOperations.removeAll { $0 === operation }
+    closeHistory.closed.removeAll { $0 === operation }
+    closeHistory.redo.removeAll { $0 === operation }
     guard operation.applied else { return }
-    if operation.destroy { pendingEnds.formUnion(operation.terminalIDs) }
+    if operation.destroy { closeHistory.pending.formUnion(operation.terminalIDs) }
     operation.panes.forEach { $0.close() }
     persistCloseIntent()
     let clients = operation.panes.compactMap { $0.herdrTerminal?.client }.reduce(into: [String: HerdrClient]()) { $0[$1.endpointID] = $1 }
@@ -2805,9 +2864,9 @@ extension AppDelegate {
   }
 
   private func retryPendingClosures(_ client: HerdrClient, snapshot: HerdrClient.Snapshot) {
-    let ids = pendingEnds.filter(client.owns)
-    guard !ids.isEmpty, !endingEndpoints.contains(client.endpointID), !terminating else { return }
-    endingEndpoints.insert(client.endpointID)
+    let ids = closeHistory.pending.filter(client.owns)
+    guard !ids.isEmpty, !closeHistory.ending.contains(client.endpointID), !terminating else { return }
+    closeHistory.ending.insert(client.endpointID)
     client.perform({ client -> Set<String> in
       var completed: Set<String> = []
       for id in ids {
@@ -2819,14 +2878,14 @@ extension AppDelegate {
       return completed
     }) { [weak self] result in
       guard let self else { return }
-      self.endingEndpoints.remove(client.endpointID)
-      if case .success(let completed) = result { self.pendingEnds.subtract(completed); self.persistCloseIntent() }
+      self.closeHistory.ending.remove(client.endpointID)
+      if case .success(let completed) = result { self.closeHistory.pending.subtract(completed); self.persistCloseIntent() }
     }
   }
 
   @objc func undoClose() {
     if let editor = NSApp.keyWindow?.firstResponder as? NSTextView, let undo = editor.undoManager, undo.canUndo { undo.undo(); return }
-    guard let operation = closedOperations.last, operation.applied, !operation.checking, !terminating else { return }
+    guard let operation = closeHistory.closed.last, operation.applied, !operation.checking, !terminating else { return }
     operation.checking = true
     operation.timer?.invalidate()
     let clients = Array(operation.panes.compactMap { $0.herdrTerminal?.client }.reduce(into: [String: HerdrClient]()) { $0[$1.endpointID] = $1 }.values)
@@ -2865,9 +2924,9 @@ extension AppDelegate {
   private func restoreUndo(_ operation: ClosedTerminals) {
     operation.checking = false
     operation.applied = false
-    closedOperations.removeAll { $0 === operation }
+    closeHistory.closed.removeAll { $0 === operation }
     if operation.slots.isEmpty { persistCloseIntent(); return }
-    redoOperations.append(operation)
+    closeHistory.redo.append(operation)
     persistCloseIntent()
     let controller: TerminalWindowController
     if let existing = operation.controller, !existing.closing, existing.window != nil { controller = existing }
@@ -2883,7 +2942,7 @@ extension AppDelegate {
       controller.openWindow()
       if let frame = operation.frame { controller.window?.setFrame(frame, display: true) }
     }
-    controller.persistenceReady = workspaceStore != nil
+    controller.persistenceReady = workspacePersistence.store != nil
     if let first = operation.panes.first { controller.selectTab(first) }
     controller.workspaceView.present()
     controller.window?.makeKeyAndOrderFront(nil)
@@ -2895,12 +2954,12 @@ extension AppDelegate {
 
   @objc func redoClose() {
     if let editor = NSApp.keyWindow?.firstResponder as? NSTextView, let undo = editor.undoManager, undo.canRedo { undo.redo(); return }
-    guard let operation = redoOperations.last, let controller = operation.controller, !controller.closing else { return }
+    guard let operation = closeHistory.redo.last, let controller = operation.controller, !controller.closing else { return }
     if !operation.destroy { controller.window?.performClose(nil); return }
     operation.timer?.invalidate()
     let panes = operation.panes.filter { pane in controller.allPanes.contains { $0 === pane } }
     if !deferClose(panes, in: controller, destroy: true) {
-      redoOperations.removeAll { $0 === operation }
+      closeHistory.redo.removeAll { $0 === operation }
       for pane in panes { controller.closePane(pane, confirm: false) }
     }
   }
@@ -2999,5 +3058,37 @@ extension TerminalWindowController {
 }
 
 extension AppDelegate {
-  fileprivate var workspacePersistenceEnabled: Bool { workspaceStore != nil }
+  fileprivate var workspacePersistenceEnabled: Bool { workspacePersistence.store != nil }
+}
+
+private final class WorkspacePersistence {
+  var store: WorkspaceStateStore?
+  var state: WorkspaceState?
+  var dirty = false
+  var timer: Timer?
+  deinit { timer?.invalidate() }
+
+  func flush() throws {
+    timer?.invalidate(); timer = nil
+    guard dirty, let state, let store else { return }
+    try store.save(state)
+    dirty = false
+  }
+}
+
+private final class ConnectionCoordinator {
+  var clients: [String: HerdrClient] = [:]
+  var restored = false
+  var loaded = false
+  var timers: [String: Timer] = [:]
+  var refreshing: Set<String> = []
+  deinit { timers.values.forEach { $0.invalidate() } }
+}
+
+private final class CloseHistory {
+  var closed: [ClosedTerminals] = []
+  var redo: [ClosedTerminals] = []
+  var pending: Set<String> = []
+  var ending: Set<String> = []
+  deinit { (closed + redo).forEach { $0.timer?.invalidate() } }
 }
