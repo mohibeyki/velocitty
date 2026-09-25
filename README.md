@@ -6,16 +6,18 @@ one window. It is built with Swift and AppKit, uses
 engine, and uses [herdr](https://github.com/herdrdev/herdr) for persistent sessions.
 
 Namespaces group projects, tabs group work, and panes show individual terminals.
-Velocitty owns presentation and focus; herdr owns running processes. Local and
-remote namespaces can share a window, and tabs from different namespaces can be
-shown side by side without moving their terminals.
+Velocitty owns spaces, presentation, and focus; herdr owns running processes.
+A space can mix tabs from local and remote connections. Each tab’s panes use one
+connection. Tabs can move between spaces or appear side by side without moving
+or restarting their processes.
 
 ## Roadmap
 
 - [x] **Terminal foundation:** interactive shells, shell integration, copy/paste,
   search, links, file drops, and native window controls.
-- [x] **Configuration:** TOML, default-config export, native settings editor,
-  reload, independent interface colors, and automatic light/dark terminal themes.
+- [x] **Configuration:** TOML, default-config export, categorized native settings
+  editor, per-file override reset, reload, independent interface colors, and
+  automatic light/dark terminal themes.
 - [x] **Namespaces and tabs:** naming, ordering, keyboard navigation, compact
   sidebar, Git branch/cwd subtitles, and monochrome agent status indicators.
 - [x] **Panes:** nested splits, directional focus, resizing by keyboard or divider,
@@ -27,7 +29,8 @@ shown side by side without moving their terminals.
 - [x] **Close undo:** briefly retain closed terminals, restore their original
   surfaces, and retry unfinished explicit closes after connection failures.
 - [x] **Remote sessions:** herdr machine profiles, SSH transport, multiple servers
-  in one window, remote Git metadata, and restoration of saved connections.
+  in one space, independent local sessions, connection enable/disable controls,
+  remote Git metadata, and restoration of unavailable tabs.
 - [ ] **Distribution:** release builds, signing, notarization, and updates.
 - [ ] **Linux frontend:** a separate native frontend sharing the terminal engine.
 
@@ -74,19 +77,21 @@ Use the command palette for **Show Tab Alongside**, pane moves, zoom, equalizati
 and the remaining window actions. Agent icons reflect herdr’s reported state;
 unknown status is shown when a server cannot be reached.
 
-For remote work, configure SSH access and add a herdr machine profile:
+Choose **Velocitty → Connections** to add local sessions or SSH destinations,
+enable/disable connections, retry, or create a tab on a selected connection.
+Existing herdr machine profiles are imported as disabled entries; Velocitty’s
+switches do not change herdr’s global machine catalog. SSH uses existing keys and
+known hosts; start the selected herdr session on the destination first.
 
-```sh
-herdr machine add user@host --label Host --remote-session velocitty
-```
-
-Start the selected session on that host, then choose **Velocitty → Connections**.
-Connections use existing SSH keys and known hosts. Enabled profiles previously
-used by the saved workspace reconnect on launch; an unavailable server’s saved
-layout is retained. Local file drops always use the local server.
+Enabled connections reconnect on launch. Disabling detaches their terminals but
+preserves running processes and space membership; unavailable tabs remain visible.
+New tabs inherit the active connection unless another is selected in Connections.
+Local file drops always use the default local server.
 
 Workspace state is stored separately from preferences in
-`~/Library/Application Support/Velocitty/workspace.json`. Shell configuration
+`~/Library/Application Support/Velocitty/workspace.json`; connection preferences
+use `connections.json` alongside it. Upgrading workspace state keeps a versioned
+backup of the previous file. Shell configuration
 belongs to herdr. New local shells receive bundled integration hooks; existing
 shells and remote shell configuration are left intact.
 
@@ -94,7 +99,9 @@ shells and remote shell configuration are left intact.
 
 Choose **Velocitty → Settings** or edit `~/.config/velocitty/config.toml`
 (`$XDG_CONFIG_HOME/velocitty/config.toml` when that variable is an absolute path).
-The editor preserves comments, unknown settings, and included files, and checks
+Settings provides categories, search, common value controls, and an advanced TOML
+editor. **Use Default** removes the selected file’s override; included files may
+still supply a value. The editor preserves comments and unknown settings, and checks
 for external edits before saving. Reload with ⌘Shift-comma; process settings apply
 to newly created terminals.
 
