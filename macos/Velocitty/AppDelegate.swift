@@ -198,7 +198,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     } catch { configurationAlert(error).runModal() }
   }
 
-  // Reopening from the Dock presents an existing terminal when possible.
   func openWindow() {
     if let activeWindow { activeWindow.openWindow() } else { newWindow() }
   }
@@ -975,7 +974,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate, NSToolbarDeleg
 
   func applyWindowSettings() {
     guard let window else { return }
-    // Until workspace restoration lands, do not silently restore only one tab.
+    // AppKit restores standalone windows; workspace persistence restores mux windows.
     window.isRestorable = shouldSaveState && session?.herdrTerminal == nil && namespaces.count == 1 && allPanes.count == 1 && session?.hasCustomCommand != true
     window.invalidateRestorableState()
     chrome?.refreshVisibility()
@@ -1534,7 +1533,6 @@ extension TerminalWindowController {
 
   func selectTab(_ tab: TerminalTab) { selectTab(tab.selected) }
 
-  // Selecting a pane also selects its containing tab and namespace.
   func selectTab(_ pane: TerminalSession) {
     guard let namespace = namespace(for: pane), let tab = tab(for: pane), (pane.surface != nil || pane.connectionSuspended),
       let window, window.attachedSheet == nil, !closing else { return }
@@ -1883,20 +1881,13 @@ extension AppDelegate {
     }
   }
   func observeHerdr(_ client: HerdrClient, snapshot: HerdrClient.Snapshot) {
-    client.onWorkspaceEvent = { [weak self, weak client] in
+    connectionCoordinator.observe(client, snapshot: snapshot) { [weak self, weak client] result in
       guard let self, let client, !self.terminating else { return }
-      self.connectionCoordinator.timers[client.endpointID]?.invalidate()
-      self.connectionCoordinator.timers[client.endpointID] = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self, weak client] _ in
-        guard let self, let client, !self.connectionCoordinator.refreshing.contains(client.endpointID), !self.terminating else { return }
-        self.connectionCoordinator.refreshing.insert(client.endpointID)
-        client.perform({ try $0.snapshot(timeout: 1) }) { [weak self, weak client] result in
-          guard let self, let client else { return }
-          self.connectionCoordinator.refreshing.remove(client.endpointID)
-          if case .success(let snapshot) = result { self.synchronizeHerdr(snapshot, client: client) }
-        }
+      switch result {
+      case .success(let snapshot): self.synchronizeHerdr(snapshot, client: client)
+      case .failure(let error): self.connectionFailed(client, error: error)
       }
     }
-    client.observeEvents(panes: snapshot.panes)
   }
 
   func synchronizeHerdr(_ incoming: HerdrClient.Snapshot, client: HerdrClient) {
@@ -1950,7 +1941,6 @@ extension AppDelegate {
       NSLog("Workspace synchronization: %@", error.localizedDescription)
       return
     }
-    // Existing spaces keep their window. New backend terminals are imported once.
     let destination = targets.first { $0 === focusedWindow } ?? targets[0]
     let assigned = Set(windows.flatMap(\.namespaces).compactMap(\.id))
     let state = workspaceState ?? WorkspaceState()
@@ -2127,10 +2117,12 @@ extension TerminalWindowController {
   func refreshLayoutTree(_ tab: TerminalTab) {
     guard !tab.loadingTree, tab.localLayout == nil, let terminal = tab.selected.herdrTerminal else { return }
     tab.loadingTree = true
+    tab.ensureLayout()
+    let fallback = tab.localLayout
     terminal.client.perform({ try $0.layoutTree(tabID: terminal.pane.tab_id) }) { [weak self, weak tab] result in
       guard let self, let tab else { return }
       tab.loadingTree = false
-      guard !self.closing, tab.localLayout == nil else { return }
+      guard !self.closing, tab.localLayout == fallback else { return }
       if case .success(let tree) = result {
         func convert(_ node: HerdrClient.LayoutNode) -> PaneLayout? {
           if let id = node.pane_id, let pane = tab.panes.first(where: { $0.herdrTerminal?.pane.pane_id == id }), let terminal = pane.herdrTerminal { return .terminal(terminal.pane.terminal_id) }
@@ -2288,7 +2280,6 @@ extension TerminalWindowController {
     if deferMuxAction({ [weak self] in self?.endHerdrTabs(targets) }) { return }
     let targets = targets.filter { tab in namespaces.contains { $0.tabs.contains { $0 === tab } } }
     if owner?.deferClose(targets.flatMap(\.panes), in: self, destroy: true) == true { return }
-    // Close each exact terminal, even when a local tab spans servers.
     for pane in targets.flatMap(\.panes) {
       guard let terminal = pane.herdrTerminal else { continue }
       owner?.endTerminal(terminal)
@@ -2429,6 +2420,7 @@ extension AppDelegate {
         NSLog("Started a fresh workspace after preserving damaged state: %@", error.localizedDescription)
       } catch { NSLog("Could not preserve damaged workspace; persistence disabled: %@", error.localizedDescription) }
     }
+    registerMissingConnections()
   }
 
   func scheduleWorkspaceSave(_ controller: TerminalWindowController) {
@@ -2576,7 +2568,7 @@ extension AppDelegate {
       suspendConnection(client)
     }
     for profile in next {
-      if let old = client(for: profile.id), old.sessionName != "missing",
+      if let old = client(for: profile.id), !old.isPlaceholder,
         old.machine?.target != profile.target || old.sessionName != profile.session {
         // Saved terminal references belong to their original server, even when offline.
         if let client = client(for: profile.id) { suspendConnection(client) }
@@ -2584,7 +2576,7 @@ extension AppDelegate {
         continue
       }
       let existing = client(for: profile.id)
-      let client = existing?.sessionName == "missing" ? makeClient(profile, executable: executable) : existing ?? makeClient(profile, executable: executable)
+      let client = existing?.isPlaceholder == true ? makeClient(profile, executable: executable) : existing ?? makeClient(profile, executable: executable)
       client.updateLabel(profile.label)
       if let existing, existing !== client {
         for pane in windows.flatMap(\.allPanes) + closeHistory.closed.flatMap(\.panes) where pane.herdrTerminal?.client === existing {
@@ -2598,14 +2590,19 @@ extension AppDelegate {
       else if connectionStatus[profile.id] == nil || changed { connectionStatus[profile.id] = .notConnected }
       if reload, profile.enabled, changed || !previous.contains(where: { $0.id == profile.id }) { connectEndpoint(client) }
     }
-    // Missing definitions still get non-executable placeholders, preserving membership.
+    registerMissingConnections()
+    restoreUnavailableTabs()
+    connectionsWindow?.refresh()
+  }
+
+  private func registerMissingConnections() {
+    guard let executable = herdr?.executable else { return }
     for id in Set(workspaceState?.namespaces.flatMap(\.tabs).flatMap { tab in tab.panes?.map(\.connectionID) ?? [tab.connectionID] } ?? []) where client(for: id) == nil {
       let missing = HerdrClient(executable: executable, sessionName: "missing", identity: id, label: "Missing: " + id)
+      missing.isPlaceholder = true
       missing.setEnabled(false); connectionCoordinator.clients[id] = missing
       connectionStatus[id] = .failed("Connection is missing from config.toml")
     }
-    restoreUnavailableTabs()
-    connectionsWindow?.refresh()
   }
 
   private func suspendConnection(_ client: HerdrClient) {
@@ -3090,7 +3087,31 @@ private final class ConnectionCoordinator {
   var loaded = false
   var timers: [String: Timer] = [:]
   var refreshing: Set<String> = []
+  private var pending: Set<String> = []
   deinit { timers.values.forEach { $0.invalidate() } }
+
+  func observe(_ client: HerdrClient, snapshot: HerdrClient.Snapshot, receive: @escaping (Result<HerdrClient.Snapshot, Error>) -> Void) {
+    client.onWorkspaceEvent = { [weak self, weak client] in
+      guard let self, let client, client.isEnabled else { return }
+      self.timers[client.endpointID]?.invalidate()
+      self.timers[client.endpointID] = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self, weak client] _ in
+        guard let client else { return }
+        self?.refresh(client, receive: receive)
+      }
+    }
+    client.observeEvents(panes: snapshot.panes)
+  }
+
+  private func refresh(_ client: HerdrClient, receive: @escaping (Result<HerdrClient.Snapshot, Error>) -> Void) {
+    guard client.isEnabled else { return }
+    guard refreshing.insert(client.endpointID).inserted else { pending.insert(client.endpointID); return }
+    client.perform({ try $0.snapshot(timeout: 1) }) { [weak self, weak client] result in
+      guard let self, let client else { return }
+      self.refreshing.remove(client.endpointID)
+      receive(result)
+      if self.pending.remove(client.endpointID) != nil { self.refresh(client, receive: receive) }
+    }
+  }
 }
 
 private final class CloseHistory {

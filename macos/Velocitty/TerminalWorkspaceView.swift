@@ -167,11 +167,12 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   }
 
   private func pollAgents() {
-    guard !pollingAgents, let controller, !controller.muxBusy,
-      window?.isVisible == true, NSApp.isActive,
+    guard !pollingAgents, let controller, !controller.muxBusy, !controller.closing,
+      window != nil,
       let client = controller.session?.herdrTerminal?.client else { return }
     let now = ProcessInfo.processInfo.systemUptime
-    guard now - lastAgentPoll >= (client.eventsConnected ? 10 : 2) else { return }
+    let interval: TimeInterval = NSApp.isActive ? (client.eventsConnected ? 10 : 2) : 30
+    guard now - lastAgentPoll >= interval else { return }
     lastAgentPoll = now
     pollingAgents = true
     let clients = controller.allPanes.compactMap { $0.herdrTerminal?.client }.filter(\.isEnabled).reduce(into: [String: HerdrClient]()) { $0[$1.endpointID] = $1 }.values
@@ -187,7 +188,6 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
           guard self.controller?.closing == false, self.controller?.owner?.terminating != true else { return }
           self.controller?.owner?.synchronizeHerdr(snapshot, client: client)
           self.updateAgents(snapshot)
-          self.applyPolledLayouts(snapshot)
         case .failure(let error):
           self.controller?.owner?.connectionFailed(client, error: error)
           let stale = self.agents.mapValues { $0 }
@@ -328,10 +328,6 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
       gitWatchers[path] = source
       source.resume()
     }
-  }
-
-  private func applyPolledLayouts(_ snapshot: HerdrClient.Snapshot) {
-    // Backend geometry must not override the local workspace.
   }
 
   func agent(for pane: TerminalSession) -> Agent? {

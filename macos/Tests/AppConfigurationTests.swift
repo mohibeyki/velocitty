@@ -419,6 +419,10 @@ extension AppConfigurationTests {
     let duplicate = try parse("[[connections]]\nid='local'\n[[connections]]\nid='local'")
     XCTAssertNil(duplicate.connections)
     XCTAssertEqual(duplicate.diagnostics.count, 1)
+    let malformed = try parse("[[connections]]\nid='gpu'\nenabled='wrong'\n[terminal]\nfont_size=17")
+    XCTAssertNil(malformed.connections)
+    XCTAssertEqual(malformed.options.first?.value, "17")
+    XCTAssertEqual(malformed.diagnostics.count, 1)
   }
 
   func testIncludedConnectionsReplaceWholeList() throws {

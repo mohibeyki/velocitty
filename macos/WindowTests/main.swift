@@ -1869,6 +1869,19 @@ func runMixedConnectionsCheck() throws {
   let offlineTab = offline.windows.flatMap(\.namespaces).flatMap(\.tabs).first { $0.herdrID == mixedTabID }!
   precondition(offlineTab.panes.count == 2 && offlineTab.panes.contains { $0.connectionSuspended }, "Unavailable pane must retain its position in a mixed tab")
   for controller in Array(offline.windows) { controller.closing = true; controller.window?.close() }
+  let removedProfile = profiles.removeLast()
+  let missing = try owner(); missing.newWindow(); wait(missing)
+  let missingTab = missing.windows.flatMap(\.namespaces).flatMap(\.tabs).first { $0.herdrID == mixedTabID }!
+  precondition(missingTab.panes.count == 2, "Removing a definition must preserve its saved pane")
+  let missingPane = missingTab.panes.first { $0.herdrTerminal?.pane.terminal_id == splitID }!
+  precondition(missingPane.connectionSuspended)
+  var returned = removedProfile; returned.enabled = true; profiles.append(returned)
+  var updated = missing.runtime!.settings; updated.connections = profiles
+  try missing.runtime!.updateConfiguration(updated); missing.loadConnections(reload: true); wait(missing)
+  let reconnectDeadline = Date(timeIntervalSinceNow: 8)
+  while missingPane.surface == nil && Date() < reconnectDeadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.05)) }
+  precondition(missingPane.surface != nil && missingPane.herdrTerminal?.pane.terminal_id == splitID, "Restoring the same definition must reconnect the existing pane")
+  for controller in Array(missing.windows) { controller.closing = true; controller.window?.close() }
   print("Mixed connection tests passed.")
 }
 

@@ -16,21 +16,23 @@ or restarting their processes.
 - [x] **Terminal foundation:** interactive shells, shell integration, copy/paste,
   search, links, file drops, and native window controls.
 - [x] **Configuration:** TOML, default-config export, categorized native settings
-  editor, per-file override reset, reload, independent interface colors, and
-  automatic light/dark terminal themes.
+  editor with effective values and source diagnostics, per-file reset, reload, and
+  independent interface colors and automatic light/dark terminal themes.
 - [x] **Namespaces and tabs:** naming, ordering, keyboard navigation, compact
-  sidebar, Git branch/cwd subtitles, and monochrome agent status indicators.
+  sidebar, drag-and-drop ordering, and Git branch/cwd subtitles.
 - [x] **Panes:** nested splits, directional focus, resizing by keyboard or divider,
-  zoom, equalization, and moves between tabs and namespaces.
+  zoom, equalization, moves between tabs, and mixed-server layouts.
 - [x] **Workspace presentation:** live search across namespaces, tabs, and agents;
   side-by-side tabs, tab-to-window moves, and local focus across servers.
 - [x] **Persistence and recovery:** restore windows, ordering, selections, sidebar,
-  and side-by-side presentation; reconnect interrupted streams to the same IDs.
+  and side-by-side presentation; preserve damaged state and reconnect to the same IDs.
 - [x] **Close undo:** briefly retain closed terminals, restore their original
   surfaces, and retry unfinished explicit closes after connection failures.
-- [x] **Remote sessions:** herdr machine profiles, SSH transport, multiple servers
-  in one space, independent local sessions, connection enable/disable controls,
+- [x] **Remote sessions:** TOML connections, SSH transport, multiple servers
+  in one space or tab, independent local sessions, connection enable/disable,
   remote Git metadata, and restoration of unavailable tabs.
+- [x] **Agents:** clickable monochrome icons, accessible status badges, an overview,
+  waiting-agent navigation, and configurable notifications enabled by default.
 - [ ] **Distribution:** release builds, signing, notarization, and updates.
 - [ ] **Linux frontend:** a separate native frontend sharing the terminal engine.
 
@@ -74,8 +76,11 @@ window. Rebooting does not preserve running processes.
 | Close undo | ⌘Z undo, ⌘Shift-Z redo; duration comes from `undo_timeout` |
 
 Use the command palette for **Show Tab Alongside**, pane moves, zoom, equalization,
-and the remaining window actions. Agent icons reflect herdr’s reported state;
-unknown status is shown when a server cannot be reached.
+connection-specific tabs/splits, **Show Agents**, and **Next Agent Waiting for Input**.
+Drag tabs to reorder them or move them onto another space; drag spaces to reorder.
+Agent icons focus their exact terminals. Status comes from herdr and becomes unknown
+when disconnected. Notifications are enabled by default for waiting/completion
+transitions; disable them with `agent_notifications = false` under `[interface]`.
 
 Define connections in `config.toml`. **Velocitty → Connections** shows their
 status and lets you retry or create a tab. SSH uses existing keys and known hosts;
@@ -115,8 +120,8 @@ hooks; existing shells and remote shell configuration are left intact.
 
 Choose **Velocitty → Settings** or edit `~/.config/velocitty/config.toml`
 (`$XDG_CONFIG_HOME/velocitty/config.toml` when that variable is an absolute path).
-Settings provides categories, search, common value controls, and an advanced TOML
-editor. **Use Default** removes the selected file’s override; included files may
+Settings provides categories, search, numeric/color/list controls, effective values,
+source information, diagnostics, and an advanced TOML editor. **Reset Override** removes the selected file’s override; included files may
 still supply a value. The editor preserves comments and unknown settings, and checks
 for external edits before saving. Reload with ⌘Shift-comma; process settings apply
 to newly created terminals.
@@ -148,7 +153,9 @@ an unlocked desktop and briefly changes focus. The opt-in `WindowChecks
 --remote-check` additionally requires `VELO_TEST_HERDR`, `VELO_TEST_SSH_HOST`, and
 `VELO_TEST_KNOWN_HOSTS`; point the SSH host at this Mac’s IP. It creates isolated
 local servers and reaches one through SSH; no production cluster is needed. GitHub Actions runs the configuration and Core
-checks on pushes and pull requests.
+checks on pushes and pull requests. `WindowChecks --scale` measures 50 terminals
+across three isolated local servers. These checks require the built app’s resources
+via `VELOKIT_RESOURCES_DIR`.
 
 ## License
 

@@ -217,6 +217,7 @@ public struct WorkspaceStateStore {
     else { throw ConfigurationError("Invalid workspace state.") }
     let terminals = state.namespaces.flatMap(\.tabs).flatMap { $0.panes ?? [] }.map(\.terminalID)
     guard Set(terminals).count == terminals.count,
+      state.namespaces.flatMap(\.tabs).flatMap({ $0.panes ?? [] }).allSatisfy({ !$0.id.isEmpty && !$0.terminalID.isEmpty && !$0.workspaceID.isEmpty }),
       state.namespaces.flatMap(\.tabs).allSatisfy({ tab in
         tab.layout.map { $0.validated() && Set($0.terminals) == Set(tab.panes?.map(\.terminalID) ?? []) } ?? true
       }) else { throw ConfigurationError("Invalid pane layout in workspace state.") }
@@ -270,4 +271,3 @@ public struct HerdrConnection: Codable, Equatable, Sendable {
     else { throw ConfigurationError("Use a name, a session containing letters, numbers, hyphens or underscores, and an SSH destination such as user@host.") }
   }
 }
-

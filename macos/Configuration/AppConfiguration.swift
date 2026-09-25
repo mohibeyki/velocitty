@@ -294,7 +294,7 @@ private struct Document: Decodable {
   enum CodingKeys: String, CodingKey { case terminal, interface, connections }
   init(from decoder: Decoder) throws {
     let keys = try decoder.container(keyedBy: Key.self).allKeys.map(\.stringValue)
-    diagnostics = keys.sorted().filter { $0 != "terminal" && $0 != "interface" && $0 != "connections" }.map {
+    var notes = keys.sorted().filter { $0 != "terminal" && $0 != "interface" && $0 != "connections" }.map {
       "Unknown configuration key: \($0)"
     }
     let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -302,9 +302,14 @@ private struct Document: Decodable {
     // dictionary using the enclosing table's keys.
     if container.contains(.terminal) { _ = try container.decode(TOMLTable.self, forKey: .terminal) }
     if container.contains(.interface) { _ = try container.decode(TOMLTable.self, forKey: .interface) }
-    connections = try container.decodeIfPresent([ConnectionDefinition].self, forKey: .connections)
+    do { connections = try container.decodeIfPresent([ConnectionDefinition].self, forKey: .connections) }
+    catch {
+      connections = nil
+      notes.append("Invalid connections list: " + error.localizedDescription)
+    }
     interface = try container.decodeIfPresent([String: Value].self, forKey: .interface)
     terminal = try container.decodeIfPresent([String: Value].self, forKey: .terminal)
+    diagnostics = notes
   }
 }
 

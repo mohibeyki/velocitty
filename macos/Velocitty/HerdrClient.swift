@@ -16,6 +16,7 @@ final class HerdrClient {
   var endpointID: String { identity ?? machine.map { "ssh:" + $0.id } ?? (sessionName == "velocitty" ? "local" : "local:" + sessionName) }
   private let identity: String?
   private var label: String?
+  var isPlaceholder = false
   private let availabilityLock = NSLock()
   private var enabled = true
   private var availabilityGeneration = UUID()
@@ -100,10 +101,6 @@ final class HerdrClient {
     let pane_id: String?
     let first: LayoutNode?
     let second: LayoutNode?
-    func weight(along direction: String) -> Double {
-      guard type == "split", self.direction == direction, let first, let second else { return 1 }
-      return first.weight(along: direction) + second.weight(along: direction)
-    }
   }
 
   struct Terminal {
@@ -409,63 +406,6 @@ final class HerdrClient {
     return try JSONDecoder().decode(LayoutNode.self, from: JSONSerialization.data(withJSONObject: root))
   }
 
-  func moveTab(tabID: String, workspaceID: String?, label: String?, namespaceLabel: String? = nil) throws {
-    let before = try snapshot()
-    let root = try layoutTree(tabID: tabID)
-    let terminals = Dictionary(uniqueKeysWithValues: before.panes.map { ($0.pane_id, $0.terminal_id) })
-    func firstTerminal(_ node: LayoutNode) throws -> String {
-      if let id = node.pane_id, let terminal = terminals[id] { return terminal }
-      if let first = node.first { return try firstTerminal(first) }
-      throw ConfigurationError("Invalid source pane layout.")
-    }
-    func current(_ terminal: String) throws -> Pane {
-      guard let pane = try snapshot().panes.first(where: { $0.terminal_id == terminal }) else { throw ConfigurationError("A terminal disappeared while moving the tab.") }
-      return pane
-    }
-    let firstID = try firstTerminal(root)
-    let firstPane = try current(firstID)
-    var destination: [String: Any]
-    if let workspaceID {
-      destination = ["type": "new_tab", "workspace_id": workspaceID]
-      if let label { destination["label"] = label }
-    } else {
-      destination = ["type": "new_workspace", "label": namespaceLabel ?? "Namespace"]
-      if let label { destination["tab_label"] = label }
-    }
-    _ = try api("pane.move", ["pane_id": firstPane.pane_id, "destination": destination, "focus": false])
-    let moved = try current(firstID)
-    guard moved.tab_id != firstPane.tab_id,
-      workspaceID.map({ moved.workspace_id == $0 }) ?? (moved.workspace_id != firstPane.workspace_id) else {
-      throw ConfigurationError("herdr did not move the tab. Check whether another client has zoomed its layout.")
-    }
-    let newTabID = moved.tab_id
-    func build(_ node: LayoutNode) throws {
-      guard let first = node.first, let second = node.second, let direction = node.direction else { return }
-      let target = try current(firstTerminal(first))
-      let source = try current(firstTerminal(second))
-      _ = try api("pane.move", ["pane_id": source.pane_id, "destination": ["type": "tab", "tab_id": newTabID, "target_pane_id": target.pane_id, "split": direction, "ratio": node.ratio ?? 0.5], "focus": false])
-      guard try current(source.terminal_id).tab_id == newTabID else { throw ConfigurationError("herdr did not move a pane; the partial move has been retained.") }
-      try build(first)
-      try build(second)
-    }
-    try build(root)
-  }
-
-  func equalize(tabID: String) throws {
-    let root = try layoutTree(tabID: tabID)
-    func apply(_ node: LayoutNode, path: [Bool]) throws {
-      guard let first = node.first, let second = node.second, let direction = node.direction else { return }
-      let weight = first.weight(along: direction)
-      let ratio = weight / (weight + second.weight(along: direction))
-      if abs((node.ratio ?? 0.5) - ratio) > 0.001 {
-        _ = try api("layout.set_split_ratio", ["tab_id": tabID, "path": path, "ratio": ratio])
-      }
-      try apply(first, path: path + [false])
-      try apply(second, path: path + [true])
-    }
-    try apply(root, path: [])
-  }
-
   func request(_ arguments: [String], timeout: TimeInterval = 5) throws -> [String: Any] {
     cachedStatus = nil
     let data = try run(arguments, timeout: timeout)
@@ -540,10 +480,6 @@ final class HerdrClient {
     let command = "git -C " + Self.quote(directory) + " symbolic-ref --quiet --short HEAD 2>/dev/null || git -C " + Self.quote(directory) + " rev-parse --short HEAD 2>/dev/null || true"
     let value = String(decoding: try ssh(command, timeout: 3), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
     return value.isEmpty ? nil : value
-  }
-
-  func machines() throws -> [Machine] {
-    try JSONDecoder().decode([Machine].self, from: run(["machine", "list", "--json"]))
   }
 
   private func ssh(_ command: String, timeout: TimeInterval = 10) throws -> Data {
