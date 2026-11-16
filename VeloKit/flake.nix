@@ -1,5 +1,5 @@
 {
-  description = "VeloKit development environment";
+  description = "Velocitty development environment";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -11,13 +11,14 @@
     {
       devShells.${system}.default = pkgs.mkShell {
         packages = with pkgs; [
+          just
           zig_0_16
           gettext
           pkg-config
         ];
 
         shellHook = ''
-          echo "VeloKit development environment loaded"
+          echo "Velocitty development environment loaded"
           echo "Zig version: $(zig version)"
         '';
       };

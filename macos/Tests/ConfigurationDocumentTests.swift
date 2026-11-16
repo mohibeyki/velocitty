@@ -56,3 +56,57 @@ extension ConfigurationDocumentTests {
     _ = try AppConfiguration.parse(Data(document.text.utf8))
   }
 }
+
+extension ConfigurationDocumentTests {
+  func testConnectionEditsPreserveCommentsAndOtherSettings() throws {
+    let document = try ConfigurationDocument(url: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+    document.text = """
+    # My servers
+    [[connections]]
+    id = 'local'
+    name = 'Laptop' # keep label comment
+    session = 'velocitty'
+    # keep connection comment
+    [[connections]]
+    id = 'gpu'
+    name = 'GPU'
+    session = 'work'
+    host = 'user@cluster' # SSH alias
+    [terminal]
+    title = '''a title
+    [[connections]]
+    not a real section'''
+    font_size = 14
+    """ + "\n"
+    var connections = try XCTUnwrap(AppConfiguration.parse(Data(document.text.utf8)).connections)
+    connections[0].enabled = false
+    connections[1].label = "GPU 日本"
+    try document.setConnections(connections)
+    XCTAssertTrue(document.text.contains("# keep label comment"))
+    XCTAssertTrue(document.text.contains("# keep connection comment"))
+    XCTAssertTrue(document.text.contains("# SSH alias"))
+    XCTAssertTrue(document.text.contains("not a real section'''"))
+    XCTAssertEqual(try AppConfiguration.parse(Data(document.text.utf8)).connections, connections)
+    try document.setConnections([connections[1]])
+    XCTAssertEqual(try AppConfiguration.parse(Data(document.text.utf8)).connections, [connections[1]])
+    try document.setConnections([])
+    XCTAssertEqual(try AppConfiguration.parse(Data(document.text.utf8)).connections, [])
+    XCTAssertTrue(document.text.contains("font_size = 14"))
+  }
+
+  func testConnectionAddAndRemoveAtFileBoundaries() throws {
+    for input in ["", "# Hello", "[terminal]\nfont_size=14", "connections = [] # explicit\n[terminal]\n"] {
+      let document = try ConfigurationDocument(url: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+      document.text = input
+      try document.setConnections([])
+      XCTAssertEqual(try AppConfiguration.parse(Data(document.text.utf8)).connections, [])
+      document.text = input
+      let remote = HerdrConnection(id: "gpu", label: "GPU", session: "work", target: "user@host")
+      try document.setConnections([.local, remote])
+      XCTAssertEqual(try AppConfiguration.parse(Data(document.text.utf8)).connections, [.local, remote])
+      try document.setConnections([remote])
+      try document.setConnections([])
+      XCTAssertEqual(try AppConfiguration.parse(Data(document.text.utf8)).connections, [])
+    }
+  }
+}

@@ -22,9 +22,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Test configuration
-        run: swift test --package-path macos
-
       - uses: cachix/install-nix-action@b85815f71a6de0ddee80b8a80a98d43f4bcc66c7 # v31
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
@@ -35,18 +32,16 @@ jobs:
       - name: Enable the pinned build environment
         run: |
           nix profile add --inputs-from ./VeloKit nixpkgs#direnv
-          direnv allow VeloKit
+          direnv allow
 
       - name: Build app and run Core tests
         run: |
-          xcodebuild -project macos/Velocitty.xcodeproj -scheme Velocitty \
-            -destination 'platform=macOS,arch=arm64' -derivedDataPath macos/build \
-            -testPlan Core -resultBundlePath macos/build/Core.xcresult test
+          direnv exec . just test
 
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: core-test-results
-          path: macos/build/Core.xcresult
+          path: macos/build/Logs/Test/*.xcresult
           if-no-files-found: ignore

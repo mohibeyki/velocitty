@@ -18,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
   let fullscreenPresentation = FullscreenPresentation()
   var windows: [TerminalWindowController] = []
   private var settingsWindow: SettingsWindow?
+  private var themePicker: ThemePickerWindow?
   // Test sessions do not read or overwrite the user's workspace file.
   var workspaceStateURL: URL?
   private let workspacePersistence = WorkspacePersistence()
@@ -150,7 +151,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     shortcuts?.reload()
     updateMenuShortcuts()
     updateRestorationPolicy()
-    if native.initialWindow && windows.isEmpty { newWindow() }
+    startInitialWorkspace()
     if herdr == nil { showMuxWarning() }
     if !pendingFiles.isEmpty && !muxOpening {
       drainDockFiles()
@@ -158,6 +159,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     scheduleQuitIfNeeded()
     if native.hiddenPolicy == "always" { NSApp.hide(nil) }
     showConfigurationDiagnostics()
+  }
+
+  func startInitialWorkspace() {
+    if native.initialWindow && windows.isEmpty {
+      newWindow()
+    } else {
+      restoreConnections(includingPrimary: true)
+    }
   }
 
   @objc func newWindow() {
@@ -485,6 +494,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     }
   }
 
+  @objc func showThemePicker() {
+    do {
+      if themePicker?.window?.isVisible != true { themePicker = try ThemePickerWindow(owner: self) }
+      themePicker?.showWindow(nil); themePicker?.window?.makeKeyAndOrderFront(nil)
+    } catch { configurationAlert(error).runModal() }
+  }
+
   @objc func showSettings() {
     do {
       if settingsWindow == nil { settingsWindow = try SettingsWindow(appOwner: self) }
@@ -539,6 +555,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     aboutItem.target = self
     appMenu.addItem(.separator())
     appMenu.addItem(withTitle: "Connections…", action: #selector(showConnections), keyEquivalent: "").target = self
+    appMenu.addItem(withTitle: "Terminal Theme…", action: #selector(showThemePicker), keyEquivalent: "").target = self
     appMenu.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",").target = self
     let reloadItem = appMenu.addItem(
       withTitle: "Reload Configuration",
@@ -1869,12 +1886,12 @@ extension AppDelegate {
         self.muxError = nil
         self.connectionStatus[client.endpointID] = .connected
         self.restoreUnavailableTabs()
-        self.restoreRemoteConnections()
+        self.restoreConnections()
       } catch {
         self.muxError = error.localizedDescription
         self.connectionStatus[client.endpointID] = .failed(error.localizedDescription)
         self.restoreUnavailableTabs()
-        self.restoreRemoteConnections()
+        self.restoreConnections()
         if self.windows.isEmpty { self.newLocalWindow() }
         self.showMuxError(error)
       }
@@ -2404,7 +2421,7 @@ extension TerminalWindowController {
 }
 
 extension AppDelegate {
-  private func loadWorkspaceState(for client: HerdrClient) {
+  func loadWorkspaceState(for client: HerdrClient) {
     guard !workspaceLoadAttempted, client.sessionName == "velocitty" || workspaceStateURL != nil else { return }
     workspaceLoadAttempted = true
     let store = workspaceStateURL.map { WorkspaceStateStore(url: $0) } ?? WorkspaceStateStore()
@@ -2622,16 +2639,16 @@ extension AppDelegate {
   }
 
   @objc func showConnections() {
-    guard herdr != nil else { showMuxError(ConfigurationError("Install herdr to manage connections.")); return }
     loadConnections()
     if connectionsWindow == nil { connectionsWindow = ConnectionsWindow(owner: self) }
     connectionsWindow?.showWindow(nil); connectionsWindow?.window?.makeKeyAndOrderFront(nil)
   }
 
-  private func restoreRemoteConnections() {
+  private func restoreConnections(includingPrimary: Bool = false) {
     guard !connectionCoordinator.restored else { return }
     connectionCoordinator.restored = true
-    connectRemaining(connectionCoordinator.clients.values.filter(\.isEnabled).sorted { $0.endpointID < $1.endpointID })
+    let clients = Array(connectionCoordinator.clients.values) + (includingPrimary ? [herdr].compactMap { $0 } : [])
+    connectRemaining(clients.filter(\.isEnabled).sorted { $0.endpointID < $1.endpointID })
   }
 
   private func connectRemaining(_ clients: [HerdrClient]) {

@@ -43,6 +43,10 @@ final class CommandPalette: NSPanel, NSTextFieldDelegate, NSWindowDelegate, NSTa
       else { return nil }
       return Entry(title: command.title, detail: command.detail, action: command.action)
     }
+    if provider == nil {
+      entries += [Entry(title: "Terminal Theme…", detail: "Browse and preview terminal themes.", action: "velocitty:themes"),
+        Entry(title: "Herdr Connections…", detail: "Manage local and remote herdr instances.", action: "velocitty:connections")]
+    }
     if provider == nil, terminal.session?.herdrTerminal != nil {
       let controller = terminal.session?.windowController
       entries += [
@@ -51,7 +55,6 @@ final class CommandPalette: NSPanel, NSTextFieldDelegate, NSWindowDelegate, NSTa
         Entry(title: "New Tab on Connection…", detail: "Choose a local or remote server.", action: "velocitty:new-connected-tab", run: { [weak controller] in controller?.chooseConnection() }),
         Entry(title: "Split Right on Connection…", detail: "Add a pane from any enabled server.", action: "velocitty:split-connected-right", run: { [weak controller] in controller?.chooseConnection(split: "right") }),
         Entry(title: "Split Down on Connection…", detail: "Add a pane from any enabled server.", action: "velocitty:split-connected-down", run: { [weak controller] in controller?.chooseConnection(split: "down") }),
-        Entry(title: "Herdr Connections…", detail: "Inspect connections, reconnect, or open config.toml.", action: "velocitty:connections"),
         Entry(title: "Show Tab Alongside…", detail: "Show another namespace or server beside this tab.", action: "velocitty:alongside"),
         Entry(title: "Stop Showing Alongside", detail: "Return to one presented tab without closing terminals.", action: "velocitty:stop-alongside"),
         Entry(title: "Move Tab to Namespace…", detail: "Move all panes while retaining their running processes.", action: "velocitty:move-tab"),
@@ -260,6 +263,7 @@ final class CommandPalette: NSPanel, NSTextFieldDelegate, NSWindowDelegate, NSTa
     if let run = entry.run { run(); return }
     terminal?.window?.makeFirstResponder(terminal)
     switch action {
+    case "velocitty:themes": terminal?.session?.windowController?.owner?.showThemePicker()
     case "velocitty:connections": terminal?.session?.windowController?.owner?.showConnections()
     case "velocitty:alongside": terminal?.session?.windowController?.chooseCompanion()
     case "velocitty:stop-alongside": terminal?.session?.windowController?.stopAlongside()

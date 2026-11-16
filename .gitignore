@@ -10,3 +10,6 @@ DerivedData/
 /macos/.build/
 /macos/.swiftpm/
 /*.profraw
+/.direnv/
+/.zig-cache/
+/zig-out/

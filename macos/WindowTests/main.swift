@@ -21,6 +21,7 @@ if CommandLine.arguments.contains("--remote-check") {
   try runRemoteCheck()
   exit(0)
 }
+if CommandLine.arguments.contains("--management-ui") { try runManagementUICheck(); exit(0) }
 if CommandLine.arguments.contains("--scale") { try runScaleCheck(); exit(0) }
 if CommandLine.arguments.contains("--mixed-connections") {
   try runMixedConnectionsCheck(); exit(0)
@@ -1778,6 +1779,7 @@ func runMixedConnectionsCheck() throws {
     var configuration = settings; configuration.connections = profiles
     let result = AppDelegate(); result.workspaceStateURL = file; result.runtime = try TerminalRuntime(settings: configuration)
     result.herdr = HerdrClient(executable: executable, sessionName: first.sessionName)
+    result.loadWorkspaceState(for: result.herdr!)
     result.loadConnections(); return result
   }
   func wait(_ app: AppDelegate, _ window: TerminalWindowController? = nil) {
@@ -1793,7 +1795,7 @@ func runMixedConnectionsCheck() throws {
     try! app.runtime!.updateConfiguration(updated)
     app.loadConnections(reload: true)
   }
-  let app = try owner(); app.newWindow(); wait(app)
+  let app = try owner(); app.startInitialWorkspace(); wait(app)
   let window = app.windows.first!
   // A fresh second server can be empty, so explicitly create its first tab.
   let client = app.client(for: second.endpointID)!
@@ -1818,7 +1820,7 @@ func runMixedConnectionsCheck() throws {
   app.scheduleWorkspaceSave(window)
   app.flushWorkspaceSave()
   for controller in Array(app.windows) { controller.closing = true; controller.window?.close() }
-  let restored = try owner(); restored.newWindow(); wait(restored)
+  let restored = try owner(); restored.startInitialWorkspace(); wait(restored)
   let restoredWindow = restored.windows.first!
   precondition(restoredWindow.activeNamespace.id == spaceID && restoredWindow.tabs.count == 2)
   precondition(restoredWindow.activeNamespace.name == "Mixed Project")
@@ -1840,12 +1842,12 @@ func runMixedConnectionsCheck() throws {
   enable(restored, first.endpointID, false)
   restored.scheduleWorkspaceSave(restoredWindow); restored.flushWorkspaceSave()
   for controller in Array(restored.windows) { controller.closing = true; controller.window?.close() }
-  let disabled = try owner(); disabled.newWindow(); wait(disabled)
+  let disabled = try owner(); disabled.startInitialWorkspace(); wait(disabled)
   precondition(disabled.windows.count == 1 && disabled.windows[0].tabs.count == 1, "All-disabled startup retains the saved workspace")
   precondition(disabled.windows[0].session!.connectionSuspended)
   for controller in Array(disabled.windows) { controller.closing = true; controller.window?.close() }
   profiles = profiles.map { var profile = $0; profile.enabled = true; return profile }
-  let mixed = try owner(); mixed.newWindow(); wait(mixed)
+  let mixed = try owner(); mixed.startInitialWorkspace(); wait(mixed)
   let mixedWindow = mixed.windows[0]
   let original = mixedWindow.session!
   let originalID = original.herdrTerminal!.pane.terminal_id
@@ -1856,7 +1858,7 @@ func runMixedConnectionsCheck() throws {
   let mixedTabID = mixedWindow.activeTab.herdrID!
   mixed.scheduleWorkspaceSave(mixedWindow); mixed.flushWorkspaceSave()
   for controller in Array(mixed.windows) { controller.closing = true; controller.window?.close() }
-  let reopened = try owner(); reopened.newWindow(); wait(reopened)
+  let reopened = try owner(); reopened.startInitialWorkspace(); wait(reopened)
   let restoredMixed = reopened.windows.flatMap(\.namespaces).flatMap(\.tabs).first { $0.herdrID == mixedTabID }!
   precondition(Set(restoredMixed.panes.compactMap { $0.herdrTerminal?.pane.terminal_id }) == Set([originalID, splitID]), "Mixed panes must remain in one tab after relaunch")
   precondition(Set(restoredMixed.localLayout!.terminals) == Set([originalID, splitID]))
@@ -1865,12 +1867,12 @@ func runMixedConnectionsCheck() throws {
   precondition(restoredMixed.panes.count == 2 && restoredMixed.panes.contains { $0.connectionSuspended })
   reopened.scheduleWorkspaceSave(ownerWindow); reopened.flushWorkspaceSave()
   for controller in Array(reopened.windows) { controller.closing = true; controller.window?.close() }
-  let offline = try owner(); offline.newWindow(); wait(offline)
+  let offline = try owner(); offline.startInitialWorkspace(); wait(offline)
   let offlineTab = offline.windows.flatMap(\.namespaces).flatMap(\.tabs).first { $0.herdrID == mixedTabID }!
   precondition(offlineTab.panes.count == 2 && offlineTab.panes.contains { $0.connectionSuspended }, "Unavailable pane must retain its position in a mixed tab")
   for controller in Array(offline.windows) { controller.closing = true; controller.window?.close() }
   let removedProfile = profiles.removeLast()
-  let missing = try owner(); missing.newWindow(); wait(missing)
+  let missing = try owner(); missing.startInitialWorkspace(); wait(missing)
   let missingTab = missing.windows.flatMap(\.namespaces).flatMap(\.tabs).first { $0.herdrID == mixedTabID }!
   precondition(missingTab.panes.count == 2, "Removing a definition must preserve its saved pane")
   let missingPane = missingTab.panes.first { $0.herdrTerminal?.pane.terminal_id == splitID }!
@@ -1882,6 +1884,12 @@ func runMixedConnectionsCheck() throws {
   while missingPane.surface == nil && Date() < reconnectDeadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.05)) }
   precondition(missingPane.surface != nil && missingPane.herdrTerminal?.pane.terminal_id == splitID, "Restoring the same definition must reconnect the existing pane")
   for controller in Array(missing.windows) { controller.closing = true; controller.window?.close() }
+  for client in [first, second] { _ = try client.run(["server", "stop"]) }
+  let restarted = try owner()
+  precondition(!restarted.windows.isEmpty, "Saved tabs must be restored before connecting")
+  restarted.startInitialWorkspace(); wait(restarted)
+  for client in [first, second] { _ = try client.snapshot() }
+  for controller in Array(restarted.windows) { controller.closing = true; controller.window?.close() }
   print("Mixed connection tests passed.")
 }
 
@@ -1933,4 +1941,64 @@ func runScaleCheck() throws {
   print(String(format: "Scale: 50 terminals / 3 local connections; create %.2fs, attach %.2fs, select 50 %.3fs, reconcile 3 %.3fs, peak RSS %.1f MiB", created-started, attached-created, selected-attached, reconciled-selected, Double(usage.ru_maxrss) / 1_048_576))
   for window in Array(owner.windows) { window.closing = true; window.window?.close() }
   print("Scale check passed.")
+}
+
+func runManagementUICheck() throws {
+  let root = FileManager.default.temporaryDirectory.appendingPathComponent("velo-management-" + UUID().uuidString)
+  let file = root.appendingPathComponent("velocitty/config.toml")
+  try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+  let previous = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"]
+  setenv("XDG_CONFIG_HOME", root.path, 1)
+  defer {
+    if let previous { setenv("XDG_CONFIG_HOME", previous, 1) } else { unsetenv("XDG_CONFIG_HOME") }
+    try? FileManager.default.removeItem(at: root)
+  }
+  try """
+    [[connections]]
+    id = 'local'
+    name = 'Laptop'
+    session = 'velocitty'
+    enabled = false
+    [[connections]]
+    id = 'gpu'
+    name = 'GPU Cluster'
+    session = 'work'
+    host = 'user@example.invalid'
+    [terminal]
+    theme = 'light:Rose Pine Dawn,dark:Rose Pine'
+    initial_window = false
+    """.write(to: file, atomically: true, encoding: .utf8)
+  let owner = AppDelegate(); owner.runtime = try TerminalRuntime(settings: AppConfiguration.load())
+  owner.herdr = HerdrClient.discover().map { HerdrClient(executable: $0) }; owner.loadConnections()
+  func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+  func show(_ controller: NSWindowController, snapshot: String) {
+    controller.showWindow(nil); controller.window?.makeKeyAndOrderFront(nil)
+    pumpEvents(until: Date(timeIntervalSinceNow: 0.15))
+    let view = controller.window!.contentView!; view.layoutSubtreeIfNeeded()
+    precondition(!view.hasAmbiguousLayout)
+    if let path = ProcessInfo.processInfo.environment["VELO_TEST_UI_SNAPSHOTS"],
+      let image = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+      view.cacheDisplay(in: view.bounds, to: image)
+      try! image.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: path).appendingPathComponent(snapshot + ".png"))
+    }
+  }
+  let connections = ConnectionsWindow(owner: owner); show(connections, snapshot: "connections")
+  let connectionTable = descendants(connections.window!.contentView!).compactMap { $0 as? NSTableView }.first!
+  precondition(connectionTable.numberOfRows == 2)
+  let toggle = connectionTable.view(atColumn: 0, row: 1, makeIfNecessary: true) as! NSButton
+  toggle.performClick(nil)
+  precondition(AppConfiguration.load().connections?.last?.enabled == false)
+  connections.close()
+  let picker = try ThemePickerWindow(owner: owner); show(picker, snapshot: "themes")
+  let controls = descendants(picker.window!.contentView!)
+  let mode = controls.compactMap { $0 as? NSPopUpButton }.first!
+  mode.selectItem(at: 0); NSApp.sendAction(mode.action!, to: mode.target, from: mode)
+  let themes = controls.compactMap { $0 as? NSTableView }.first!
+  let row = (0..<themes.numberOfRows).first { (themes.view(atColumn: 0, row: $0, makeIfNecessary: true) as? NSTextField)?.stringValue == "Catppuccin Mocha" }!
+  themes.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+  precondition(AppConfiguration.load().options.last { $0.key == "theme" }?.value == TerminalTheme.defaultSelection)
+  controls.compactMap { $0 as? NSButton }.first { $0.title == "Apply Theme" }!.performClick(nil)
+  precondition(AppConfiguration.load().options.last { $0.key == "theme" }?.value == "Catppuccin Mocha")
+  precondition(AppConfiguration.load().connections?.count == 2)
+  print("Management UI tests passed.")
 }

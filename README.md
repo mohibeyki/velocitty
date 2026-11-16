@@ -48,16 +48,23 @@ xcodebuild -downloadComponent MetalToolchain
 From the repository root:
 
 ```sh
-direnv allow VeloKit
-xcodebuild -project macos/Velocitty.xcodeproj -scheme Velocitty \
-  -configuration Debug -destination 'platform=macOS,arch=arm64' \
-  -derivedDataPath macos/build build
-open macos/build/Build/Products/Debug/Velocitty.app
+direnv allow
+just build
+just run
 ```
 
-You can also run the scheme in Xcode. Builds check VeloKit through direnv and Zig;
-unchanged work uses Zig’s cache. `macos/` contains the app; `VeloKit/` contains the
-private engine and bundled third-party notices.
+The root direnv environment provides pinned Zig and Just through Nix. Enable
+[direnv’s shell hook](https://direnv.net/docs/hook.html) so they are available when
+you enter the repository. Without the hook, use `direnv exec . just build`.
+
+`zig build` and `zig build run` are the underlying commands. The app is written to
+`zig-out/Velocitty.app`; opening that bundle directly does not build anything.
+The engine is optimized by default; `just release` also enables Swift release
+optimizations. Use `zig build -Doptimize=Debug` to debug the engine.
+
+You can still run the scheme in Xcode. Its build phase uses the same root build
+entry point for VeloKit. `macos/` contains the app; `VeloKit/` contains the private
+engine, pinned toolchain definition, and bundled third-party notices.
 
 ## Sessions and navigation
 
@@ -82,8 +89,10 @@ Agent icons focus their exact terminals. Status comes from herdr and becomes unk
 when disconnected. Notifications are enabled by default for waiting/completion
 transitions; disable them with `agent_notifications = false` under `[interface]`.
 
-Define connections in `config.toml`. **Velocitty → Connections** shows their
-status and lets you retry or create a tab. SSH uses existing keys and known hosts;
+Use **Velocitty → Connections** to add, edit, enable/disable, and remove local
+or SSH instances, retry a connection, or create a tab on it. Changes are saved to
+TOML, including the appropriate included file. Removing a connection keeps its
+processes running; reuse its connection ID to restore saved panes. SSH uses existing keys and known hosts;
 start the selected herdr session on the destination first.
 
 ```toml
@@ -129,10 +138,13 @@ to newly created terminals.
 Generate a commented reference containing available settings and their defaults:
 
 ```sh
-macos/build/Build/Products/Debug/Velocitty.app/Contents/MacOS/Velocitty \
+zig-out/Velocitty.app/Contents/MacOS/Velocitty \
   --dump-config > defaults.toml
 ```
 
+Use **Velocitty → Terminal Theme** (also in the command palette and Settings)
+to search themes and preview their colors before applying. Choose one theme or
+separate light/dark themes that follow macOS appearance.
 The default terminal theme follows macOS appearance using Rosé Pine/Dawn.
 Eleven iTerm2 variants from Rosé Pine, Tokyo Night, and Catppuccin are bundled.
 Interface colors and agent indicator appearance are independently configurable.
@@ -142,14 +154,13 @@ values. The initial local directory is `~/workspace`, falling back to `~`.
 ## Tests
 
 ```sh
-swift test --package-path macos
-xcodebuild -project macos/Velocitty.xcodeproj -scheme Velocitty \
-  -destination 'platform=macOS,arch=arm64' -derivedDataPath macos/build \
-  -testPlan Core test
+just test
 ```
 
-Use `-testPlan GUI` for window and isolated herdr integration checks. It requires
-an unlocked desktop and briefly changes focus. The opt-in `WindowChecks
+This runs configuration and Core checks. `just test-gui` also runs window and
+isolated herdr integration checks; it requires an unlocked desktop and briefly
+changes focus. The equivalent Zig steps are `zig build test` and `zig build test-gui`.
+The opt-in `WindowChecks
 --remote-check` additionally requires `VELO_TEST_HERDR`, `VELO_TEST_SSH_HOST`, and
 `VELO_TEST_KNOWN_HOSTS`; point the SSH host at this Mac’s IP. It creates isolated
 local servers and reaches one through SSH; no production cluster is needed. GitHub Actions runs the configuration and Core

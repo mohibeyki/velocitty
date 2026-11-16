@@ -2,6 +2,9 @@
 import XCTest
 
 final class WindowTests: XCTestCase {
+  func testManagementUI() throws {
+    try runCheck("WindowChecks", arguments: ["--management-ui"], success: "Management UI tests passed.")
+  }
   func testMixedConnections() throws {
     try runCheck("WindowChecks", arguments: ["--mixed-connections"], success: "Mixed connection tests passed.")
   }
