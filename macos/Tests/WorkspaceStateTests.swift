@@ -64,7 +64,25 @@ final class WorkspaceStateTests: XCTestCase {
     XCTAssertEqual(try store.load(), state)
     let future = Data("{\"version\":99,\"namespaces\":[]}".utf8)
     try future.write(to: store.url)
-    XCTAssertThrowsError(try store.load())
+    XCTAssertThrowsError(try store.load()) { error in
+      XCTAssertEqual(error as? WorkspaceStateError, .unsupportedFutureVersion(99))
+    }
+    XCTAssertThrowsError(try store.save(WorkspaceState())) { error in
+      XCTAssertEqual(error as? WorkspaceStateError, .unsupportedFutureVersion(99))
+    }
+    XCTAssertEqual(try Data(contentsOf: store.url), future)
+  }
+
+  func testFutureVersionWithIncompatibleSchemaIsNotTreatedAsDamaged() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = WorkspaceStateStore(url: directory.appendingPathComponent("workspace.json"))
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let future = Data("{\"version\":7,\"namespaces\":{\"changed\":true}}".utf8)
+    try future.write(to: store.url)
+    XCTAssertThrowsError(try store.loadWithRevision()) { error in
+      XCTAssertEqual(error as? WorkspaceStateError, .unsupportedFutureVersion(7))
+    }
     XCTAssertEqual(try Data(contentsOf: store.url), future)
   }
 }
@@ -117,6 +135,51 @@ extension WorkspaceStateTests {
     let backup = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).first { $0.lastPathComponent.contains("damaged-") }!
     XCTAssertEqual(try Data(contentsOf: backup), original)
     XCTAssertEqual(try store.load(), WorkspaceState())
+  }
+}
+
+extension WorkspaceStateTests {
+  func testStaleWriterCannotOverwriteNewerWorkspaceOrPendingCloses() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = WorkspaceStateStore(url: directory.appendingPathComponent("workspace.json"))
+    try store.save(WorkspaceState())
+    let first = try store.loadWithRevision()
+    let second = try store.loadWithRevision()
+
+    var firstState = first.state
+    firstState.pendingTerminalClosures = ["terminal-to-close"]
+    let savedRevision = try store.save(firstState, expectedRevision: first.revision)
+
+    var staleState = second.state
+    staleState.sidebar = .init(width: 300, compact: false)
+    XCTAssertThrowsError(try store.save(staleState, expectedRevision: second.revision)) { error in
+      XCTAssertEqual(error as? WorkspaceStateError, .conflictingUpdate)
+    }
+    XCTAssertEqual(try store.load(), firstState)
+
+    var merged = try store.load()
+    merged.sidebar = staleState.sidebar
+    merged.pendingTerminalClosures = Set((merged.pendingTerminalClosures ?? []) + ["another-terminal"]).sorted()
+    try store.save(merged, expectedRevision: savedRevision)
+    XCTAssertEqual(try store.load().pendingTerminalClosures, ["another-terminal", "terminal-to-close"])
+  }
+}
+
+extension WorkspaceStateTests {
+  func testReconciliationPreservesNewerHostDirectoryAndStaysClean() {
+    let savedPane = WorkspaceState.Pane(id: "pane", terminalID: "terminal", workspaceID: "backend", cwd: "/current")
+    let livePane = WorkspaceState.Pane(id: "pane", terminalID: "terminal", workspaceID: "backend", cwd: "/creation")
+    var savedTab = WorkspaceState.Tab(id: "tab", selectedPaneID: "pane")
+    savedTab.panes = [savedPane]
+    var liveTab = WorkspaceState.Tab(id: "tab", selectedPaneID: "pane")
+    liveTab.panes = [livePane]
+    var state = WorkspaceState()
+    state.namespaces = [.init(id: "project", tabs: [savedTab], selectedTabID: "tab")]
+    let live = [WorkspaceState.Namespace(id: "backend", tabs: [liveTab], selectedTabID: "tab")]
+    let reconciled = state.reconciled(endpoint: "local", live: live)
+    XCTAssertEqual(reconciled.namespaces[0].tabs[0].panes?[0].cwd, "/current")
+    XCTAssertEqual(reconciled.reconciled(endpoint: "local", live: live), reconciled)
   }
 }
 

@@ -27,8 +27,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     set { workspacePersistence.state = newValue }
   }
   private var workspaceLoadAttempted = false
+  // False while the latest close intent could not be written; backend destruction waits.
+  fileprivate var closeIntentDurable = true
+  private var workspaceCompatibilityWarning: String?
   private var restoringWorkspace = false
   private var synchronizingWorkspace = false
+  private var deferredSnapshots: [String: HerdrClient.Snapshot] = [:]
+  private var deferredSnapshotTimer: Timer?
 
   weak var focusedWindow: TerminalWindowController?
   var runtime: TerminalRuntime? {
@@ -47,6 +52,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
   var herdr: HerdrClient?
   private let connectionCoordinator = ConnectionCoordinator()
   private var connectionsWindow: ConnectionsWindow?
+  private var agentPollTimer: Timer?
+  private var pollingAgentEndpoints: Set<String> = []
+  private var lastAgentPoll: [String: TimeInterval] = [:]
   var connections: [HerdrConnection] = []
   var connectionStatus: [String: ConnectionStatus] = [:]
   fileprivate var tabSpaceOverrides: [String: String] = [:]
@@ -58,6 +66,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     closeHistory.pending.union(closeHistory.closed.filter { $0.applied && $0.destroy }.flatMap(\.terminalIDs))
   }
 
+
+  func requestAgentPoll() { pollAgentSnapshots() }
+
+  private func pollAgentSnapshots() {
+    guard !terminating else { return }
+    let clients = windows.filter { !$0.closing }.flatMap(\.allPanes)
+      .compactMap { $0.herdrTerminal?.client }.filter(\.isEnabled)
+      .reduce(into: [String: HerdrClient]()) { $0[$1.endpointID] = $1 }.values
+    let now = ProcessInfo.processInfo.systemUptime
+    for client in clients {
+      let endpoint = client.endpointID
+      let interval: TimeInterval = NSApp.isActive ? (client.eventsConnected ? 10 : 2) : 30
+      guard !pollingAgentEndpoints.contains(endpoint), now - (lastAgentPoll[endpoint] ?? -.infinity) >= interval else { continue }
+      lastAgentPoll[endpoint] = now
+      pollingAgentEndpoints.insert(endpoint)
+      client.perform({ try $0.statusSnapshot() }) { [weak self, weak client] result in
+        self?.pollingAgentEndpoints.remove(endpoint)
+        guard let self, let client, !self.terminating else { return }
+        switch result {
+        case .success(let snapshot):
+          self.synchronizeHerdr(snapshot, client: client)
+        case .failure(let error):
+          self.connectionFailed(client, error: error)
+        }
+      }
+    }
+  }
 
   func observeAgentStates(_ snapshot: HerdrClient.Snapshot) {
     let prefix = snapshot.endpointID == "local" || snapshot.endpointID == nil ? nil : snapshot.endpointID! + "::"
@@ -152,6 +187,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     updateMenuShortcuts()
     updateRestorationPolicy()
     startInitialWorkspace()
+    pollAgentSnapshots()
+    agentPollTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+      self?.pollAgentSnapshots()
+    }
     if herdr == nil { showMuxWarning() }
     if !pendingFiles.isEmpty && !muxOpening {
       drainDockFiles()
@@ -159,6 +198,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     scheduleQuitIfNeeded()
     if native.hiddenPolicy == "always" { NSApp.hide(nil) }
     showConfigurationDiagnostics()
+    if let workspaceCompatibilityWarning {
+      configurationAlert(ConfigurationError(workspaceCompatibilityWarning)).runModal()
+      self.workspaceCompatibilityWarning = nil
+    }
   }
 
   func startInitialWorkspace() {
@@ -283,6 +326,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
   }
 
   func applicationWillTerminate(_ notification: Notification) {
+    deferredSnapshotTimer?.invalidate()
+    deferredSnapshotTimer = nil
+    agentPollTimer?.invalidate()
+    agentPollTimer = nil
     secureInputOwner.update(wanted: false)
     fullscreenPresentation.update(nil)
     persistCloseIntent()
@@ -1585,6 +1632,7 @@ extension TerminalWindowController {
     pane.view?.updateFocus()
     updateSecureInput()
     owner?.updateMenuShortcuts()
+    owner?.scheduleWorkspaceSave(self)
   }
 
   func cycleTab(_ step: Int, from source: TerminalSession? = nil) {
@@ -1602,6 +1650,7 @@ extension TerminalWindowController {
     namespace.tabs.remove(at: index)
     namespace.tabs.insert(tab, at: destination)
     refreshTabBars()
+    owner?.scheduleWorkspaceSave(self)
   }
 
   func requestTabClose(_ pane: TerminalSession) {
@@ -1640,6 +1689,7 @@ extension TerminalWindowController {
     for pane in tab.panes { pane.close() }
     workspaceView.present()
     applyWindowSettings()
+    owner?.scheduleWorkspaceSave(self)
   }
 
   func closeTabs(_ mode: ghostty_action_close_tab_mode_e, from source: TerminalSession? = nil) {
@@ -1688,6 +1738,7 @@ extension TerminalWindowController {
       refreshBell()
       updateSecureInput()
     } else { refreshTabBars() }
+    owner?.scheduleWorkspaceSave(self)
   }
 
   func refreshTabBars() {
@@ -1909,19 +1960,34 @@ extension AppDelegate {
 
   func synchronizeHerdr(_ incoming: HerdrClient.Snapshot, client: HerdrClient) {
     guard client.isEnabled else { return }
+    let regainedConnection = connectionStatus[client.endpointID] != .connected
     connectionStatus[client.endpointID] = .connected
     retryPendingClosures(client, snapshot: incoming)
     let serverSnapshot = incoming.excluding(terminals: hiddenTerminalIDs)
-    let targets = windows.filter { $0.allPanes.contains { $0.herdrTerminal?.client === client } && !$0.closing }
-    guard !terminating, !muxOpening, !restoringWorkspace, !synchronizingWorkspace, !targets.isEmpty,
-      targets.allSatisfy({ !$0.muxBusy && !$0.hasPendingMuxActions && $0.window?.attachedSheet == nil }) else { return }
+    // Subscriptions must follow external pane changes even while presentation is busy.
     observeHerdr(client, snapshot: serverSnapshot)
+    let targets = windows.filter { $0.allPanes.contains { $0.herdrTerminal?.client === client } && !$0.closing }
+    if regainedConnection {
+      for controller in targets { controller.workspaceView.refreshTabs() }
+      connectionsWindow?.refresh()
+    }
+    guard !terminating, !muxOpening, !restoringWorkspace, !synchronizingWorkspace, !targets.isEmpty,
+      targets.allSatisfy({ !$0.muxBusy && !$0.hasPendingMuxActions && $0.window?.attachedSheet == nil }) else {
+      deferredSnapshots[client.endpointID] = incoming
+      scheduleDeferredSnapshotDrain()
+      return
+    }
+    deferredSnapshots.removeValue(forKey: client.endpointID)
     let visibleNamespaces = Set(windows.flatMap(\.namespaces).compactMap(\.id))
     let detached = Set((workspaceState?.namespaces ?? []).filter { !visibleNamespaces.contains($0.id) }.flatMap(\.tabs).map(\.id))
     let snapshot = serverSnapshot.excluding(terminals: retainedTerminalIDs.union(serverSnapshot.panes.filter { detached.contains(localTabID($0)) }.map(\.terminal_id)))
     let currentRecords = targets.flatMap(\.allPanes).filter { $0.herdrTerminal?.client === client }.compactMap { $0.herdrTerminal?.pane }
+    let recordsByTerminal = Dictionary(uniqueKeysWithValues: snapshot.panes.map { ($0.terminal_id, $0) })
     let structureMatches = Set(currentRecords.map(\.terminal_id)) == Set(snapshot.panes.map(\.terminal_id))
-      && currentRecords.allSatisfy { old in snapshot.panes.contains { $0.terminal_id == old.terminal_id && $0.tab_id == old.tab_id && $0.workspace_id == old.workspace_id } }
+      && currentRecords.allSatisfy { old in
+        guard let new = recordsByTerminal[old.terminal_id] else { return false }
+        return new.tab_id == old.tab_id && new.workspace_id == old.workspace_id
+      }
     if var saved = workspaceState {
       saved = saved.reconciled(endpoint: client.endpointID, live: savedNamespaces(serverSnapshot))
       workspacePersistence.dirty = workspacePersistence.dirty || saved != workspaceState
@@ -1929,7 +1995,7 @@ extension AppDelegate {
     }
     if structureMatches {
       for controller in targets { controller.updateHerdrLabels(snapshot) }
-      if workspacePersistence.dirty { flushWorkspaceSave() }
+      if workspacePersistence.dirty, let controller = targets.first { scheduleWorkspaceSave(controller) }
       return
     }
     synchronizingWorkspace = true
@@ -1970,6 +2036,28 @@ extension AppDelegate {
     for pane in oldPanes where !liveIDs.contains(pane.herdrTerminal?.pane.terminal_id ?? "") { pane.close() }
     restoringWorkspace = false
     for controller in targets where !controller.closing { scheduleWorkspaceSave(controller) }
+  }
+
+  private func scheduleDeferredSnapshotDrain() {
+    guard deferredSnapshotTimer == nil else { return }
+    deferredSnapshotTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+      self?.drainDeferredSnapshots()
+    }
+  }
+
+  private func drainDeferredSnapshots() {
+    // Each value is the newest snapshot for its endpoint; older work is obsolete.
+    for (endpoint, snapshot) in deferredSnapshots {
+      guard let client = client(for: endpoint), client.isEnabled else {
+        deferredSnapshots.removeValue(forKey: endpoint)
+        continue
+      }
+      synchronizeHerdr(snapshot, client: client)
+    }
+    if deferredSnapshots.isEmpty {
+      deferredSnapshotTimer?.invalidate()
+      deferredSnapshotTimer = nil
+    }
   }
 
   private func attachHerdrWindow(_ snapshot: HerdrClient.Snapshot, client: HerdrClient,
@@ -2115,20 +2203,26 @@ extension TerminalWindowController {
   }
 
   func updateHerdrLabels(_ snapshot: HerdrClient.Snapshot) {
+    var presentationChanged = false
+    let records = Dictionary(uniqueKeysWithValues: snapshot.panes.map { ($0.terminal_id, $0) })
     for pane in allPanes {
-      if let terminal = pane.herdrTerminal, let record = snapshot.panes.first(where: { $0.terminal_id == terminal.pane.terminal_id }) {
+      if let terminal = pane.herdrTerminal, let record = records[terminal.pane.terminal_id], terminal.pane != record {
         pane.herdrTerminal = .init(client: terminal.client, pane: record)
+        presentationChanged = true
       }
     }
     workspaceView.updateAgents(snapshot)
+    let savedTabs = owner?.workspaceState?.namespaces.flatMap(\.tabs)
+      .reduce(into: [String: WorkspaceState.Tab]()) { $0[$1.id] = $1 } ?? [:]
     for tab in namespaces.flatMap(\.tabs) {
-      if tab.localLayout == nil, let saved = owner?.workspaceState?.namespaces.flatMap(\.tabs).first(where: { $0.id == tab.herdrID }) {
+      if tab.localLayout == nil, let saved = savedTabs[tab.herdrID ?? ""] {
+        presentationChanged = presentationChanged || tab.title != saved.title
         tab.localLayout = saved.layout; tab.title = saved.title
       }
       if tab.localLayout == nil, tab.panes.count > 1 { refreshLayoutTree(tab) }
       else { tab.ensureLayout() }
     }
-    workspaceView.present()
+    if presentationChanged { workspaceView.present() }
   }
 
   func refreshLayoutTree(_ tab: TerminalTab) {
@@ -2411,6 +2505,7 @@ extension TerminalWindowController {
     if session === pane { selectTab(tab.selected) }
     pane.close()
     workspaceView.present()
+    owner?.scheduleWorkspaceSave(self)
     if let client = tab.selected.herdrTerminal?.client {
       client.perform({ try $0.snapshot() }) { [weak self] result in
         guard let self, !self.closing else { return }
@@ -2426,13 +2521,21 @@ extension AppDelegate {
     workspaceLoadAttempted = true
     let store = workspaceStateURL.map { WorkspaceStateStore(url: $0) } ?? WorkspaceStateStore()
     do {
-      workspaceState = try store.load()
+      let loaded = try store.loadWithRevision()
+      workspaceState = loaded.state
+      workspacePersistence.revision = loaded.revision
       closeHistory.pending = Set(workspaceState?.pendingTerminalClosures ?? [])
       workspacePersistence.store = store
+    } catch WorkspaceStateError.unsupportedFutureVersion(let version) {
+      workspaceState = nil
+      workspacePersistence.store = nil
+      workspaceCompatibilityWarning = "This workspace was saved by a newer Velocitty (workspace version \(version)). It will be left unchanged and workspace saving is disabled. Upgrade Velocitty to restore and edit this workspace."
+      NSLog("Workspace persistence disabled for unsupported future version: %d", version)
     } catch {
       do {
         try store.preserveDamagedState()
         workspaceState = WorkspaceState()
+        workspacePersistence.revision = try? Data(contentsOf: store.url)
         workspacePersistence.store = store
         NSLog("Started a fresh workspace after preserving damaged state: %@", error.localizedDescription)
       } catch { NSLog("Could not preserve damaged workspace; persistence disabled: %@", error.localizedDescription) }
@@ -2521,8 +2624,35 @@ extension AppDelegate {
   }
 
   func flushWorkspaceSave() {
-    do { try workspacePersistence.flush() }
-    catch { NSLog("Could not save workspace: %@", error.localizedDescription) }
+    if terminating { flushWorkspaceSaveSynchronously(); return }
+    workspacePersistence.flush { [weak self] result in
+      if case .failure(let error) = result { self?.workspaceSaveFailed(error) }
+    }
+  }
+
+  func flushWorkspaceSaveSynchronously() {
+    do { try workspacePersistence.flushSynchronously() }
+    catch { workspaceSaveFailed(error) }
+  }
+
+  private func workspaceSaveFailed(_ error: Error) {
+    switch error {
+    case WorkspaceStateError.conflictingUpdate:
+      workspacePersistenceFailed("Another Velocitty instance or process changed the workspace on disk. This instance did not overwrite it, and workspace saving has been disabled. Restart Velocitty to load the latest workspace.")
+    case WorkspaceStateError.unsupportedFutureVersion(let version):
+      workspacePersistenceFailed("The workspace was replaced by a newer Velocitty (workspace version \(version)). It will be left unchanged and workspace saving is disabled.")
+    default: NSLog("Could not save workspace: %@", error.localizedDescription)
+    }
+  }
+
+  private func workspacePersistenceFailed(_ message: String) {
+    workspacePersistence.store = nil
+    NSLog("Workspace persistence disabled: %@", message)
+    guard !terminating else { return }
+    DispatchQueue.main.async { [weak self] in
+      guard let self, !self.terminating else { return }
+      configurationAlert(ConfigurationError(message)).runModal()
+    }
   }
 }
 
@@ -2563,7 +2693,13 @@ extension TerminalWindowController {
 extension AppDelegate {
   func connectionFailed(_ client: HerdrClient, error: Error) {
     guard client.isEnabled else { return }
-    connectionStatus[client.endpointID] = .failed(error.localizedDescription)
+    let status = ConnectionStatus.failed(error.localizedDescription)
+    guard connectionStatus[client.endpointID] != status else { return }
+    connectionStatus[client.endpointID] = status
+    connectionsWindow?.refresh()
+    for controller in windows where !controller.closing && controller.allPanes.contains(where: { $0.herdrTerminal?.client === client }) {
+      controller.workspaceView.refreshTabs()
+    }
   }
 
   func client(for id: String) -> HerdrClient? {
@@ -2772,45 +2908,10 @@ extension AppDelegate {
   }
 }
 
-// A close keeps the original surfaces alive for the configured undo window.
-// Only explicit terminal closes become durable backend-destruction intentions.
-private final class ClosedTerminals {
-  struct Slot {
-    let pane: TerminalSession
-    let namespace: TerminalNamespace
-    let namespaceIndex: Int
-    let tab: TerminalTab
-    let tabIndex: Int
-    let paneIndex: Int
-    let layout: PaneLayout?
-  }
-  weak var controller: TerminalWindowController?
-  var slots: [Slot]
-  let destroy: Bool
-  let frame: NSRect?
-  let windowID: String
-  var applied = true
-  var checking = false
-  var timer: Timer?
-  var panes: [TerminalSession] { slots.map(\.pane) }
-  var terminalIDs: [String] { panes.compactMap { $0.herdrTerminal?.pane.terminal_id } }
-  init(_ panes: [TerminalSession], controller: TerminalWindowController, destroy: Bool) {
-    self.controller = controller; self.destroy = destroy
-    frame = controller.window?.frame; windowID = controller.workspaceWindowID
-    slots = controller.namespaces.enumerated().flatMap { ni, namespace in
-      namespace.tabs.enumerated().flatMap { ti, tab in
-        tab.panes.enumerated().compactMap { pi, pane in
-          panes.contains(where: { $0 === pane }) ? Slot(pane: pane, namespace: namespace, namespaceIndex: ni, tab: tab, tabIndex: ti, paneIndex: pi, layout: tab.localLayout) : nil
-        }
-      }
-    }
-  }
-}
-
 extension AppDelegate {
   fileprivate func endTerminal(_ terminal: HerdrClient.Terminal) {
-    closeHistory.pending.insert(terminal.pane.terminal_id); persistCloseIntent()
-    guard terminal.client.isEnabled else { return }
+    closeHistory.pending.insert(terminal.pane.terminal_id)
+    guard persistCloseIntent(), terminal.client.isEnabled else { return }
     terminal.client.perform({ try $0.snapshot() }) { [weak self] result in
       if case .success(let snapshot) = result { self?.retryPendingClosures(terminal.client, snapshot: snapshot) }
     }
@@ -2823,19 +2924,43 @@ extension AppDelegate {
     guard !operation.slots.isEmpty else { return false }
     closeHistory.redo.forEach { $0.timer?.invalidate() }; closeHistory.redo = []
     closeHistory.closed.append(operation)
+    operation.expiry = Date(timeIntervalSinceNow: timeout)
     operation.timer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [weak self, weak operation] _ in
       guard let self, let operation else { return }
       self.expireClose(operation)
     }
     persistCloseIntent()
     controller.hideClosed(operation)
+    refreshCloseUndoBanner()
     return true
   }
 
-  private func persistCloseIntent() {
-    guard var state = workspaceState else { return }
+  private func refreshCloseUndoBanner() {
+    windows.forEach { $0.workspaceView.hideCloseUndo() }
+    guard let operation = closeHistory.closed.last, operation.applied, !operation.checking,
+      let controller = operation.controller, !controller.closing, controller.window != nil,
+      let expiry = operation.expiry else { return }
+    controller.workspaceView.showCloseUndo(count: operation.panes.count, expires: expiry,
+      onUndo: { [weak self] in self?.undoClose() },
+      onEnd: { [weak self] in self?.endLatestClose() })
+  }
+
+  private func endLatestClose() {
+    guard let operation = closeHistory.closed.last, operation.applied, !operation.checking else { return }
+    expireClose(operation)
+  }
+
+  // Writes the close intent before any backend terminal is destroyed, so a crash cannot leave
+  // a destroyed terminal in the saved workspace. Returns false when the write failed.
+  @discardableResult
+  private func persistCloseIntent() -> Bool {
+    guard workspacePersistence.store != nil, var state = workspaceState else { closeIntentDurable = true; return true }
     state.pendingTerminalClosures = hiddenTerminalIDs.sorted()
-    if state != workspaceState { workspaceState = state; workspacePersistence.dirty = true; flushWorkspaceSave() }
+    if state != workspaceState { workspaceState = state; workspacePersistence.dirty = true }
+    guard workspacePersistence.dirty else { closeIntentDurable = true; return true }
+    flushWorkspaceSaveSynchronously()
+    closeIntentDurable = workspacePersistence.store == nil ? false : !workspacePersistence.dirty
+    return closeIntentDurable
   }
 
   private func flushClosesBeforeQuit() -> Bool {
@@ -2873,10 +2998,12 @@ extension AppDelegate {
     operation.timer?.invalidate()
     closeHistory.closed.removeAll { $0 === operation }
     closeHistory.redo.removeAll { $0 === operation }
+    operation.expiry = nil
+    refreshCloseUndoBanner()
     guard operation.applied else { return }
     if operation.destroy { closeHistory.pending.formUnion(operation.terminalIDs) }
     operation.panes.forEach { $0.close() }
-    persistCloseIntent()
+    guard persistCloseIntent() else { return }
     let clients = operation.panes.compactMap { $0.herdrTerminal?.client }.reduce(into: [String: HerdrClient]()) { $0[$1.endpointID] = $1 }
     for client in clients.values {
       client.perform({ try $0.snapshot() }) { [weak self] result in
@@ -2887,7 +3014,7 @@ extension AppDelegate {
 
   private func retryPendingClosures(_ client: HerdrClient, snapshot: HerdrClient.Snapshot) {
     let ids = closeHistory.pending.filter(client.owns)
-    guard !ids.isEmpty, !closeHistory.ending.contains(client.endpointID), !terminating else { return }
+    guard !ids.isEmpty, closeIntentDurable, !closeHistory.ending.contains(client.endpointID), !terminating else { return }
     closeHistory.ending.insert(client.endpointID)
     client.perform({ client -> Set<String> in
       var completed: Set<String> = []
@@ -2910,6 +3037,8 @@ extension AppDelegate {
     guard let operation = closeHistory.closed.last, operation.applied, !operation.checking, !terminating else { return }
     operation.checking = true
     operation.timer?.invalidate()
+    operation.expiry = nil
+    refreshCloseUndoBanner()
     let clients = Array(operation.panes.compactMap { $0.herdrTerminal?.client }.reduce(into: [String: HerdrClient]()) { $0[$1.endpointID] = $1 }.values)
     validateUndo(operation, clients: clients)
   }
@@ -2936,9 +3065,11 @@ extension AppDelegate {
       case .failure(let error):
         operation.checking = false
         self.showMuxError(error)
+        operation.expiry = Date(timeIntervalSinceNow: max(0.01, self.native.undoTimeout))
         operation.timer = Timer.scheduledTimer(withTimeInterval: max(0.01, self.native.undoTimeout), repeats: false) { [weak self, weak operation] _ in
           if let operation { self?.expireClose(operation) }
         }
+        self.refreshCloseUndoBanner()
       }
     }
   }
@@ -2947,6 +3078,8 @@ extension AppDelegate {
     operation.checking = false
     operation.applied = false
     closeHistory.closed.removeAll { $0 === operation }
+    operation.expiry = nil
+    refreshCloseUndoBanner()
     if operation.slots.isEmpty { persistCloseIntent(); return }
     closeHistory.redo.append(operation)
     persistCloseIntent()
@@ -3081,60 +3214,4 @@ extension TerminalWindowController {
 
 extension AppDelegate {
   fileprivate var workspacePersistenceEnabled: Bool { workspacePersistence.store != nil }
-}
-
-private final class WorkspacePersistence {
-  var store: WorkspaceStateStore?
-  var state: WorkspaceState?
-  var dirty = false
-  var timer: Timer?
-  deinit { timer?.invalidate() }
-
-  func flush() throws {
-    timer?.invalidate(); timer = nil
-    guard dirty, let state, let store else { return }
-    try store.save(state)
-    dirty = false
-  }
-}
-
-private final class ConnectionCoordinator {
-  var clients: [String: HerdrClient] = [:]
-  var restored = false
-  var loaded = false
-  var timers: [String: Timer] = [:]
-  var refreshing: Set<String> = []
-  private var pending: Set<String> = []
-  deinit { timers.values.forEach { $0.invalidate() } }
-
-  func observe(_ client: HerdrClient, snapshot: HerdrClient.Snapshot, receive: @escaping (Result<HerdrClient.Snapshot, Error>) -> Void) {
-    client.onWorkspaceEvent = { [weak self, weak client] in
-      guard let self, let client, client.isEnabled else { return }
-      self.timers[client.endpointID]?.invalidate()
-      self.timers[client.endpointID] = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self, weak client] _ in
-        guard let client else { return }
-        self?.refresh(client, receive: receive)
-      }
-    }
-    client.observeEvents(panes: snapshot.panes)
-  }
-
-  private func refresh(_ client: HerdrClient, receive: @escaping (Result<HerdrClient.Snapshot, Error>) -> Void) {
-    guard client.isEnabled else { return }
-    guard refreshing.insert(client.endpointID).inserted else { pending.insert(client.endpointID); return }
-    client.perform({ try $0.snapshot(timeout: 1) }) { [weak self, weak client] result in
-      guard let self, let client else { return }
-      self.refreshing.remove(client.endpointID)
-      receive(result)
-      if self.pending.remove(client.endpointID) != nil { self.refresh(client, receive: receive) }
-    }
-  }
-}
-
-private final class CloseHistory {
-  var closed: [ClosedTerminals] = []
-  var redo: [ClosedTerminals] = []
-  var pending: Set<String> = []
-  var ending: Set<String> = []
-  deinit { (closed + redo).forEach { $0.timer?.invalidate() } }
 }

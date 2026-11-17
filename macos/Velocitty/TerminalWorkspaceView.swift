@@ -33,6 +33,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   private let splitView = WorkspaceSplitView()
   private let sidebar = NSVisualEffectView()
   private let content = NSView()
+  private let undoBanner = CloseUndoBanner()
   private let toggleSidebar = NSButton()
   private var sidebarCompact = false
   private var sidebarAnimation: Timer?
@@ -56,9 +57,6 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   private var branchesCheckedAt = -Double.infinity
   private var gitWatchers: [String: DispatchSourceFileSystemObject] = [:]
   private var gitRefresh: Timer?
-  private var agentTimer: Timer?
-  private var pollingAgents = false
-  private var lastAgentPoll = -Double.infinity
   private var accessibilityObserver: NSObjectProtocol?
 
   var showsTabBar: Bool {
@@ -148,55 +146,21 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
       button.isBordered = false
       button.font = .systemFont(ofSize: 14)
     }
+    content.addSubview(undoBanner)
   }
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
   deinit {
-    agentTimer?.invalidate(); sidebarAnimation?.invalidate(); gitRefresh?.invalidate(); gitWatchers.values.forEach { $0.cancel() }
+    sidebarAnimation?.invalidate(); gitRefresh?.invalidate(); gitWatchers.values.forEach { $0.cancel() }
     if let accessibilityObserver { NSWorkspace.shared.notificationCenter.removeObserver(accessibilityObserver) }
   }
 
   override func viewDidMoveToWindow() {
     super.viewDidMoveToWindow()
-    agentTimer?.invalidate()
-    agentTimer = nil
-    if window != nil {
-      pollAgents()
-      agentTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.pollAgents() }
-    }
+    if window != nil { controller?.owner?.requestAgentPoll() }
   }
 
-  private func pollAgents() {
-    guard !pollingAgents, let controller, !controller.muxBusy, !controller.closing,
-      window != nil,
-      let client = controller.session?.herdrTerminal?.client else { return }
-    let now = ProcessInfo.processInfo.systemUptime
-    let interval: TimeInterval = NSApp.isActive ? (client.eventsConnected ? 10 : 2) : 30
-    guard now - lastAgentPoll >= interval else { return }
-    lastAgentPoll = now
-    pollingAgents = true
-    let clients = controller.allPanes.compactMap { $0.herdrTerminal?.client }.filter(\.isEnabled).reduce(into: [String: HerdrClient]()) { $0[$1.endpointID] = $1 }.values
-    var remaining = clients.count
-    if remaining == 0 { pollingAgents = false; return }
-    for client in clients {
-      client.perform({ try $0.statusSnapshot() }) { [weak self, weak client] result in
-        guard let self, let client else { return }
-        remaining -= 1
-        if remaining == 0 { self.pollingAgents = false }
-        switch result {
-        case .success(let snapshot):
-          guard self.controller?.closing == false, self.controller?.owner?.terminating != true else { return }
-          self.controller?.owner?.synchronizeHerdr(snapshot, client: client)
-          self.updateAgents(snapshot)
-        case .failure(let error):
-          self.controller?.owner?.connectionFailed(client, error: error)
-          let stale = self.agents.mapValues { $0 }
-          for (id, agent) in stale where client.owns(id) { self.agents[id] = Agent(name: agent.name, status: "unknown") }
-          self.refreshTabs()
-        }
-      }
-    }
-  }
+  // Snapshot polling is coordinated once per endpoint by AppDelegate.
 
   func updateAgents(_ snapshot: HerdrClient.Snapshot) {
     controller?.owner?.observeAgentStates(snapshot)
@@ -224,7 +188,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
       let now = ProcessInfo.processInfo.systemUptime
       guard now - (remoteBranchChecks[key] ?? -Double.infinity) >= 60 else { continue }
       remoteBranchChecks[key] = now
-      terminal.client.perform({ try $0.gitBranch(directory: path) }) { [weak self] result in
+      terminal.client.performMetadata({ try $0.gitBranch(directory: path) }) { [weak self] result in
         guard let self else { return }
         if case .success(let branch) = result { self.remoteBranches[key] = branch }
         else { self.remoteBranches[key] = nil }
@@ -338,6 +302,13 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     return failed || pane.connectionSuspended || pane.recovering || pane.herdrTerminal?.client.isEnabled == false ? Agent(name: agent.name, status: "unknown") : agent
   }
 
+  func showCloseUndo(count: Int, expires: Date, onUndo: @escaping () -> Void, onEnd: @escaping () -> Void) {
+    undoBanner.show(count: count, expires: expires, onUndo: onUndo, onEnd: onEnd)
+    needsLayout = true
+  }
+
+  func hideCloseUndo() { undoBanner.hide() }
+
   func present() {
     let visible = controller?.visiblePanes ?? []
     let wanted = visible.compactMap(\.chrome)
@@ -386,6 +357,8 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     addTab.frame = NSRect(x: width - 34, y: height - 28, width: 30, height: 26)
     namespaceScroll.frame = sidebar.bounds
     panes.frame = NSRect(x: 0, y: 0, width: width, height: max(0, height - tabHeight))
+    let bannerWidth = min(460, max(280, width - 24))
+    undoBanner.frame = NSRect(x: (width - bannerWidth) / 2, y: 12, width: bannerWidth, height: 38)
     guard let controller else { return }
     if !paneDividers.contains(where: \.dragging) {
       paneDividers.forEach { $0.removeFromSuperview() }; paneDividers = []
@@ -473,17 +446,31 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     path.lineWidth = 1.5
     path.stroke()
   }
+  private func connectionState(for tab: TerminalTab) -> (label: String, error: String?) {
+    let clients = tab.panes.compactMap { $0.herdrTerminal?.client }
+    if clients.contains(where: { !$0.isEnabled }) { return ("Disabled", nil) }
+    for client in clients {
+      if case .failed(let message) = controller?.owner?.connectionStatus[client.endpointID] {
+        return ("Connection failed", client.endpointLabel + ": " + message)
+      }
+    }
+    if tab.panes.contains(where: { $0.connectionSuspended || $0.recovering }) { return ("Disconnected", nil) }
+    if clients.contains(where: { controller?.owner?.connectionStatus[$0.endpointID] == .connecting }) { return ("Connecting…", nil) }
+    if clients.contains(where: { controller?.owner?.connectionStatus[$0.endpointID] == .notConnected }) { return ("Disconnected", nil) }
+    return ("Connected", nil)
+  }
+
   func refreshTabs() {
     for view in tabButtons.arrangedSubviews { tabButtons.removeArrangedSubview(view); view.removeFromSuperview() }
     guard let controller else { return }
-    controller.owner?.scheduleWorkspaceSave(controller)
     refreshNamespaces(controller)
     var contentWidth: CGFloat = 0
     for (index, tab) in controller.tabs.enumerated() {
       let label = title(for: tab)
       let client = tab.selected.herdrTerminal?.client
-      let unavailable = tab.panes.contains { $0.herdrTerminal?.client.isEnabled == false || $0.connectionSuspended || $0.recovering }
-      let state = client?.isEnabled == false ? "Disabled" : unavailable ? "Disconnected" : "Connected"
+      let endpointState = connectionState(for: tab)
+      let state = endpointState.label
+      let unavailable = state != "Connected"
       let location = client?.machine?.target ?? "Local"
       let connections = Set(tab.panes.compactMap { $0.herdrTerminal?.client.endpointLabel }).sorted()
       let connection = connections.count > 1 ? connections.joined(separator: " + ") + " · " + state : [client?.endpointLabel ?? "Standalone", location, client?.sessionName ?? "", state].joined(separator: " · ")
@@ -501,8 +488,9 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
       button.font = .systemFont(ofSize: 12, weight: controller.activeTab === tab ? .medium : .regular)
       button.contentTintColor = controller.activeTab === tab ? .labelColor : .secondaryLabelColor
       button.lineBreakMode = .byTruncatingTail
-      button.toolTip = label + "\n" + connection
-      button.setAccessibilityLabel(label + ", " + connection)
+      button.toolTip = label + "\n" + connection + (endpointState.error.map { "\n" + $0 } ?? "")
+      button.setAccessibilityLabel(label + ", " + connection + (tab.hasBell ? ", bell pending" : ""))
+      button.setAccessibilitySelected(controller.activeTab === tab)
       button.target = button
       button.action = #selector(WorkspaceActionButton.invoke)
       button.onPress = { [weak controller, weak tab] in
@@ -562,6 +550,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
         self.tabButtons.arrangedSubviews[index].scrollToVisible(self.tabButtons.arrangedSubviews[index].bounds)
       }
     }
+    controller.allPanes.forEach { $0.view?.announceAccessibilityLabelChange() }
     needsLayout = true
   }
   private func title(for tab: TerminalTab) -> String {
@@ -955,6 +944,91 @@ private final class NamespaceHoverRow: NSTableRowView {
       NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 0), xRadius: 5, yRadius: 5).fill()
     }
   }
+}
+
+private final class CloseUndoBanner: NSVisualEffectView {
+  private let label = NSTextField(labelWithString: "")
+  private let undoButton = NSButton(title: "Undo", target: nil, action: nil)
+  private let endButton = NSButton(title: "End Now", target: nil, action: nil)
+  private var expires: Date?
+  private var timer: Timer?
+  private var count = 0
+  private var onUndo: (() -> Void)?
+  private var onEnd: (() -> Void)?
+
+  override init(frame: NSRect) {
+    super.init(frame: frame)
+    material = .popover
+    state = .active
+    wantsLayer = true
+    layer?.cornerRadius = 8
+    layer?.borderWidth = 1
+    layer?.borderColor = NSColor.separatorColor.cgColor
+    isHidden = true
+    setAccessibilityElement(true)
+    setAccessibilityRole(.group)
+    label.font = .systemFont(ofSize: 12)
+    label.lineBreakMode = .byTruncatingTail
+    addSubview(label)
+    for (button, action) in [(undoButton, #selector(undo)), (endButton, #selector(endNow))] {
+      button.target = self
+      button.action = action
+      button.font = .systemFont(ofSize: 12)
+      button.bezelStyle = .inline
+      addSubview(button)
+    }
+    undoButton.setAccessibilityHelp("Restore the closed terminals")
+    endButton.setAccessibilityHelp("End the closed terminal sessions now")
+  }
+  required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+  override func layout() {
+    super.layout()
+    undoButton.frame = NSRect(x: bounds.width - 164, y: 5, width: 72, height: 28)
+    endButton.frame = NSRect(x: bounds.width - 86, y: 5, width: 78, height: 28)
+    label.frame = NSRect(x: 12, y: 7, width: max(40, bounds.width - 188), height: 24)
+  }
+
+  func show(count: Int, expires: Date, onUndo: @escaping () -> Void, onEnd: @escaping () -> Void) {
+    timer?.invalidate()
+    self.count = count
+    self.expires = expires
+    self.onUndo = onUndo
+    self.onEnd = onEnd
+    isHidden = false
+    updateLabel()
+    // The spoken label stays fixed; only the visible countdown ticks.
+    let subject = count == 1 ? "Terminal closed" : "\(count) terminals closed"
+    let spoken = "\(subject). Undo and End Now buttons are available."
+    setAccessibilityLabel(spoken)
+    timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+      self?.updateLabel()
+    }
+    NSAccessibility.post(element: self, notification: .announcementRequested, userInfo: [
+      .announcement: spoken,
+      .priority: NSAccessibilityPriorityLevel.high.rawValue,
+    ])
+  }
+
+  private func updateLabel() {
+    guard let expires else { return }
+    let remaining = max(0, Int(ceil(expires.timeIntervalSinceNow)))
+    let subject = count == 1 ? "Terminal closed" : "\(count) terminals closed"
+    label.stringValue = "\(subject) · Undo for \(remaining)s"
+  }
+
+  func hide() {
+    timer?.invalidate()
+    timer = nil
+    expires = nil
+    onUndo = nil
+    onEnd = nil
+    isHidden = true
+  }
+
+  @objc private func undo() { onUndo?() }
+  @objc private func endNow() { onEnd?() }
+  deinit { timer?.invalidate() }
 }
 
 /// A single monochrome source, with aliases for herdr's agent names.

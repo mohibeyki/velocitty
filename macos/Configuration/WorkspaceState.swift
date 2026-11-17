@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0
+import Darwin
 import Foundation
 
 public struct WorkspaceState: Codable, Equatable, Sendable {
@@ -128,7 +129,12 @@ public struct WorkspaceState: Codable, Equatable, Sendable {
         var current = saved
         if let panes = saved.panes {
           current.panes = panes.compactMap { pane in
-            pane.connectionID == endpoint ? livePanes[pane.terminalID] : pane
+            guard pane.connectionID == endpoint else { return pane }
+            guard var live = livePanes[pane.terminalID] else { return nil }
+            // The host's OSC/PWD value is presentation state and may be newer than
+            // the server's creation cwd. Do not reintroduce a difference every poll.
+            live.cwd = pane.cwd ?? live.cwd
+            return live
           }
           guard let surviving = current.panes, !surviving.isEmpty else { return nil }
           assigned.formUnion(surviving.map(\.terminalID))
@@ -197,15 +203,28 @@ public struct WorkspaceState: Codable, Equatable, Sendable {
   }
 }
 
+public enum WorkspaceStateError: Error, Equatable {
+  case unsupportedFutureVersion(Int)
+  case conflictingUpdate
+}
+
 public struct WorkspaceStateStore {
   public let url: URL
   public init(url: URL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
     .appendingPathComponent("Velocitty/workspace.json")) { self.url = url }
 
-  public func load() throws -> WorkspaceState {
-    let data: Data
+  public func load() throws -> WorkspaceState { try loadWithRevision().state }
+
+  public func loadWithRevision() throws -> (state: WorkspaceState, revision: Data?) {
+    let data: Data?
     do { data = try Data(contentsOf: url) }
-    catch let error as CocoaError where error.code == .fileReadNoSuchFile { return WorkspaceState() }
+    catch let error as CocoaError where error.code == .fileReadNoSuchFile { data = nil }
+    guard let data else { return (WorkspaceState(), nil) }
+    // A newer schema may not decode at all, so check the version before decoding.
+    if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      let version = (object["version"] as? NSNumber)?.intValue, version > 4 {
+      throw WorkspaceStateError.unsupportedFutureVersion(version)
+    }
     let state = try JSONDecoder().decode(WorkspaceState.self, from: data)
     guard (1...4).contains(state.version) else { throw ConfigurationError("Unsupported workspace state version: \(state.version)") }
     // Reject malformed state rather than overwriting it during this run.
@@ -230,7 +249,7 @@ public struct WorkspaceStateStore {
             && (window.frame.map { [$0.x, $0.y, $0.width, $0.height].allSatisfy(\.isFinite) && $0.width > 0 && $0.height > 0 } ?? true)
         }) else { throw ConfigurationError("Invalid workspace window state.") }
     }
-    return state
+    return (state, data)
   }
 
   public func preserveDamagedState() throws {
@@ -239,17 +258,50 @@ public struct WorkspaceStateStore {
     try FileManager.default.copyItem(at: url, to: backup)
   }
 
-  public func save(_ state: WorkspaceState) throws {
+  @discardableResult
+  public func save(_ state: WorkspaceState) throws -> Data {
+    try withExclusiveLock { try saveLocked(state) }
+  }
+
+  @discardableResult
+  public func save(_ state: WorkspaceState, expectedRevision: Data?) throws -> Data {
+    try withExclusiveLock {
+      let current = try? Data(contentsOf: url)
+      guard current == expectedRevision else { throw WorkspaceStateError.conflictingUpdate }
+      return try saveLocked(state)
+    }
+  }
+
+  private func saveLocked(_ state: WorkspaceState) throws -> Data {
+    let previous = try? Data(contentsOf: url)
+    if let previous,
+      let object = try? JSONSerialization.jsonObject(with: previous) as? [String: Any],
+      let version = object["version"] as? Int, version > 4 {
+      throw WorkspaceStateError.unsupportedFutureVersion(version)
+    }
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     let data = try encoder.encode(state)
-    try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-    if let previous = try? Data(contentsOf: url),
+    if let previous,
       let old = try? JSONDecoder().decode(WorkspaceState.self, from: previous), old.version < 4 {
       let backup = url.appendingPathExtension("v\(old.version).backup")
       if !FileManager.default.fileExists(atPath: backup.path) { try previous.write(to: backup, options: .withoutOverwriting) }
     }
     try data.write(to: url, options: .atomic)
+    return data
+  }
+
+  private func withExclusiveLock<T>(_ body: () throws -> T) throws -> T {
+    try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let lockURL = url.appendingPathExtension("lock")
+    let descriptor: Int32 = lockURL.withUnsafeFileSystemRepresentation { path in
+      guard let path else { return -1 }
+      return open(path, O_RDWR | O_CREAT, 0o600)
+    }
+    guard descriptor >= 0 else { throw POSIXError(.EIO) }
+    defer { Darwin.close(descriptor) }
+    guard flock(descriptor, LOCK_EX) == 0 else { throw POSIXError(.EIO) }
+    return try body()
   }
 }
 

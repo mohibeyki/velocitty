@@ -30,6 +30,10 @@ if CommandLine.arguments.contains("--workspace-persistence") {
   try runWorkspacePersistenceCheck()
   exit(0)
 }
+if CommandLine.arguments.contains("--persistence-coordination") {
+  try runPersistenceCoordinationCheck()
+  exit(0)
+}
 let delegate = AppDelegate()
 app.delegate = delegate
 let testAutomaticQuit = CommandLine.arguments.contains("--quit-on-close")
@@ -1501,7 +1505,7 @@ func runWorkspacePersistenceCheck() throws {
   window.workspaceView.restoreSidebarState(.init(width: 276, compact: true))
   window.workspaceView.layoutSubtreeIfNeeded()
   first.scheduleWorkspaceSave(window)
-  first.flushWorkspaceSave()
+  first.flushWorkspaceSaveSynchronously()
   let saved = try WorkspaceStateStore(url: file).load()
   precondition(saved.selectedNamespaceID == selectedNamespace)
   window.window?.performClose(nil)
@@ -1549,7 +1553,7 @@ func runWorkspacePersistenceCheck() throws {
   let extraID = extra.workspaceWindowID
   let extraNamespace = extra.activeNamespace.id
   extra.window?.setFrame(NSRect(x: 100, y: 100, width: 850, height: 650), display: true)
-  second.scheduleWorkspaceSave(extra); second.flushWorkspaceSave()
+  second.scheduleWorkspaceSave(extra); second.flushWorkspaceSaveSynchronously()
   extra.window?.performClose(nil)
   second.synchronizeHerdr(try client.snapshot(), client: client)
   precondition(!restored.namespaces.contains { $0.id == extraNamespace }, "Detached windows must stay detached")
@@ -1693,7 +1697,7 @@ func runRemoteCheck() throws {
   window.workspaceView.layoutSubtreeIfNeeded()
   precondition(window.presentedTabs.count == 2 && window.visiblePanes.contains { $0 === localPane })
   precondition(!localPane.chrome!.frame.intersects(remotePane.chrome!.frame))
-  owner.flushWorkspaceSave()
+  owner.flushWorkspaceSaveSynchronously()
   let saved = try WorkspaceStateStore(url: owner.workspaceStateURL!).load()
   window.stopAlongside()
   window.restoreWorkspaceState(saved)
@@ -1805,7 +1809,7 @@ func runMixedConnectionsCheck() throws {
   let terminalID = pane.herdrTerminal!.pane.terminal_id
   let spaceID = window.activeNamespace.id!
   window.activeNamespace.name = "Mixed Project"
-  app.scheduleWorkspaceSave(window); app.flushWorkspaceSave()
+  app.scheduleWorkspaceSave(window); app.flushWorkspaceSaveSynchronously()
   app.synchronizeHerdr(try first.snapshot(), client: app.herdr!)
   app.synchronizeHerdr(try client.snapshot(), client: client)
   precondition(window.namespaces.count == 1 && window.tabs.count == 2 && window.activeNamespace.name == "Mixed Project")
@@ -1818,7 +1822,7 @@ func runMixedConnectionsCheck() throws {
   app.undoClose()
   precondition(window.allPanes.contains { $0 === pane } && pane.connectionSuspended, "Undo must restore a disabled terminal without connecting")
   app.scheduleWorkspaceSave(window)
-  app.flushWorkspaceSave()
+  app.flushWorkspaceSaveSynchronously()
   for controller in Array(app.windows) { controller.closing = true; controller.window?.close() }
   let restored = try owner(); restored.startInitialWorkspace(); wait(restored)
   let restoredWindow = restored.windows.first!
@@ -1831,7 +1835,7 @@ func runMixedConnectionsCheck() throws {
   let deadline = Date(timeIntervalSinceNow: 8)
   while placeholder.surface == nil && Date() < deadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.05)) }
   precondition(placeholder.surface != nil && placeholder.herdrTerminal!.pane.terminal_id == terminalID)
-  restored.scheduleWorkspaceSave(restoredWindow); restored.flushWorkspaceSave()
+  restored.scheduleWorkspaceSave(restoredWindow); restored.flushWorkspaceSaveSynchronously()
   let saved = try WorkspaceStateStore(url: file).load()
   precondition(saved.namespaces[0].tabs.count == 2)
   enable(restored, second.endpointID, false)
@@ -1840,7 +1844,7 @@ func runMixedConnectionsCheck() throws {
   restored.connectEndpoint(restored.herdr!); wait(restored)
   precondition(restoredWindow.tabs.count == 1, "A pending close must not reappear as an offline placeholder")
   enable(restored, first.endpointID, false)
-  restored.scheduleWorkspaceSave(restoredWindow); restored.flushWorkspaceSave()
+  restored.scheduleWorkspaceSave(restoredWindow); restored.flushWorkspaceSaveSynchronously()
   for controller in Array(restored.windows) { controller.closing = true; controller.window?.close() }
   let disabled = try owner(); disabled.startInitialWorkspace(); wait(disabled)
   precondition(disabled.windows.count == 1 && disabled.windows[0].tabs.count == 1, "All-disabled startup retains the saved workspace")
@@ -1856,7 +1860,7 @@ func runMixedConnectionsCheck() throws {
   precondition(mixedWindow.activeTab.panes.count == 2)
   precondition(Set(mixedWindow.activeTab.panes.compactMap { $0.herdrTerminal?.client.endpointID }).count == 2)
   let mixedTabID = mixedWindow.activeTab.herdrID!
-  mixed.scheduleWorkspaceSave(mixedWindow); mixed.flushWorkspaceSave()
+  mixed.scheduleWorkspaceSave(mixedWindow); mixed.flushWorkspaceSaveSynchronously()
   for controller in Array(mixed.windows) { controller.closing = true; controller.window?.close() }
   let reopened = try owner(); reopened.startInitialWorkspace(); wait(reopened)
   let restoredMixed = reopened.windows.flatMap(\.namespaces).flatMap(\.tabs).first { $0.herdrID == mixedTabID }!
@@ -1865,7 +1869,7 @@ func runMixedConnectionsCheck() throws {
   let ownerWindow = restoredMixed.selected.windowController!
   enable(reopened, second.endpointID, false)
   precondition(restoredMixed.panes.count == 2 && restoredMixed.panes.contains { $0.connectionSuspended })
-  reopened.scheduleWorkspaceSave(ownerWindow); reopened.flushWorkspaceSave()
+  reopened.scheduleWorkspaceSave(ownerWindow); reopened.flushWorkspaceSaveSynchronously()
   for controller in Array(reopened.windows) { controller.closing = true; controller.window?.close() }
   let offline = try owner(); offline.startInitialWorkspace(); wait(offline)
   let offlineTab = offline.windows.flatMap(\.namespaces).flatMap(\.tabs).first { $0.herdrID == mixedTabID }!
@@ -1934,7 +1938,7 @@ func runScaleCheck() throws {
     owner.synchronizeHerdr(try endpoint.snapshot(), client: endpoint)
   }
   let reconciled = ProcessInfo.processInfo.systemUptime
-  owner.windows.forEach { owner.scheduleWorkspaceSave($0) }; owner.flushWorkspaceSave()
+  owner.windows.forEach { owner.scheduleWorkspaceSave($0) }; owner.flushWorkspaceSaveSynchronously()
   let saved = try WorkspaceStateStore(url: owner.workspaceStateURL!).load()
   precondition(saved.namespaces.flatMap(\.tabs).flatMap { $0.panes ?? [] }.count == 50)
   var usage = rusage(); getrusage(RUSAGE_SELF, &usage)
@@ -2001,4 +2005,69 @@ func runManagementUICheck() throws {
   precondition(AppConfiguration.load().options.last { $0.key == "theme" }?.value == "Catppuccin Mocha")
   precondition(AppConfiguration.load().connections?.count == 2)
   print("Management UI tests passed.")
+}
+
+// The async flush path, its failure reporting and its interaction with synchronous flushes.
+func runPersistenceCoordinationCheck() throws {
+  let directory = FileManager.default.temporaryDirectory.appendingPathComponent("velo-persistence-" + UUID().uuidString)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let file = directory.appendingPathComponent("workspace.json")
+  let store = WorkspaceStateStore(url: file)
+  let persistence = WorkspacePersistence()
+  persistence.store = store
+  persistence.state = WorkspaceState()
+  persistence.revision = nil
+  func mutate(_ name: String) {
+    var state = persistence.state!
+    state.selectedNamespaceID = name
+    persistence.state = state
+    persistence.dirty = true
+  }
+  func waitForWrite(_ done: () -> Bool) {
+    let deadline = Date(timeIntervalSinceNow: 5)
+    while !done() && Date() < deadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.01)) }
+    precondition(done(), "The asynchronous save never completed")
+  }
+  // An asynchronous save completes, adopts the new revision and reports success once.
+  var results: [Result<Void, Error>] = []
+  mutate("a")
+  persistence.flush { results.append($0) }
+  waitForWrite { !results.isEmpty }
+  precondition((try? results[0].get()) != nil && !persistence.dirty)
+  precondition(persistence.revision == (try? Data(contentsOf: file)), "The revision must match the saved bytes")
+  let first = try store.load().selectedNamespaceID
+  precondition(first == "a")
+  // Changes made while a write is in flight are written by the follow-up flush.
+  results = []
+  mutate("b")
+  persistence.flush { results.append($0) }
+  mutate("c")
+  persistence.flush { results.append($0) }
+  waitForWrite { results.count >= 2 && !persistence.dirty }
+  let second = try store.load().selectedNamespaceID
+  precondition(second == "c" && persistence.revision == (try? Data(contentsOf: file)))
+  // A synchronous flush right after an asynchronous one must not be overwritten by a stale revision.
+  results = []
+  mutate("d")
+  persistence.flush { results.append($0) }
+  mutate("e")
+  try persistence.flushSynchronously()
+  waitForWrite { !results.isEmpty }
+  pumpEvents(until: Date(timeIntervalSinceNow: 0.1))
+  let third = try store.load().selectedNamespaceID
+  precondition(third == "e")
+  precondition(persistence.revision == (try? Data(contentsOf: file)), "A late completion must not restore an older revision")
+  // An external change is a conflict and is reported exactly once.
+  try Data("{\"version\":4,\"namespaces\":[]}".utf8).write(to: file)
+  results = []
+  mutate("f")
+  persistence.flush { results.append($0) }
+  waitForWrite { !results.isEmpty }
+  pumpEvents(until: Date(timeIntervalSinceNow: 0.1))
+  precondition(results.count == 1, "A failed save must be reported once")
+  guard case .failure(let error) = results[0], error as? WorkspaceStateError == .conflictingUpdate else {
+    fatalError("Expected a conflicting update")
+  }
+  precondition(persistence.dirty, "A failed save must stay dirty")
+  print("Persistence coordination checks passed.")
 }

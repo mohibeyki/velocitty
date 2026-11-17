@@ -11,6 +11,9 @@ final class WindowTests: XCTestCase {
   func testWorkspacePersistence() throws {
     try runCheck("WindowChecks", arguments: ["--workspace-persistence"], success: "Workspace persistence tests passed.")
   }
+  func testPersistenceCoordination() throws {
+    try runCheck("WindowChecks", arguments: ["--persistence-coordination"], success: "Persistence coordination checks passed.")
+  }
   func testRelaunchRestoration() throws {
     let files = FileManager.default
     let products = Bundle(for: EngineTests.self).bundleURL.deletingLastPathComponent()
