@@ -223,7 +223,7 @@ final class CommandPalette: NSPanel, NSTextFieldDelegate, NSWindowDelegate, NSTa
     }
     table.reloadData()
     emptyLabel.isHidden = !filtered.isEmpty
-    if !filtered.isEmpty && !needle.isEmpty {
+    if !filtered.isEmpty {
       table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
     } else { table.deselectAll(nil) }
     list.contentView.scroll(to: NSPoint(x: -10, y: -10))

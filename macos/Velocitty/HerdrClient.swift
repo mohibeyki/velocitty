@@ -46,7 +46,7 @@ final class HerdrClient {
     let pane_count: Int
     var number: Int? = nil
   }
-  struct Pane: Decodable {
+  struct Pane: Decodable, Equatable {
     let pane_id: String
     let terminal_id: String
     let workspace_id: String
@@ -119,11 +119,18 @@ final class HerdrClient {
   private let sshOptions: [String]
   private let remoteExecutable: String?
   private let remoteEnvironment: [String: String]
+  private let transportLock = NSLock()
   private var tunnel: Process?
   private var tunnelDirectory: URL?
-  private(set) var forwardedSocket: String?
+  private var forwardedSocketStorage: String?
+  var forwardedSocket: String? {
+    transportLock.lock()
+    defer { transportLock.unlock() }
+    return forwardedSocketStorage
+  }
   private var connectionArguments: [String] { machine == nil ? ["--session", sessionName] : [] }
   private let queue = DispatchQueue(label: "velocitty.herdr", qos: .userInitiated)
+  private let metadataQueue = DispatchQueue(label: "velocitty.herdr.metadata", qos: .utility)
   private var server: Process?
   private var eventStream: HerdrEventStream?
   private var eventStarting = false
@@ -211,6 +218,27 @@ final class HerdrClient {
     let generation = availabilityGeneration, submittedEnabled = enabled
     availabilityLock.unlock()
     queue.async {
+      self.availabilityLock.lock()
+      let enabled = self.enabled && self.availabilityGeneration == generation && submittedEnabled
+      self.availabilityLock.unlock()
+      let result = Result { guard enabled else { throw ConfigurationError("Connection disabled or changed.") }; return try work(self) }
+      DispatchQueue.main.async {
+        self.availabilityLock.lock()
+        let current = self.enabled && generation == self.availabilityGeneration
+        self.availabilityLock.unlock()
+        completion(current ? result : .failure(ConfigurationError("Connection disabled or changed.")))
+      }
+    }
+  }
+
+  func performMetadata<T>(
+    _ work: @escaping (HerdrClient) throws -> T,
+    completion: @escaping (Result<T, Error>) -> Void
+  ) {
+    availabilityLock.lock()
+    let generation = availabilityGeneration, submittedEnabled = enabled
+    availabilityLock.unlock()
+    metadataQueue.async {
       self.availabilityLock.lock()
       let enabled = self.enabled && self.availabilityGeneration == generation && submittedEnabled
       self.availabilityLock.unlock()
@@ -437,9 +465,13 @@ final class HerdrClient {
     let tabIDs = snapshot.tabs.map(\.tab_id)
     let paneIDs = snapshot.panes.map(\.pane_id)
     let terminalIDs = snapshot.panes.map(\.terminal_id)
-    guard [workspaceIDs, tabIDs, paneIDs, terminalIDs].allSatisfy({ Set($0).count == $0.count && !$0.contains("") }),
-      snapshot.tabs.allSatisfy({ tab in workspaceIDs.contains(tab.workspace_id) && snapshot.panes.filter { $0.tab_id == tab.tab_id }.count == tab.pane_count }),
-      snapshot.panes.allSatisfy({ pane in snapshot.tabs.contains { $0.tab_id == pane.tab_id && $0.workspace_id == pane.workspace_id } })
+    guard [workspaceIDs, tabIDs, paneIDs, terminalIDs].allSatisfy({ Set($0).count == $0.count && !$0.contains("") })
+    else { throw ConfigurationError("herdr returned an inconsistent session snapshot.") }
+    let workspaces = Set(workspaceIDs)
+    let tabs = Dictionary(uniqueKeysWithValues: snapshot.tabs.map { ($0.tab_id, $0) })
+    let paneCounts = snapshot.panes.reduce(into: [String: Int]()) { $0[$1.tab_id, default: 0] += 1 }
+    guard snapshot.tabs.allSatisfy({ tab in workspaces.contains(tab.workspace_id) && paneCounts[tab.tab_id, default: 0] == tab.pane_count }),
+      snapshot.panes.allSatisfy({ pane in tabs[pane.tab_id]?.workspace_id == pane.workspace_id })
     else { throw ConfigurationError("herdr returned an inconsistent session snapshot.") }
     cachedStatus = (ProcessInfo.processInfo.systemUptime, snapshot)
     return snapshot
@@ -491,7 +523,11 @@ final class HerdrClient {
 
   private func ensureRemoteTransport() throws {
     guard let machine else { return }
-    if tunnel?.isRunning == true, let forwardedSocket, FileManager.default.fileExists(atPath: forwardedSocket) { return }
+    transportLock.lock()
+    let existingTunnel = tunnel
+    let existingSocket = forwardedSocketStorage
+    transportLock.unlock()
+    if existingTunnel?.isRunning == true, let existingSocket, FileManager.default.fileExists(atPath: existingSocket) { return }
     disconnectTransport()
     let executable: String
     if let remoteExecutable { executable = remoteExecutable }
@@ -520,20 +556,32 @@ final class HerdrClient {
     connection.standardOutput = FileHandle.nullDevice
     connection.standardError = FileHandle.nullDevice
     do { try connection.run() } catch { try? FileManager.default.removeItem(at: directory); throw error }
-    tunnel = connection
-    tunnelDirectory = directory
     let deadline = Date(timeIntervalSinceNow: 6)
     while connection.isRunning && !FileManager.default.fileExists(atPath: local) && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
-    guard connection.isRunning, FileManager.default.fileExists(atPath: local) else { disconnectTransport(); throw ConfigurationError("SSH forwarding failed for " + machine.label + ". Check your SSH login and server availability.") }
-    forwardedSocket = local
+    guard connection.isRunning, FileManager.default.fileExists(atPath: local) else {
+      if connection.isRunning { connection.terminate() }
+      try? FileManager.default.removeItem(at: directory)
+      throw ConfigurationError("SSH forwarding failed for " + machine.label + ". Check your SSH login and server availability.")
+    }
+    // Publish one complete attachment snapshot. Surface creation reads the socket
+    // on the main thread and must never observe a partially replaced transport.
+    transportLock.lock()
+    tunnel = connection
+    tunnelDirectory = directory
+    forwardedSocketStorage = local
+    transportLock.unlock()
   }
 
   func disconnectTransport() {
-    if tunnel?.isRunning == true { tunnel?.terminate() }
+    transportLock.lock()
+    let connection = tunnel
+    let directory = tunnelDirectory
     tunnel = nil
-    forwardedSocket = nil
-    if let tunnelDirectory { try? FileManager.default.removeItem(at: tunnelDirectory) }
     tunnelDirectory = nil
+    forwardedSocketStorage = nil
+    transportLock.unlock()
+    if connection?.isRunning == true { connection?.terminate() }
+    if let directory { try? FileManager.default.removeItem(at: directory) }
   }
   deinit { disconnectTransport() }
 
@@ -582,10 +630,19 @@ final class HerdrClient {
 // A read-only event connection. All mutations and terminal I/O still use explicit IDs.
 private final class HerdrEventStream {
   private let source: DispatchSourceRead
+  private let eventQueue = DispatchQueue(label: "velocitty.herdr.events", qos: .userInitiated)
+  private let stateLock = NSLock()
   private var buffer = Data()
   private var stopped = false
-  private(set) var isSubscribed = false
-  var isActive: Bool { !stopped }
+  private var subscribed = false
+  var isSubscribed: Bool {
+    stateLock.lock(); defer { stateLock.unlock() }
+    return subscribed
+  }
+  var isActive: Bool {
+    stateLock.lock(); defer { stateLock.unlock() }
+    return !stopped
+  }
   init(path: String, paneIDs: Set<String>, changed: @escaping () -> Void, ended: @escaping () -> Void) throws {
     var address = sockaddr_un()
     address.sun_family = sa_family_t(AF_UNIX)
@@ -610,10 +667,10 @@ private final class HerdrEventStream {
     let sent = request.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
     guard sent == request.count else { Darwin.close(fd); throw POSIXError(.EIO) }
     _ = fcntl(fd, F_SETFL, O_NONBLOCK)
-    source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .main)
+    source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: eventQueue)
     source.setCancelHandler { Darwin.close(fd) }
     source.setEventHandler { [weak self] in
-      guard let self, !self.stopped else { return }
+      guard let self, self.isActive else { return }
       var bytes = [UInt8](repeating: 0, count: 16384)
       let count = read(fd, &bytes, bytes.count)
       if count <= 0 {
@@ -623,20 +680,30 @@ private final class HerdrEventStream {
       self.buffer.append(contentsOf: bytes.prefix(count))
       guard self.buffer.count < 4 * 1024 * 1024 else { self.stop(); ended(); return }
       var updated = false
-      while let end = self.buffer.firstIndex(of: 10) {
-        let line = self.buffer.prefix(upTo: end)
-        self.buffer.removeSubrange(...end)
+      var cursor = self.buffer.startIndex
+      while let end = self.buffer[cursor...].firstIndex(of: 10) {
+        let line = self.buffer[cursor..<end]
+        cursor = self.buffer.index(after: end)
         if let json = try? JSONSerialization.jsonObject(with: line) as? [String: Any] {
           if json["error"] != nil { self.stop(); ended(); return }
-          if let result = json["result"] as? [String: Any], result["type"] as? String == "subscription_started" { self.isSubscribed = true }
+          if let result = json["result"] as? [String: Any], result["type"] as? String == "subscription_started" {
+            self.stateLock.lock(); self.subscribed = true; self.stateLock.unlock()
+          }
           if json["event"] != nil { updated = true }
         }
       }
+      self.buffer.removeSubrange(..<cursor)
       if updated { changed() }
     }
     source.resume()
   }
-  func stop() { guard !stopped else { return }; stopped = true; source.cancel() }
+  func stop() {
+    stateLock.lock()
+    guard !stopped else { stateLock.unlock(); return }
+    stopped = true
+    stateLock.unlock()
+    source.cancel()
+  }
   deinit { source.cancel() }
 }
 
