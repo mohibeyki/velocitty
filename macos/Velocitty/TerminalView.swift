@@ -7,6 +7,8 @@ import VelocittyConfiguration
 final class TerminalView: NSView, NSTextInputClient {
   var accessibilityText = TerminalTextSnapshot()
   var accessibilityReadAt = -Double.infinity
+  var accessibilityDirty = true
+  var announcedAccessibilityLabel: String?
   var accessibilityTimer: Timer?
   var accessibilitySelectionWork: DispatchWorkItem?
   var postAccessibility: (TerminalView, NSAccessibility.Notification) -> Void = {

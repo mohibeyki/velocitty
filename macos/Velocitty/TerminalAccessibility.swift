@@ -17,14 +17,16 @@ struct TerminalTextSnapshot {
       return String(decoding: UnsafeRawBufferPointer(start: pointer, count: Int(count)), as: UTF8.self)
     }
     let text = string(value.text, value.text_len)
-    let bytes = Array(text.utf8)
+    let utf8 = text.utf8
     func offset(_ byte: Int) -> Int? {
-      guard byte >= 0, byte <= bytes.count,
-        let prefix = String(bytes: bytes.prefix(Int(byte)), encoding: .utf8) else { return nil }
-      return prefix.utf16.count
+      guard byte >= 0, byte <= utf8.count,
+        let index = utf8.index(utf8.startIndex, offsetBy: byte, limitedBy: utf8.endIndex),
+        let stringIndex = String.Index(index, within: text) else { return nil }
+      return text[..<stringIndex].utf16.count
     }
     var snapshot = Self(text: text)
     if let rects = value.rects {
+      snapshot.rects.reserveCapacity(text.utf16.count)
       var byte = 0
       for scalar in text.unicodeScalars {
         let cell = rects[byte]
@@ -54,23 +56,31 @@ extension TerminalView {
       accessibilityTimer = timer
       RunLoop.main.add(timer, forMode: .common)
     }
-    if ProcessInfo.processInfo.systemUptime - accessibilityReadAt > 0.5 {
+    // Output does not always signal a render, so a stale snapshot is re-read even when not marked dirty.
+    if accessibilityDirty || ProcessInfo.processInfo.systemUptime - accessibilityReadAt > 0.5 {
       accessibilityText = TerminalTextSnapshot.read(surface)
       accessibilityReadAt = ProcessInfo.processInfo.systemUptime
+      accessibilityDirty = false
     }
     return accessibilityText
   }
   func refreshAccessibilityText() {
     guard let surface else { stopAccessibility(); return }
+    // A hidden terminal is refreshed on its next direct query or when it becomes visible.
+    guard let window, window.isVisible, !window.isMiniaturized, !isHiddenOrHasHiddenAncestor else { return }
     let previous = accessibilityText
     accessibilityText = TerminalTextSnapshot.read(surface)
     accessibilityReadAt = ProcessInfo.processInfo.systemUptime
+    accessibilityDirty = false
     if previous.text != accessibilityText.text { postAccessibility(self, .valueChanged) }
     if previous.selection != accessibilityText.selection || previous.cursor != accessibilityText.cursor {
       postAccessibility(self, .selectedTextChanged)
     }
   }
-  func invalidateAccessibilityText() { accessibilityReadAt = -.infinity }
+  func invalidateAccessibilityText() {
+    accessibilityDirty = true
+    accessibilityReadAt = -.infinity
+  }
   func accessibilitySelectionChanged() {
     invalidateAccessibilityText()
     accessibilitySelectionWork?.cancel()
@@ -92,7 +102,23 @@ extension TerminalView {
   }
   override func isAccessibilityElement() -> Bool { true }
   override func accessibilityRole() -> NSAccessibility.Role? { .textArea }
-  override func accessibilityLabel() -> String? { "Terminal" }
+  // Tab, space and pane changes alter the label; tell assistive technology only when it did.
+  func announceAccessibilityLabelChange() {
+    let label = accessibilityLabel()
+    guard label != announcedAccessibilityLabel else { return }
+    let first = announcedAccessibilityLabel == nil
+    announcedAccessibilityLabel = label
+    if !first { postAccessibility(self, .titleChanged) }
+  }
+  override func accessibilityLabel() -> String? {
+    guard let session, let controller = session.windowController,
+      let tab = controller.tab(for: session) else { return session?.displayTitle ?? "Terminal" }
+    let namespace = controller.namespace(for: session)?.name ?? "Workspace"
+    let pane = (tab.panes.firstIndex(where: { $0 === session }) ?? 0) + 1
+    let connection = session.herdrTerminal?.client.endpointLabel ?? "Standalone"
+    let position = tab.panes.count > 1 ? ", pane \(pane) of \(tab.panes.count)" : ""
+    return "\(tab.displayTitle)\(position), \(namespace), \(connection)"
+  }
   override func accessibilityHelp() -> String? { "Terminal input and output" }
   override func accessibilityValue() -> Any? { accessibilitySnapshot().text }
   override func accessibilitySelectedText() -> String? { accessibilitySnapshot().selectedText }

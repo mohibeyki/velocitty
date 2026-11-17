@@ -65,6 +65,7 @@ final class RuntimeContext: NSObject {
       return accepted
 
     case GHOSTTY_ACTION_RENDER:
+      view?.invalidateAccessibilityText()
       if target.tag == GHOSTTY_TARGET_SURFACE, let surface = target.target.surface {
         velokit_surface_draw(surface)
       }
