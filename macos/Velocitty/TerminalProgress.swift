@@ -7,6 +7,7 @@ import VeloKit
 final class TerminalProgress: NSView {
   private let bar = CALayer()
   private var timer: Timer?
+  private var accessibilityObserver: NSObjectProtocol?
   private(set) var report: ghostty_action_progress_report_s?
   override init(frame: NSRect) {
     super.init(frame: frame)
@@ -17,6 +18,10 @@ final class TerminalProgress: NSView {
     setAccessibilityElement(true)
     setAccessibilityRole(.progressIndicator)
     setAccessibilityLabel("Terminal progress")
+    accessibilityObserver = NSWorkspace.shared.notificationCenter.addObserver(
+      forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+      object: nil, queue: .main
+    ) { [weak self] _ in self?.needsLayout = true }
   }
   required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
   override func hitTest(_ point: NSPoint) -> NSView? { nil }
@@ -52,7 +57,7 @@ final class TerminalProgress: NSView {
     bar.frame = NSRect(x: 0, y: 0, width: bounds.width * (indeterminate ? 0.25 : Double(percent) / 100),
       height: bounds.height)
     bar.removeAllAnimations()
-    if indeterminate {
+    if indeterminate && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
       let animation = CABasicAnimation(keyPath: "transform.translation.x")
       animation.fromValue = 0
       animation.toValue = bounds.width * 0.75
@@ -65,5 +70,8 @@ final class TerminalProgress: NSView {
     CATransaction.commit()
     setAccessibilityValue(indeterminate ? "In progress" : "\(percent)%")
   }
-  deinit { timer?.invalidate() }
+  deinit {
+    timer?.invalidate()
+    if let accessibilityObserver { NSWorkspace.shared.notificationCenter.removeObserver(accessibilityObserver) }
+  }
 }
