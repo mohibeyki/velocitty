@@ -27,8 +27,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     set { workspacePersistence.state = newValue }
   }
   private var workspaceLoadAttempted = false
-  // False while the latest close intent could not be written; backend destruction waits.
-  fileprivate var closeIntentDurable = true
   private var workspaceCompatibilityWarning: String?
   private var restoringWorkspace = false
   private var synchronizingWorkspace = false
@@ -1958,6 +1956,10 @@ extension AppDelegate {
     }
   }
 
+  private func herdrTargets(_ client: HerdrClient) -> [TerminalWindowController] {
+    windows.filter { $0.allPanes.contains { $0.herdrTerminal?.client === client } && !$0.closing }
+  }
+
   func synchronizeHerdr(_ incoming: HerdrClient.Snapshot, client: HerdrClient) {
     guard client.isEnabled else { return }
     let regainedConnection = connectionStatus[client.endpointID] != .connected
@@ -1966,12 +1968,25 @@ extension AppDelegate {
     let serverSnapshot = incoming.excluding(terminals: hiddenTerminalIDs)
     // Subscriptions must follow external pane changes even while presentation is busy.
     observeHerdr(client, snapshot: serverSnapshot)
-    let targets = windows.filter { $0.allPanes.contains { $0.herdrTerminal?.client === client } && !$0.closing }
+    let targets = herdrTargets(client)
+    // Agent status and notifications must not wait for sheets or busy windows.
+    let agents = serverSnapshot.excluding(terminals: retainedTerminalIDs)
+    for controller in targets { controller.workspaceView.updateAgents(agents) }
     if regainedConnection {
       for controller in targets { controller.workspaceView.refreshTabs() }
       connectionsWindow?.refresh()
     }
-    guard !terminating, !muxOpening, !restoringWorkspace, !synchronizingWorkspace, !targets.isEmpty,
+    applyHerdrSnapshot(incoming, client: client)
+  }
+
+  // Structural synchronization, deferred while presentation is busy. A deferred snapshot is
+  // applied without the connection, agent and close-retry steps, which only suit a fresh snapshot.
+  private func applyHerdrSnapshot(_ incoming: HerdrClient.Snapshot, client: HerdrClient) {
+    let serverSnapshot = incoming.excluding(terminals: hiddenTerminalIDs)
+    let targets = herdrTargets(client)
+    // Without a window showing this client there is nothing to synchronize or defer.
+    guard !targets.isEmpty else { deferredSnapshots.removeValue(forKey: client.endpointID); return }
+    guard !terminating, !muxOpening, !restoringWorkspace, !synchronizingWorkspace,
       targets.allSatisfy({ !$0.muxBusy && !$0.hasPendingMuxActions && $0.window?.attachedSheet == nil }) else {
       deferredSnapshots[client.endpointID] = incoming
       scheduleDeferredSnapshotDrain()
@@ -2052,7 +2067,12 @@ extension AppDelegate {
         deferredSnapshots.removeValue(forKey: endpoint)
         continue
       }
-      synchronizeHerdr(snapshot, client: client)
+      // A newer failure supersedes the stale snapshot.
+      guard connectionStatus[endpoint] == .connected else {
+        deferredSnapshots.removeValue(forKey: endpoint)
+        continue
+      }
+      applyHerdrSnapshot(snapshot, client: client)
     }
     if deferredSnapshots.isEmpty {
       deferredSnapshotTimer?.invalidate()
@@ -2954,21 +2974,23 @@ extension AppDelegate {
   // a destroyed terminal in the saved workspace. Returns false when the write failed.
   @discardableResult
   private func persistCloseIntent() -> Bool {
-    guard workspacePersistence.store != nil, var state = workspaceState else { closeIntentDurable = true; return true }
+    // With persistence disabled (never enabled, or turned off after a conflict) there is no saved
+    // workspace to protect, and waiting would leak backend terminals, so report success consistently.
+    guard workspacePersistence.store != nil, var state = workspaceState else { return true }
     state.pendingTerminalClosures = hiddenTerminalIDs.sorted()
     if state != workspaceState { workspaceState = state; workspacePersistence.dirty = true }
-    guard workspacePersistence.dirty else { closeIntentDurable = true; return true }
-    flushWorkspaceSaveSynchronously()
-    closeIntentDurable = workspacePersistence.store == nil ? false : !workspacePersistence.dirty
-    return closeIntentDurable
+    // Always synchronize: an asynchronous write may already hold this change (dirty is then false),
+    // and the synchronous flush waits for it and surfaces its error.
+    do { try workspacePersistence.flushSynchronously() } catch { workspaceSaveFailed(error) }
+    return workspacePersistence.store == nil || !workspacePersistence.dirty
   }
 
   private func flushClosesBeforeQuit() -> Bool {
     let clients = ([herdr].compactMap { $0 } + Array(connectionCoordinator.clients.values) + closeHistory.closed.flatMap(\.panes).compactMap { $0.herdrTerminal?.client }).reduce(into: [String: HerdrClient]()) { $0[$1.endpointID] = $1 }
     closeHistory.pending.formUnion(hiddenTerminalIDs)
     for operation in closeHistory.closed { operation.timer?.invalidate(); operation.applied = false }
-    persistCloseIntent()
-    guard !closeHistory.pending.isEmpty else { return false }
+    // Leave terminals pending when the intent could not be saved; they are ended on a later run.
+    guard persistCloseIntent(), !closeHistory.pending.isEmpty else { return false }
     var remaining = clients.count
     var replied = false
     let finish = { if !replied { replied = true; NSApp.reply(toApplicationShouldTerminate: true) } }
@@ -3014,7 +3036,7 @@ extension AppDelegate {
 
   private func retryPendingClosures(_ client: HerdrClient, snapshot: HerdrClient.Snapshot) {
     let ids = closeHistory.pending.filter(client.owns)
-    guard !ids.isEmpty, closeIntentDurable, !closeHistory.ending.contains(client.endpointID), !terminating else { return }
+    guard !ids.isEmpty, !closeHistory.ending.contains(client.endpointID), !terminating, persistCloseIntent() else { return }
     closeHistory.ending.insert(client.endpointID)
     client.perform({ client -> Set<String> in
       var completed: Set<String> = []
