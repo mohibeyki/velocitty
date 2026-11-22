@@ -21,8 +21,8 @@ struct TerminalTextSnapshot {
     func offset(_ byte: Int) -> Int? {
       guard byte >= 0, byte <= utf8.count,
         let index = utf8.index(utf8.startIndex, offsetBy: byte, limitedBy: utf8.endIndex),
-        let stringIndex = String.Index(index, within: text) else { return nil }
-      return text[..<stringIndex].utf16.count
+        let utf16Index = index.samePosition(in: text.utf16) else { return nil }
+      return text.utf16.distance(from: text.utf16.startIndex, to: utf16Index)
     }
     var snapshot = Self(text: text)
     if let rects = value.rects {
@@ -108,7 +108,8 @@ extension TerminalView {
     guard label != announcedAccessibilityLabel else { return }
     let first = announcedAccessibilityLabel == nil
     announcedAccessibilityLabel = label
-    if !first { postAccessibility(self, .titleChanged) }
+    // Only the focused pane speaks; the others pick the new label up when focused.
+    if !first, window?.firstResponder === self { postAccessibility(self, .titleChanged) }
   }
   override func accessibilityLabel() -> String? {
     guard let session, let controller = session.windowController,
@@ -117,7 +118,9 @@ extension TerminalView {
     let pane = (tab.panes.firstIndex(where: { $0 === session }) ?? 0) + 1
     let connection = session.herdrTerminal?.client.endpointLabel ?? "Standalone"
     let position = tab.panes.count > 1 ? ", pane \(pane) of \(tab.panes.count)" : ""
-    return "\(tab.displayTitle)\(position), \(namespace), \(connection)"
+    // The program-set title changes constantly, so only the user's tab title is spoken.
+    let title = tab.title.flatMap { $0.isEmpty ? nil : $0 } ?? "Terminal"
+    return "\(title)\(position), \(namespace), \(connection)"
   }
   override func accessibilityHelp() -> String? { "Terminal input and output" }
   override func accessibilityValue() -> Any? { accessibilitySnapshot().text }
