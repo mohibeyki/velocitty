@@ -86,6 +86,12 @@ final class TerminalClipboard {
     }
   }
 
+  /// Accept requests again once the view has a new native surface.
+  func reopen() {
+    precondition(Thread.isMainThread)
+    closed = false
+  }
+
   deinit {
     if let sheetObserver { NotificationCenter.default.removeObserver(sheetObserver) }
     assert(active == nil && pending.isEmpty, "Clipboard requests must be cancelled before surface teardown")

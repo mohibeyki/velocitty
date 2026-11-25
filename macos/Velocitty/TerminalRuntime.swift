@@ -34,7 +34,7 @@ final class TerminalRuntime {
       var accepted: [TerminalOption] = []
       for option in try TerminalTheme.options(
         for: settings,
-        dark: NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua,
+        dark: NSApp.effectiveAppearance.isDark,
         diagnostic: diagnostic)
       {
         if set(option, on: config) {
@@ -107,7 +107,7 @@ final class TerminalRuntime {
     context.runtime = self
     velokit_app_set_focus(app, NSApp.isActive)
     velokit_app_set_color_scheme(
-      app, NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? 1 : 0)
+      app, NSApp.effectiveAppearance.isDark ? 1 : 0)
   }
 
   func makeSession() -> TerminalSession {
@@ -154,11 +154,11 @@ final class TerminalRuntime {
       if !NativeSettings(config: session.config).progressStyle { session.chrome?.progress.clear() }
       if let surface = session.surface {
         velokit_surface_set_color_scheme(
-          surface, NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? 1 : 0)
+          surface, NSApp.effectiveAppearance.isDark ? 1 : 0)
       }
     }
     velokit_app_set_color_scheme(
-      app, NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? 1 : 0)
+      app, NSApp.effectiveAppearance.isDark ? 1 : 0)
     var seen: Set<String> = []
     self.diagnostics = diagnostics.filter { seen.insert($0).inserted }
     context.owner?.configurationDidChange()

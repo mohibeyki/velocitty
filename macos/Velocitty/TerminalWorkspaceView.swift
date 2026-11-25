@@ -10,7 +10,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   var chromeIsDark: Bool {
     switch controller?.session?.settings.interface["theme"] ?? "dark" {
     case "light": return false
-    case "auto": return NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+    case "auto": return NSApp.effectiveAppearance.isDark
     default: return true
     }
   }
@@ -23,9 +23,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     return defaults.merging(controller?.session?.settings.interface ?? [:]) { _, custom in custom }
   }
   func chromeColor(_ key: String) -> NSColor {
-    let hex = UInt32((appearanceValues[key] ?? NamespaceAppearance.defaults[key] ?? "#000000").dropFirst(), radix: 16) ?? 0
-    return NSColor(srgbRed: CGFloat((hex >> 16) & 255) / 255,
-      green: CGFloat((hex >> 8) & 255) / 255, blue: CGFloat(hex & 255) / 255, alpha: 1)
+    NSColor(rgb: UInt32((appearanceValues[key] ?? NamespaceAppearance.defaults[key] ?? "#000000").dropFirst(), radix: 16) ?? 0)
   }
   func metric(_ key: String) -> CGFloat { CGFloat(Double(appearanceValues[key] ?? "") ?? Double(NamespaceAppearance.defaults[key] ?? "") ?? 0) }
   private var paneDividers: [PaneDivider] = []
@@ -164,10 +162,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
 
   func updateAgents(_ snapshot: HerdrClient.Snapshot) {
     controller?.owner?.observeAgentStates(snapshot)
-    let belongs: (String) -> Bool = { id in
-      guard let endpoint = snapshot.endpointID, endpoint != "local" else { return !id.contains("::") }
-      return id.hasPrefix(endpoint + "::")
-    }
+    let belongs = { (id: String) in HerdrClient.owns(id, endpoint: snapshot.endpointID) }
     var updated = agents.filter { !belongs($0.key) }
     for pane in snapshot.panes {
       guard let name = [pane.display_agent, pane.agent].compactMap({ $0 })
@@ -829,9 +824,7 @@ private final class AgentIconButton: NSButton {
     border.path = CGPath(roundedRect: rect, cornerWidth: 5, cornerHeight: 5, transform: nil)
     border.fillColor = nil
     border.lineWidth = width
-    let hex = UInt32((values[statusKey + "_color"] ?? "#666666").dropFirst(), radix: 16) ?? 0x666666
-    border.strokeColor = NSColor(srgbRed: CGFloat((hex >> 16) & 255) / 255,
-      green: CGFloat((hex >> 8) & 255) / 255, blue: CGFloat(hex & 255) / 255, alpha: 1).cgColor
+    border.strokeColor = NSColor(rgb: UInt32((values[statusKey + "_color"] ?? "#666666").dropFirst(), radix: 16) ?? 0x666666).cgColor
     let style = values[statusKey + "_style"] ?? "solid"
     border.isHidden = style == "none"
     border.removeAnimation(forKey: "activity")

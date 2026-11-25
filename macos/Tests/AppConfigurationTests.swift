@@ -295,6 +295,18 @@ final class AppConfigurationTests: XCTestCase {
     XCTAssertEqual(try parse("[terminal]\nfont_size = ''").options.first?.value, "")
   }
 
+  func testRepeatableEntriesRoundTripWithoutResolvingPaths() throws {
+    let values = ["shaders/crt.glsl", "~/a/b.glsl", "quote \" and \\ slash"]
+    let literal = "[" + values.map(ConfigurationDocument.quote).joined(separator: ", ") + "]"
+    XCTAssertFalse(literal.contains("\\/"))
+    XCTAssertEqual(try AppConfiguration.entries(fromTOML: literal), values)
+    XCTAssertEqual(try AppConfiguration.entries(fromTOML: "[]"), [])
+    XCTAssertEqual(try AppConfiguration.entries(fromTOML: "[\"a\", true, 2]"), ["a", "true", "2"])
+    XCTAssertEqual(try AppConfiguration.entries(fromTOML: "\"single\""), ["single"])
+    XCTAssertThrowsError(try AppConfiguration.entries(fromTOML: "[\"unterminated"))
+    XCTAssertThrowsError(try AppConfiguration.entries(fromTOML: "[\"a\\/b\"]"))
+  }
+
   func testDirectoryValues() throws {
     let home = FileManager.default.temporaryDirectory.standardizedFileURL
     for value in ["~", "home", home.path] {

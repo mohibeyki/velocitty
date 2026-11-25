@@ -24,18 +24,14 @@ enum WindowAppearance {
     let opacity = opaque ? 1 : native.backgroundOpacity
     var glass = false
     if #available(macOS 26, *) { glass = !opaque && native.backgroundBlur < 0 }
+    // The caller sets window.backgroundColor to match the native chrome material.
     window.isOpaque = opacity >= 1 && !glass
-    window.backgroundColor = glass ? .clear : native.background.withAlphaComponent(opacity)
     if #available(macOS 26, *), glass {
       let effect: NSGlassEffectView
       if let existing = window.contentView as? NSGlassEffectView { effect = existing }
       else {
         effect = NSGlassEffectView(frame: terminal.frame)
-        terminal.removeFromSuperview()
         window.contentView = effect
-        effect.contentView = terminal
-        terminal.frame = effect.bounds
-        terminal.autoresizingMask = [.width, .height]
       }
       if effect.contentView !== terminal {
         terminal.removeFromSuperview()
@@ -52,4 +48,15 @@ enum WindowAppearance {
     }
     setBlur(!opaque && opacity < 1 && !glass ? native.backgroundBlur : 0, on: window)
   }
+}
+
+extension NSColor {
+  /// An opaque sRGB color from a packed 0xRRGGBB value.
+  convenience init(rgb hex: UInt32) {
+    self.init(srgbRed: CGFloat((hex >> 16) & 255) / 255, green: CGFloat((hex >> 8) & 255) / 255, blue: CGFloat(hex & 255) / 255, alpha: 1)
+  }
+}
+
+extension NSAppearance {
+  var isDark: Bool { bestMatch(from: [.darkAqua, .aqua]) == .darkAqua }
 }

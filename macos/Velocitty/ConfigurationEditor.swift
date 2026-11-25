@@ -259,7 +259,7 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
     let isColor = normalized.hasPrefix("#") && normalized.count == 7 && UInt32(normalized.dropFirst(), radix: 16) != nil
     color.isHidden = !isColor
     if isColor, let hex = UInt32(normalized.dropFirst(), radix: 16) {
-      color.color = NSColor(srgbRed: CGFloat(hex >> 16 & 255) / 255, green: CGFloat(hex >> 8 & 255) / 255, blue: CGFloat(hex & 255) / 255, alpha: 1)
+      color.color = NSColor(rgb: hex)
     }
     let repeatable = setting.table == "terminal" && TerminalSettings.repeatable.contains(setting.key.replacingOccurrences(of: "_", with: "-"))
     addEntry.isHidden = !repeatable; removeEntry.isHidden = !repeatable
@@ -291,16 +291,13 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
     value.stringValue = String(format: "\"#%02X%02X%02X\"", Int((rgb.redComponent * 255).rounded()), Int((rgb.greenComponent * 255).rounded()), Int((rgb.blueComponent * 255).rounded()))
     applyValue()
   }
-  private func entries() -> [String] {
+  private func entries() throws -> [String] {
     guard filtered.indices.contains(table.selectedRow) else { return [] }
-    let setting = filtered[table.selectedRow]
-    if value.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) == "[]" { return [] }
-    return (try? AppConfiguration.parse(Data("[terminal]\n\(setting.key)=\(value.stringValue)".utf8)).options.map(\.value)) ?? []
+    return try AppConfiguration.entries(fromTOML: value.stringValue)
   }
   private func setEntries(_ values: [String]) {
-    if let data = try? JSONEncoder().encode(values), let text = String(data: data, encoding: .utf8) {
-      value.stringValue = text; choices.isHidden = true; value.isHidden = false; applyValue()
-    }
+    value.stringValue = "[" + values.map(ConfigurationDocument.quote).joined(separator: ", ") + "]"
+    choices.isHidden = true; value.isHidden = false; applyValue()
   }
   @objc private func appendEntry() {
     guard let window, filtered.indices.contains(table.selectedRow) else { return }
@@ -309,12 +306,16 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
     field.placeholderString = filtered[table.selectedRow].key == "keybind" ? "super+shift+t=new_tab" : "Entry value"
     alert.accessoryView = field; alert.addButton(withTitle: "Add"); alert.addButton(withTitle: "Cancel")
     alert.beginSheetModal(for: window) { [weak self] response in
-      guard response == .alertFirstButtonReturn, let self else { return }; self.setEntries(self.entries() + [field.stringValue])
+      guard response == .alertFirstButtonReturn, let self else { return }
+      do { self.setEntries(try self.entries() + [field.stringValue]) } catch { self.showError(error) }
     }
     window.attachedSheet?.makeFirstResponder(field)
   }
   @objc private func deleteEntry() {
-    guard let window else { return }; let values = entries(); guard !values.isEmpty else { return }
+    guard let window else { return }
+    let values: [String]
+    do { values = try entries() } catch { showError(error); return }
+    guard !values.isEmpty else { return }
     let alert = NSAlert(); alert.messageText = "Remove Entry"
     let picker = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 360, height: 26)); picker.addItems(withTitles: values)
     alert.accessoryView = picker; alert.addButton(withTitle: "Remove"); alert.addButton(withTitle: "Cancel")
@@ -330,11 +331,7 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
     alert.informativeText = messages.joined(separator: "\n"); alert.addButton(withTitle: "OK"); alert.beginSheetModal(for: window)
   }
 
-  @objc private func chooseValue() {
-    // JSON string escaping is also valid TOML basic-string escaping.
-    let encoder = JSONEncoder(); encoder.outputFormatting = [.withoutEscapingSlashes]
-    if let data = try? encoder.encode(choices.stringValue), let quoted = String(data: data, encoding: .utf8) { value.stringValue = quoted }
-  }
+  @objc private func chooseValue() { value.stringValue = ConfigurationDocument.quote(choices.stringValue) }
   @objc private func resetValue() {
     guard filtered.indices.contains(table.selectedRow) else { return }
     let setting = filtered[table.selectedRow]
@@ -652,7 +649,7 @@ final class ThemePickerWindow: NSWindowController, NSTableViewDataSource, NSTabl
       }
       mode.selectItem(at: 1)
     } else { single = current }
-    variant.selectedSegment = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? 1 : 0
+    variant.selectedSegment = NSApp.effectiveAppearance.isDark ? 1 : 0
     let customDirectory = themeDocument.url.deletingLastPathComponent().appendingPathComponent("themes")
     let custom = (try? FileManager.default.contentsOfDirectory(at: customDirectory, includingPropertiesForKeys: nil))?
       .filter { $0.pathExtension == "itermcolors" }.map { $0.deletingPathExtension().lastPathComponent } ?? []
@@ -735,7 +732,7 @@ final class ThemePickerWindow: NSWindowController, NSTableViewDataSource, NSTabl
       guard diagnostics.isEmpty else { throw ConfigurationError(diagnostics.joined(separator: "\n")) }
       func color(_ hex: String?, fallback: NSColor) -> NSColor {
         guard let hex, let rgb = UInt32(hex.trimmingCharacters(in: CharacterSet(charactersIn: "#")), radix: 16) else { return fallback }
-        return NSColor(srgbRed: CGFloat(rgb >> 16 & 255) / 255, green: CGFloat(rgb >> 8 & 255) / 255, blue: CGFloat(rgb & 255) / 255, alpha: 1)
+        return NSColor(rgb: rgb)
       }
       let foreground = color(options.last { $0.key == "foreground" }?.value, fallback: .white)
       preview.backgroundColor = color(options.last { $0.key == "background" }?.value, fallback: .black)

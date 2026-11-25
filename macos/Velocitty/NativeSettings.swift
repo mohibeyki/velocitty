@@ -2,6 +2,22 @@
 import AppKit
 import VeloKit
 
+// Packed flags in the engine's bit order.
+struct BellFeatures: OptionSet {
+  let rawValue: UInt32
+  static let system = Self(rawValue: 1 << 0)
+  static let audio = Self(rawValue: 1 << 1)
+  static let attention = Self(rawValue: 1 << 2)
+  static let title = Self(rawValue: 1 << 3)
+  static let border = Self(rawValue: 1 << 4)
+}
+
+struct CommandFinishActions: OptionSet {
+  let rawValue: UInt32
+  static let bell = Self(rawValue: 1 << 0)
+  static let notify = Self(rawValue: 1 << 1)
+}
+
 // The engine owns parsing and defaults. Callers can only request named, typed values.
 struct NativeSettings {
   let config: ghostty_config_t?
@@ -36,7 +52,6 @@ struct NativeSettings {
   var titleFontFamily: String { string("window-title-font-family", "") }
   var windowSubtitle: String { string("window-subtitle", "") }
   var titlebarProxyIcon: String { string("macos-titlebar-proxy-icon", "") }
-  var windowTheme: String { string("window-theme", "") }
   var dragHandle: String { string("drag-handle", "auto") }
   var nonNativeFullscreen: String { string("macos-non-native-fullscreen", "false") }
   var resizeOverlay: String { string("resize-overlay", "after-first") }
@@ -49,16 +64,14 @@ struct NativeSettings {
   var backgroundBlur: Int16 { int16("background-blur", 0) }
   var backgroundOpacity: Double { double("background-opacity", 1.0) }
   var bellAudioVolume: Double { double("bell-audio-volume", 0.5) }
-  var bellFeatures: UInt32 { uint32("bell-features", 12) }
-  var commandFinishActions: UInt32 { uint32("notify-on-command-finish-action", 1) }
+  var bellFeatures: BellFeatures { BellFeatures(rawValue: uint32("bell-features", BellFeatures([.attention, .title]).rawValue)) }
+  var commandFinishActions: CommandFinishActions { CommandFinishActions(rawValue: uint32("notify-on-command-finish-action", CommandFinishActions.bell.rawValue)) }
   var dockDropBehavior: String { string("macos-dock-drop-behavior", "new-tab") }
   var undoTimeout: Double { seconds("undo-timeout", 5) }
   var quitDelay: Double { seconds("quit-after-last-window-closed-delay", 0) }
   var resizeOverlayDuration: Double { seconds("resize-overlay-duration", 0.75) }
   var commandFinishDelay: Double { seconds("notify-on-command-finish-after", 5) }
   var background: NSColor { color("background") ?? .windowBackgroundColor }
-  var titlebarForeground: NSColor? { color("window-titlebar-foreground") }
-  var titlebarBackground: NSColor? { color("window-titlebar-background") }
 
   var bellAudioPath: String {
     guard let config else { return "" }

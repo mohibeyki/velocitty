@@ -83,7 +83,7 @@ do {
   precondition(native.windowPositionX == -24)
   precondition(native.backgroundBlur == -1)
   precondition(native.backgroundOpacity == 0.625)
-  precondition(native.bellFeatures == 14) // audio plus default attention/title
+  precondition(native.bellFeatures == [.audio, .attention, .title]) // audio plus default attention/title
   precondition(native.titleFontFamily == "Menlo")
   precondition(native.resizeOverlayDuration == 1.25)
   let color = native.background.usingColorSpace(.sRGB)!
@@ -745,7 +745,7 @@ if let executable = HerdrClient.discover() {
   defer { try? FileManager.default.removeItem(at: directory) }
   let marker = directory.appendingPathComponent("streamed")
   drain(); drain()
-  let command = "printf VELOCITTY_HERDR_STREAM; printf ok > " + HerdrClient.quote(marker.path)
+  let command = "printf VELOCITTY_HERDR_STREAM; printf ok > " + ShellInput.quote(marker.path)
   command.withCString { velokit_surface_text(a.surface!, $0, UInt(command.utf8.count)) }
   var enter = ghostty_input_key_s(); enter.action = GHOSTTY_ACTION_PRESS; enter.keycode = 36
   _ = velokit_surface_key(a.surface!, enter)
@@ -1443,7 +1443,7 @@ func runWorkspacePersistenceCheck() throws {
     enter.action = GHOSTTY_ACTION_PRESS; enter.keycode = 36
     _ = velokit_surface_key(pane.surface!, enter)
   }
-  let integrationCommand = "(( $+_ghostty_state )) && printf ok > " + HerdrClient.quote(integrationMarker.path)
+  let integrationCommand = "(( $+_ghostty_state )) && printf ok > " + ShellInput.quote(integrationMarker.path)
   enterCommand(integrationCommand, in: window.session!)
   let shellDeadline = Date(timeIntervalSinceNow: 5)
   while !FileManager.default.fileExists(atPath: integrationMarker.path) && Date() < shellDeadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.02)) }
@@ -1461,8 +1461,17 @@ func runWorkspacePersistenceCheck() throws {
   while recoveredPane.recovering && Date() < recoveryDeadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.02)) }
   precondition(!recoveredPane.recovering && window.session === recoveredPane)
   precondition(recoveredPane.herdrTerminal!.pane.terminal_id == terminalID)
+  // The reconnect reuses the view, whose clipboard was cancelled with the old surface.
+  var clipboardReply: Bool?
+  recoveredPane.view!.clipboard.enqueue(title: "After reconnect", message: "Test") { allow, _ in clipboardReply = allow }
+  precondition(clipboardReply == nil, "A reconnected terminal must not auto-deny clipboard requests")
+  let clipboardDeadline = Date(timeIntervalSinceNow: 2)
+  while clipboardReply == nil && recoveredPane.view!.clipboard.confirmation == nil && Date() < clipboardDeadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.02)) }
+  recoveredPane.view!.clipboard.confirmation?.buttons[1].performClick(nil)
+  while clipboardReply == nil && Date() < clipboardDeadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.02)) }
+  precondition(clipboardReply == false && recoveredPane.view!.clipboard.confirmation == nil)
   let recoveryMarker = directory.appendingPathComponent("recovered")
-  let recoveredCommand = "printf ok > " + HerdrClient.quote(recoveryMarker.path)
+  let recoveredCommand = "printf ok > " + ShellInput.quote(recoveryMarker.path)
   enterCommand(recoveredCommand, in: recoveredPane)
   let inputDeadline = Date(timeIntervalSinceNow: 5)
   while !FileManager.default.fileExists(atPath: recoveryMarker.path) && Date() < inputDeadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.02)) }
@@ -1533,7 +1542,7 @@ func runWorkspacePersistenceCheck() throws {
   let oldTerminalIDs = Set(restored.allPanes.compactMap { $0.herdrTerminal?.pane.terminal_id })
   let added = external.panes.first { !oldTerminalIDs.contains($0.terminal_id) }!
   let beforeRollback = restored.allPanes.count
-  let invalid = HerdrClient.Snapshot(layouts: external.layouts, workspaces: external.workspaces, tabs: external.tabs, panes: [added, added])
+  let invalid = HerdrClient.Snapshot(workspaces: external.workspaces, tabs: external.tabs, panes: [added, added])
   do { try restored.addHerdrTerminals(invalid, excluding: []); preconditionFailure("Expected duplicate rejection") }
   catch { precondition(restored.allPanes.count == beforeRollback, "A failed attachment must roll back prepared views") }
   let eventDeadline = Date(timeIntervalSinceNow: 3)
@@ -1629,7 +1638,7 @@ func runHerdrControlCheck() throws {
   do { _ = try client.run(["read"]); preconditionFailure("Expected structured error") }
   catch let error as HerdrClient.RequestError { precondition(error.code == "server_not_running") }
   let descendant = root.appendingPathComponent("descendant")
-  try script("(sleep 0.3; touch " + HerdrClient.quote(descendant.path) + ") &\nwait")
+  try script("(sleep 0.3; touch " + ShellInput.quote(descendant.path) + ") &\nwait")
   let started = ProcessInfo.processInfo.systemUptime
   do { _ = try client.run(["read"], timeout: 0.1); preconditionFailure("Expected timeout") }
   catch let error as HerdrClient.RequestError { precondition(error.code == "timeout") }
@@ -1662,7 +1671,7 @@ func runRemoteCheck() throws {
   defer { _ = try? server.run(["server", "stop"]); _ = try? server.run(["session", "delete", server.sessionName]) }
   _ = try server.connect(directory: root)
   let raw = try server.create(workspace: nil, name: "SSH test", directory: root.path, environment: [:])
-  let machine = HerdrClient.Machine(id: UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(), label: "Laptop test", target: host, session: server.sessionName, enabled: true)
+  let machine = HerdrClient.Machine(id: UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(), label: "Laptop test", target: host, session: server.sessionName)
   let remote = HerdrClient(executable: executable, machine: machine,
     sshOptions: ["-o", "UserKnownHostsFile=" + knownHosts, "-o", "StrictHostKeyChecking=yes"], remoteExecutable: executablePath,
     remoteEnvironment: ["HERDR_CONFIG_PATH": config.path])
@@ -1704,7 +1713,7 @@ func runRemoteCheck() throws {
   precondition(window.presentedTabs.count == 2 && window.session === remotePane)
   pumpEvents(until: Date(timeIntervalSinceNow: 0.5))
   let marker = root.appendingPathComponent("ssh-input")
-  let command = "printf remote-ok > " + HerdrClient.quote(marker.path)
+  let command = "printf remote-ok > " + ShellInput.quote(marker.path)
   command.withCString { velokit_surface_text(remotePane.surface!, $0, UInt(command.utf8.count)) }
   var enter = ghostty_input_key_s()
   enter.action = GHOSTTY_ACTION_PRESS

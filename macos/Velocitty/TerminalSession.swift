@@ -39,9 +39,7 @@ final class TerminalSession {
 
   init(runtime: TerminalRuntime) {
     self.runtime = runtime
-    hasCustomCommand = runtime.settings.options.contains {
-      ($0.key == "command" || $0.key == "initial-command") && !$0.value.isEmpty
-    }
+    hasCustomCommand = runtime.settings.hasCustomCommand
   }
 
   func createView() -> TerminalView? {
@@ -76,6 +74,8 @@ final class TerminalSession {
       view = nil
       return nil
     }
+    // A reconnect reuses this view; its clipboard was cancelled with the previous surface.
+    terminalView.clipboard.reopen()
     terminalView.updateFocus()
     return terminalView
   }
@@ -83,12 +83,20 @@ final class TerminalSession {
   func suspendConnection(_ message: String) {
     connectionSuspended = true
     recoveryTimer?.invalidate(); recoveryGeneration = UUID(); recovering = false
-    view?.inputContext?.discardMarkedText(); view?.clipboard.cancel(); links.cancel()
-    let old = surface; surface = nil
-    if let old { velokit_surface_free(old) }
+    releaseSurface()
     if view == nil { _ = createView() }
     if chrome == nil, let view { chrome = TerminalChrome(view) }
     chrome?.showConnectionStatus(message, retry: herdrTerminal?.client.isEnabled == true)
+  }
+
+  /// Cancel requests bound to the native surface while it is still alive, then free it.
+  private func releaseSurface() {
+    view?.inputContext?.discardMarkedText()
+    view?.clipboard.cancel()
+    links.cancel()
+    let old = surface
+    surface = nil
+    if let old { velokit_surface_free(old) }
   }
 
   private var recoveryTimer: Timer?
@@ -146,14 +154,9 @@ final class TerminalSession {
     recoveryTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
       guard let self, !self.closed, self.recoveryGeneration == generation else { return }
       if canAttach {
-        self.view?.inputContext?.discardMarkedText()
-        self.view?.clipboard.cancel()
-        self.links.cancel()
         let savedConfig = self.config.flatMap { velokit_config_clone($0) }
         defer { if let savedConfig { velokit_config_free(savedConfig) } }
-        let old = self.surface
-        self.surface = nil
-        if let old { velokit_surface_free(old) }
+        self.releaseSurface()
         if self.createView() != nil {
           if let savedConfig { _ = self.applyPreparedConfiguration(savedConfig) }
           self.view?.updateSurfaceSize()
@@ -233,16 +236,11 @@ final class TerminalSession {
     recoveryGeneration = UUID()
     chrome?.progress.clear()
     chrome?.fadeTimer?.invalidate()
-    view?.inputContext?.discardMarkedText()
     view?.unmarkText()
     view?.stopAccessibility()
-    view?.clipboard.cancel()
-    links.cancel()
-    let previous = surface
-    surface = nil
     closed = true
     windowController = nil
-    if let previous { velokit_surface_free(previous) }
+    releaseSurface()
     chrome = nil
     view = nil
     if let appliedConfig { velokit_config_free(appliedConfig) }

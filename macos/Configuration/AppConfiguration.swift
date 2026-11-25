@@ -104,6 +104,11 @@ public struct AppConfiguration: Equatable, Sendable {
       source: url, home: home)
   }
 
+  /// Whether `command` or `initial-command` is set to a non-empty value.
+  public var hasCustomCommand: Bool {
+    options.contains { ($0.key == "command" || $0.key == "initial-command") && !$0.value.isEmpty }
+  }
+
   static func assetURL(_ path: String, relativeTo source: URL, home: URL) -> URL {
     if path.hasPrefix("~/") { return home.appendingPathComponent(String(path.dropFirst(2))) }
     if path.hasPrefix("/") { return URL(fileURLWithPath: path) }
@@ -238,6 +243,24 @@ public struct AppConfiguration: Equatable, Sendable {
     } catch {
       let detail = (error as? ConfigurationError)?.message ?? String(describing: error)
       throw ConfigurationError("\(source.path): \(detail)")
+    }
+  }
+
+  /// Decode one TOML value literal as the entries of a repeatable setting.
+  /// Values are returned as written; no asset paths are resolved.
+  public static func entries(fromTOML literal: String) throws -> [String] {
+    struct Fragment: Decodable { let value: Value }
+    let fragment: Fragment
+    do { fragment = try TOMLDecoder().decode(Fragment.self, from: Data("value = \(literal)\n".utf8)) }
+    catch { throw ConfigurationError("Could not read the current entries: \(error.localizedDescription)") }
+    switch fragment.value {
+    case .invalid(let reason): throw ConfigurationError(reason)
+    case .scalar(let text): return [text]
+    case .array(let array):
+      return try array.map { element in
+        guard let text = element.text else { throw ConfigurationError("Invalid array element; expected a string, boolean, or finite number.") }
+        return text
+      }
     }
   }
 

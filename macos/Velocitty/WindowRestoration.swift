@@ -13,9 +13,7 @@ final class TerminalWindowRestoration: NSObject, NSWindowRestoration {
     }
     do {
       if owner.runtime == nil { owner.runtime = try TerminalRuntime(settings: AppConfiguration.load()) }
-      guard let runtime = owner.runtime, (owner.herdr == nil || runtime.settings.options.contains {
-        ($0.key == "command" || $0.key == "initial-command") && !$0.value.isEmpty
-      }), runtime.settings.options.last(where: {
+      guard let runtime = owner.runtime, owner.herdr == nil || runtime.settings.hasCustomCommand, runtime.settings.options.last(where: {
         $0.key == "window-save-state"
       })?.value != "never", state.decodeInteger(forKey: "terminalVersion") == 1 else {
         completionHandler(nil, nil)

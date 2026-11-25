@@ -9,7 +9,7 @@ public struct WorkspaceState: Codable, Equatable, Sendable {
     public var workspaceID: String
     public var cwd: String?
     public var tabID: String? = nil
-    public var connectionID: String { terminalID.range(of: "::").map { String(terminalID[..<$0.lowerBound]) } ?? "local" }
+    public var connectionID: String { WorkspaceState.connectionID(of: terminalID) }
     public init(id: String, terminalID: String, workspaceID: String, cwd: String?) {
       self.id = id; self.terminalID = terminalID; self.workspaceID = workspaceID; self.cwd = cwd
     }
@@ -21,7 +21,7 @@ public struct WorkspaceState: Codable, Equatable, Sendable {
     public var panes: [Pane]?
     public var title: String?
     public var layout: PaneLayout? = nil
-    public var connectionID: String { id.range(of: "::").map { String(id[..<$0.lowerBound]) } ?? "local" }
+    public var connectionID: String { WorkspaceState.connectionID(of: id) }
     public init(id: String, selectedPaneID: String?, zoomed: Bool? = nil) {
       self.id = id; self.selectedPaneID = selectedPaneID; self.zoomed = zoomed
     }
@@ -64,57 +64,15 @@ public struct WorkspaceState: Codable, Equatable, Sendable {
   public var pendingTerminalClosures: [String]?
   public var windows: [Window]?
   public var activeWindowID: String?
-  public var version = 4
+  public static let currentVersion = 4
+  public var version = currentVersion
   public var namespaces: [Namespace] = []
   public var selectedNamespaceID: String?
   public var sidebar: Sidebar?
   public init() {}
 
-  /// The successful server snapshot is authoritative for existence. Saved order
-  /// and selection apply only to surviving objects; new objects append in server order.
-  public func reconciled(with live: [Namespace], panesByTab: [String: Set<String>]) -> Self {
-    var result = self
-    var remaining = live
-    result.namespaces = []
-    for saved in namespaces {
-      guard let index = remaining.firstIndex(where: { $0.id == saved.id }) else { continue }
-      var current = remaining.remove(at: index)
-      var tabs = current.tabs
-      current.tabs = []
-      for savedTab in saved.tabs {
-        guard let index = tabs.firstIndex(where: { $0.id == savedTab.id }) else { continue }
-        var tab = tabs.remove(at: index)
-        tab.zoomed = savedTab.zoomed
-        if let selected = savedTab.selectedPaneID, panesByTab[tab.id]?.contains(selected) == true { tab.selectedPaneID = selected }
-        current.tabs.append(tab)
-      }
-      current.tabs += tabs
-      if let selected = saved.selectedTabID, current.tabs.contains(where: { $0.id == selected }) {
-        current.selectedTabID = selected
-      }
-      result.namespaces.append(current)
-    }
-    result.namespaces += remaining
-    if !result.namespaces.contains(where: { $0.id == selectedNamespaceID }) {
-      result.selectedNamespaceID = result.namespaces.first?.id
-    }
-    if var windows = result.windows {
-      let liveIDs = Set(result.namespaces.map(\.id))
-      var assigned: Set<String> = []
-      for index in windows.indices {
-        windows[index].namespaceIDs = windows[index].namespaceIDs.filter { liveIDs.contains($0) && assigned.insert($0).inserted }
-        if !windows[index].namespaceIDs.contains(windows[index].selectedNamespaceID ?? "") {
-          windows[index].selectedNamespaceID = windows[index].namespaceIDs.first
-        }
-      }
-      result.windows = windows.filter { !$0.namespaceIDs.isEmpty }
-      if result.windows?.contains(where: { $0.id == result.activeWindowID }) != true {
-        result.activeWindowID = result.windows?.first?.id
-      }
-    }
-    result.version = 2
-    return result
-  }
+  /// The endpoint that owns a qualified ID ("<endpoint>::<raw>"); unqualified IDs are local.
+  static func connectionID(of id: String) -> String { id.range(of: "::").map { String(id[..<$0.lowerBound]) } ?? "local" }
 
   /// Reconcile one successful endpoint snapshot without changing local space membership.
   /// Unavailable endpoints are deliberately absent from this operation.
@@ -184,7 +142,7 @@ public struct WorkspaceState: Codable, Equatable, Sendable {
       }
       result.windows = windows.filter { !$0.namespaceIDs.isEmpty }
     }
-    result.version = 4
+    result.version = Self.currentVersion
     return result
   }
 
@@ -216,17 +174,13 @@ public struct WorkspaceStateStore {
   public func load() throws -> WorkspaceState { try loadWithRevision().state }
 
   public func loadWithRevision() throws -> (state: WorkspaceState, revision: Data?) {
-    let data: Data?
-    do { data = try Data(contentsOf: url) }
-    catch let error as CocoaError where error.code == .fileReadNoSuchFile { data = nil }
-    guard let data else { return (WorkspaceState(), nil) }
+    guard let data = try readIfPresent() else { return (WorkspaceState(), nil) }
     // A newer schema may not decode at all, so check the version before decoding.
-    if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-      let version = (object["version"] as? NSNumber)?.intValue, version > 4 {
+    if let version = Self.storedVersion(in: data), version > WorkspaceState.currentVersion {
       throw WorkspaceStateError.unsupportedFutureVersion(version)
     }
     let state = try JSONDecoder().decode(WorkspaceState.self, from: data)
-    guard (1...4).contains(state.version) else { throw ConfigurationError("Unsupported workspace state version: \(state.version)") }
+    guard (1...WorkspaceState.currentVersion).contains(state.version) else { throw ConfigurationError("Unsupported workspace state version: \(state.version)") }
     // Reject malformed state rather than overwriting it during this run.
     let namespaces = state.namespaces.map(\.id)
     let tabs = state.namespaces.flatMap(\.tabs).map(\.id)
@@ -266,29 +220,39 @@ public struct WorkspaceStateStore {
   @discardableResult
   public func save(_ state: WorkspaceState, expectedRevision: Data?) throws -> Data {
     try withExclusiveLock {
-      let current = try? Data(contentsOf: url)
+      let current = try readIfPresent()
       guard current == expectedRevision else { throw WorkspaceStateError.conflictingUpdate }
       return try saveLocked(state)
     }
   }
 
   private func saveLocked(_ state: WorkspaceState) throws -> Data {
-    let previous = try? Data(contentsOf: url)
-    if let previous,
-      let object = try? JSONSerialization.jsonObject(with: previous) as? [String: Any],
-      let version = object["version"] as? Int, version > 4 {
+    let previous = try readIfPresent()
+    if let previous, let version = Self.storedVersion(in: previous), version > WorkspaceState.currentVersion {
       throw WorkspaceStateError.unsupportedFutureVersion(version)
     }
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     let data = try encoder.encode(state)
     if let previous,
-      let old = try? JSONDecoder().decode(WorkspaceState.self, from: previous), old.version < 4 {
+      let old = try? JSONDecoder().decode(WorkspaceState.self, from: previous), old.version < WorkspaceState.currentVersion {
       let backup = url.appendingPathExtension("v\(old.version).backup")
       if !FileManager.default.fileExists(atPath: backup.path) { try previous.write(to: backup, options: .withoutOverwriting) }
     }
     try data.write(to: url, options: .atomic)
     return data
+  }
+
+  /// A missing file is "no state"; any other read failure must not be mistaken for one.
+  private func readIfPresent() throws -> Data? {
+    do { return try Data(contentsOf: url) }
+    catch let error as CocoaError where error.code == .fileReadNoSuchFile { return nil }
+  }
+
+  /// The raw schema version, read without decoding the rest of a possibly newer schema.
+  private static func storedVersion(in data: Data) -> Int? {
+    guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+    return (object["version"] as? NSNumber)?.intValue
   }
 
   private func withExclusiveLock<T>(_ body: () throws -> T) throws -> T {

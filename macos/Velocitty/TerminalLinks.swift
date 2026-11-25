@@ -84,22 +84,7 @@ final class TerminalLinks {
       alert.informativeText = "This link will open a file or another application. Review its destination before opening it."
       alert.addButton(withTitle: "Cancel")
       alert.addButton(withTitle: "Open")
-      let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 440, height: 110))
-      scroll.hasVerticalScroller = true
-      scroll.borderType = .bezelBorder
-      let destination = NSTextView(frame: scroll.bounds)
-      destination.isEditable = false
-      destination.isSelectable = true
-      destination.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-      destination.string = url.absoluteString
-      destination.textContainerInset = NSSize(width: 6, height: 6)
-      destination.isVerticallyResizable = true
-      destination.maxSize = NSSize(width: 440, height: CGFloat.greatestFiniteMagnitude)
-      destination.autoresizingMask = [.width]
-      destination.textContainer?.widthTracksTextView = true
-      destination.setAccessibilityLabel("Link destination")
-      scroll.documentView = destination
-      alert.accessoryView = scroll
+      alert.accessoryView = NSScrollView.readOnlyText(url.absoluteString, size: NSSize(width: 440, height: 110), accessibilityLabel: "Link destination")
       confirmation = alert
       alert.beginSheetModal(for: window) { [weak self, weak view, weak alert] response in
         guard let self, let alert, self.confirmation === alert else { return }
@@ -125,5 +110,27 @@ final class TerminalLinks {
     guard let alert = confirmation else { return }
     confirmation = nil
     alert.window.sheetParent?.endSheet(alert.window, returnCode: .alertFirstButtonReturn)
+  }
+}
+
+extension NSScrollView {
+  /// A bordered, vertically scrolling, selectable monospaced text block for alert accessories.
+  static func readOnlyText(_ string: String, size: NSSize, accessibilityLabel: String? = nil) -> NSScrollView {
+    let scroll = NSScrollView(frame: NSRect(origin: .zero, size: size))
+    scroll.hasVerticalScroller = true
+    scroll.borderType = .bezelBorder
+    let text = NSTextView(frame: scroll.contentView.bounds)
+    text.isEditable = false
+    text.isSelectable = true
+    text.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+    text.string = string
+    text.textContainerInset = NSSize(width: 6, height: 6)
+    text.isVerticallyResizable = true
+    text.maxSize = NSSize(width: size.width, height: CGFloat.greatestFiniteMagnitude)
+    text.autoresizingMask = [.width]
+    text.textContainer?.widthTracksTextView = true
+    if let accessibilityLabel { text.setAccessibilityLabel(accessibilityLabel) }
+    scroll.documentView = text
+    return scroll
   }
 }

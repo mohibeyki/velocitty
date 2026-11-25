@@ -6,12 +6,11 @@ import VelocittyConfiguration
 // Control requests use the CLI; interactive I/O uses herdr's direct attach client.
 // Control work runs off the main thread and is serialized per endpoint.
 final class HerdrClient {
-  struct Machine: Codable {
+  struct Machine {
     let id: String
     let label: String
     let target: String
     let session: String
-    let enabled: Bool
   }
   var endpointID: String { identity ?? machine.map { "ssh:" + $0.id } ?? (sessionName == "velocitty" ? "local" : "local:" + sessionName) }
   private let identity: String?
@@ -23,7 +22,12 @@ final class HerdrClient {
   var isEnabled: Bool { availabilityLock.lock(); defer { availabilityLock.unlock() }; return enabled }
   func updateLabel(_ value: String) { label = value }
   var endpointLabel: String { label ?? machine?.label ?? (sessionName == "velocitty" ? "Local" : sessionName) }
-  func owns(_ id: String) -> Bool { endpointID == "local" ? !id.contains("::") : id.hasPrefix(endpointID + "::") }
+  func owns(_ id: String) -> Bool { Self.owns(id, endpoint: endpointID) }
+  /// Local IDs are unqualified; every other endpoint prefixes its IDs with "<endpoint>::". A nil endpoint is local.
+  static func owns(_ id: String, endpoint: String?) -> Bool {
+    guard let endpoint, endpoint != "local" else { return !id.contains("::") }
+    return id.hasPrefix(endpoint + "::")
+  }
   func qualify(_ id: String) -> String { endpointID == "local" || id.isEmpty ? id : endpointID + "::" + id }
   private func raw(_ id: String) -> String { let prefix = endpointID + "::"; return id.hasPrefix(prefix) ? String(id.dropFirst(prefix.count)) : id }
   private func mapIDs(_ value: Any, incoming: Bool, key: String = "") -> Any {
@@ -37,7 +41,6 @@ final class HerdrClient {
     let workspace_id: String
     let label: String
     let active_tab_id: String
-    let tokens: [String: String]?
   }
   struct Tab: Decodable {
     let tab_id: String
@@ -59,24 +62,7 @@ final class HerdrClient {
     var display_agent: String? = nil
     var agent_status: String? = nil
   }
-  struct Rect: Decodable, Equatable {
-    let x: Int
-    let y: Int
-    let width: Int
-    let height: Int
-  }
-  struct LayoutPane: Decodable, Equatable {
-    let pane_id: String
-    let rect: Rect
-  }
-  struct Layout: Decodable, Equatable {
-    let tab_id: String
-    let area: Rect
-    let focused_pane_id: String
-    let panes: [LayoutPane]
-  }
   struct Snapshot: Decodable {
-    let layouts: [Layout]
     let workspaces: [Workspace]
     let tabs: [Tab]
     let panes: [Pane]
@@ -84,18 +70,14 @@ final class HerdrClient {
     func excluding(terminals: Set<String>) -> Snapshot {
       let panes = panes.filter { !terminals.contains($0.terminal_id) }
       let tabIDs = Set(panes.map(\.tab_id)), namespaceIDs = Set(panes.map(\.workspace_id))
-      return Snapshot(layouts: layouts.filter { tabIDs.contains($0.tab_id) }, workspaces: workspaces.filter { namespaceIDs.contains($0.workspace_id) }, tabs: tabs.filter { tabIDs.contains($0.tab_id) }, panes: panes, endpointID: endpointID)
+      return Snapshot(workspaces: workspaces.filter { namespaceIDs.contains($0.workspace_id) }, tabs: tabs.filter { tabIDs.contains($0.tab_id) }, panes: panes, endpointID: endpointID)
     }
     func filtered(namespaceIDs: Set<String>) -> Snapshot {
-      let tabs = tabs.filter { namespaceIDs.contains($0.workspace_id) }
-      let tabIDs = Set(tabs.map(\.tab_id))
-      return Snapshot(layouts: layouts.filter { tabIDs.contains($0.tab_id) },
-        workspaces: workspaces.filter { namespaceIDs.contains($0.workspace_id) }, tabs: tabs,
+      Snapshot(workspaces: workspaces.filter { namespaceIDs.contains($0.workspace_id) }, tabs: tabs.filter { namespaceIDs.contains($0.workspace_id) },
         panes: panes.filter { namespaceIDs.contains($0.workspace_id) }, endpointID: endpointID)
     }
   }
   final class LayoutNode: Decodable {
-    let type: String
     let direction: String?
     let ratio: Double?
     let pane_id: String?
@@ -109,7 +91,7 @@ final class HerdrClient {
     var command: String {
       var environment = ["/usr/bin/env", "-u", "HERDR_SESSION", "-u", "HERDR_SOCKET_PATH"]
       if let socket = client.forwardedSocket { environment.append("HERDR_SOCKET_PATH=" + socket) }
-      return (environment + [client.executable.path] + client.connectionArguments + ["terminal", "attach", client.raw(pane.terminal_id)]).map(HerdrClient.quote).joined(separator: " ")
+      return (environment + [client.executable.path] + client.connectionArguments + ["terminal", "attach", client.raw(pane.terminal_id)]).map(ShellInput.quote).joined(separator: " ")
     }
   }
 
@@ -131,7 +113,6 @@ final class HerdrClient {
   private var connectionArguments: [String] { machine == nil ? ["--session", sessionName] : [] }
   private let queue = DispatchQueue(label: "velocitty.herdr", qos: .userInitiated)
   private let metadataQueue = DispatchQueue(label: "velocitty.herdr.metadata", qos: .utility)
-  private var server: Process?
   private var eventStream: HerdrEventStream?
   private var eventStarting = false
   private var eventPaneIDs: Set<String> = []
@@ -204,10 +185,6 @@ final class HerdrClient {
       URL(fileURLWithPath: $0).appendingPathComponent("herdr")
     }
     .first { FileManager.default.isExecutableFile(atPath: $0.path) }
-  }
-
-  static func quote(_ value: String) -> String {
-    "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
   }
 
   func perform<T>(
@@ -494,22 +471,20 @@ final class HerdrClient {
     child.currentDirectoryURL = directory
     child.standardOutput = FileHandle.nullDevice
     child.standardError = FileHandle.nullDevice
-    try child.run()
-    server = child  // Closing the app does not stop this server or its terminals.
+    try child.run()  // Closing the app does not stop this server or its terminals.
     let deadline = Date(timeIntervalSinceNow: 5)
     repeat {
       if let value = try? snapshot(timeout: min(0.5, max(0.05, deadline.timeIntervalSinceNow))) { return value }
       Thread.sleep(forTimeInterval: 0.1)
     } while Date() < deadline && child.isRunning
     if child.isRunning { child.terminate() }
-    server = nil
     throw ConfigurationError(
       "Could not connect to the herdr session ‘\(sessionName)’. Check herdr's server log.")
   }
 
   func gitBranch(directory: String) throws -> String? {
     guard machine != nil else { return nil }
-    let command = "git -C " + Self.quote(directory) + " symbolic-ref --quiet --short HEAD 2>/dev/null || git -C " + Self.quote(directory) + " rev-parse --short HEAD 2>/dev/null || true"
+    let command = "git -C " + ShellInput.quote(directory) + " symbolic-ref --quiet --short HEAD 2>/dev/null || git -C " + ShellInput.quote(directory) + " rev-parse --short HEAD 2>/dev/null || true"
     let value = String(decoding: try ssh(command, timeout: 3), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
     return value.isEmpty ? nil : value
   }
@@ -533,16 +508,16 @@ final class HerdrClient {
     if let remoteExecutable { executable = remoteExecutable }
     else {
       let lookup = "command -v herdr || for p in \"$HOME/.local/bin/herdr\" \"$HOME/.cargo/bin/herdr\" /opt/homebrew/bin/herdr \"$HOME/.nix-profile/bin/herdr\" \"/etc/profiles/per-user/$(id -un)/bin/herdr\"; do if test -x \"$p\"; then printf '%s' \"$p\"; break; fi; done"
-      let output = try ssh("/bin/sh -lc " + Self.quote(lookup))
+      let output = try ssh("/bin/sh -lc " + ShellInput.quote(lookup))
       executable = String(decoding: output, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
       guard !executable.isEmpty, !executable.contains("\n") else { throw ConfigurationError("herdr was not found on " + machine.label) }
     }
-    let remoteVersion = String(decoding: try ssh(Self.quote(executable) + " --version"), as: UTF8.self)
+    let remoteVersion = String(decoding: try ssh(ShellInput.quote(executable) + " --version"), as: UTF8.self)
     let versionParts = remoteVersion.split(whereSeparator: { !$0.isNumber }).compactMap { Int($0) }
     guard versionParts.count >= 3, !Array(versionParts.prefix(3)).lexicographicallyPrecedes([0, 9, 0]) else {
       throw ConfigurationError("Upgrade herdr to 0.9 or newer on " + machine.label + ". Found: " + remoteVersion.trimmingCharacters(in: .whitespacesAndNewlines))
     }
-    let command = (["/usr/bin/env"] + remoteEnvironment.sorted { $0.key < $1.key }.map { $0.key + "=" + $0.value } + [executable, "--session", machine.session, "session", "list", "--json"]).map(Self.quote).joined(separator: " ")
+    let command = (["/usr/bin/env"] + remoteEnvironment.sorted { $0.key < $1.key }.map { $0.key + "=" + $0.value } + [executable, "--session", machine.session, "session", "list", "--json"]).map(ShellInput.quote).joined(separator: " ")
     let response = try JSONSerialization.jsonObject(with: ssh(command)) as? [String: Any]
     guard let sessions = response?["sessions"] as? [[String: Any]], let socket = sessions.first(where: { $0["name"] as? String == machine.session })?["socket_path"] as? String else { throw ConfigurationError("The selected herdr session was not found on " + machine.label) }
     let directory = URL(fileURLWithPath: "/tmp").appendingPathComponent("vt-" + UUID().uuidString.replacingOccurrences(of: "-", with: ""))
