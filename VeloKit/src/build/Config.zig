@@ -12,7 +12,7 @@ const TerminalBuildOptions = @import("../terminal/build_options.zig").Options;
 const WasmTarget = @import("../os/wasm/target.zig").Target;
 
 /// Standard build configuration options.
-optimize: std.builtin.OptimizeMode,
+optimize: std.lang.Optimize,
 target: std.Build.ResolvedTarget,
 wasm_target: WasmTarget,
 
@@ -67,8 +67,8 @@ pub fn init(b: *std.Build, appVersion: []const u8) !Config {
         .renderer = .metal,
         .version = try std.SemanticVersion.parse(appVersion),
         .strip = b.option(bool, "strip", "Strip engine debug symbols") orelse switch (optimize) {
-            .Debug, .ReleaseSafe => false,
-            .ReleaseFast, .ReleaseSmall => true,
+            .debug, .safe => false,
+            .fast, .small => true,
         },
     };
 }
@@ -95,10 +95,11 @@ pub fn addOptions(self: *const Config, step: *std.Build.Step.Options) !void {
     // accommodate realistic large branch names for dev versions.
     var app_version_buf: [1024]u8 = undefined;
     step.addOption(std.SemanticVersion, "app_version", self.version);
-    step.addOption([:0]const u8, "app_version_string", try std.fmt.bufPrintZ(
+    step.addOption([:0]const u8, "app_version_string", try std.mem.printSentinel(
         &app_version_buf,
         "{f}",
         .{self.version},
+        0,
     ));
     step.addOption(
         ReleaseChannel,
@@ -116,7 +117,7 @@ pub fn addOptions(self: *const Config, step: *std.Build.Step.Options) !void {
 pub fn terminalOptions(
     self: *const Config,
     artifact: TerminalBuildOptions.Artifact,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) TerminalBuildOptions {
     return .{
         .artifact = artifact,
@@ -126,10 +127,10 @@ pub fn terminalOptions(
         .features = .{},
         .version = self.version,
         .slow_runtime_safety = switch (optimize) {
-            .Debug => true,
-            .ReleaseSafe,
-            .ReleaseSmall,
-            .ReleaseFast,
+            .debug => true,
+            .safe,
+            .small,
+            .fast,
             => false,
         },
     };

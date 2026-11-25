@@ -41,7 +41,7 @@ fn logFn(
 
     stderr: {
         // don't log debug messages to stderr unless we are a debug build
-        if (comptime builtin.mode != .Debug and level == .debug) break :stderr;
+        if (comptime builtin.mode != .debug and level == .debug) break :stderr;
 
         // skip if we are not logging to stderr
         if (!global.logging().stderr) break :stderr;
@@ -97,7 +97,7 @@ pub const std_options: std.Options = .{
     // calculate and we want to make sure they're optimized out in
     // builds.
     .log_level = switch (builtin.mode) {
-        .Debug => .debug,
+        .debug => .debug,
         else => .info,
     },
 

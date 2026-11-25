@@ -2,32 +2,36 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    const optimize = b.option(std.builtin.OptimizeMode, "optimize", "Terminal engine optimization (default: ReleaseFast)") orelse .ReleaseFast;
+    const optimize = b.option(std.lang.Optimize, "optimize", "Terminal engine optimization (default: fast)") orelse .fast;
     const Configuration = enum { Debug, Release };
     const configuration = @tagName(b.option(Configuration, "configuration", "Xcode app configuration") orelse .Debug);
-    const products = b.pathFromRoot("macos/build/Build/Products");
-    const engine_prefix = b.option([]const u8, "engine-prefix", "VeloKit output directory for direct Xcode builds") orelse
-        b.fmt("{s}/VeloKit/{s}", .{ products, configuration });
+    const products = "macos/build/Build/Products";
+    const engine_prefix = b.option([]const u8, "engine-prefix", "VeloKit output directory for direct Xcode builds");
 
-    const engine = b.addSystemCommand(&.{ b.graph.zig_exe, "build", b.fmt("-Doptimize={s}", .{@tagName(optimize)}), "--prefix", engine_prefix });
+    const engine = b.addSystemCommand(&.{ b.graph.zig_exe, "build", b.fmt("-Doptimize={s}", .{@tagName(optimize)}), "--prefix" });
+    if (engine_prefix) |prefix| engine.addArg(prefix) else engine.addDirectoryArg(b.path(b.fmt("{s}/VeloKit/{s}", .{ products, configuration })));
     engine.setCwd(b.path("VeloKit"));
     engine.has_side_effects = true;
     b.step("engine", "Build the private terminal engine").dependOn(&engine.step);
 
     const app = xcode(b, configuration, "build");
     app.step.dependOn(&engine.step);
-    const app_path = b.fmt("{s}/{s}/Velocitty.app", .{ products, configuration });
-    const installed_app = b.getInstallPath(.prefix, "Velocitty.app");
-    const mkdir = b.addSystemCommand(&.{ "/bin/mkdir", "-p", installed_app });
+    const app_path = b.path(b.fmt("{s}/{s}/Velocitty.app", .{ products, configuration }));
+    const installed_app = b.graph.path(.install_prefix, "Velocitty.app");
+    const mkdir = b.addSystemCommand(&.{ "/bin/mkdir", "-p" });
+    mkdir.addDirectoryArg(installed_app);
     mkdir.step.dependOn(&app.step);
-    const install = b.addSystemCommand(&.{ "/usr/bin/rsync", "-a", "--delete", b.fmt("{s}/", .{app_path}), installed_app });
+    const install = b.addSystemCommand(&.{ "/usr/bin/rsync", "-a", "--delete" });
+    install.addDirectoryArg2(app_path, .{ .suffix = "/" });
+    install.addDirectoryArg(installed_app);
     install.has_side_effects = true;
     install.step.dependOn(&mkdir.step);
     b.getInstallStep().dependOn(&install.step);
 
-    const run = b.addSystemCommand(&.{b.fmt("{s}/Contents/MacOS/Velocitty", .{installed_app})});
+    const run = std.Build.Step.Run.create(b, "run Velocitty");
+    run.addFileArg(b.graph.path(.install_prefix, "Velocitty.app/Contents/MacOS/Velocitty"));
     run.environ_map = appleEnvironment(b);
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     run.has_side_effects = true;
     run.step.dependOn(b.getInstallStep());
     b.step("run", "Build and launch Velocitty").dependOn(&run.step);

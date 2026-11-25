@@ -769,6 +769,12 @@ typedef struct {
   uint32_t height;
 } ghostty_action_initial_size_s;
 
+// apprt.action.ResizeWindow
+typedef struct {
+  uint32_t width;
+  uint32_t height;
+} ghostty_action_resize_window_s;
+
 // apprt.action.CellSize
 typedef struct {
   uint32_t width;
@@ -832,6 +838,14 @@ typedef struct {
 typedef struct {
   bool soft;
 } ghostty_action_reload_config_s;
+
+// apprt.action.WindowTheme
+typedef enum {
+  GHOSTTY_ACTION_WINDOW_THEME_CONFIG,
+  GHOSTTY_ACTION_WINDOW_THEME_SYSTEM,
+  GHOSTTY_ACTION_WINDOW_THEME_LIGHT,
+  GHOSTTY_ACTION_WINDOW_THEME_DARK,
+} ghostty_action_window_theme_e;
 
 // apprt.action.OpenUrlKind
 typedef enum {
@@ -979,6 +993,8 @@ typedef enum {
   GHOSTTY_ACTION_READONLY,
   GHOSTTY_ACTION_COPY_TITLE_TO_CLIPBOARD,
   GHOSTTY_ACTION_MOVE_TAB_TO_NEW_WINDOW,
+  GHOSTTY_ACTION_RESIZE_WINDOW,
+  GHOSTTY_ACTION_SET_WINDOW_THEME,
   GHOSTTY_ACTION_NEW_NAMESPACE,
   GHOSTTY_ACTION_CLOSE_NAMESPACE,
   GHOSTTY_ACTION_PREVIOUS_NAMESPACE,
@@ -997,6 +1013,7 @@ typedef union {
   ghostty_action_resize_split_s resize_split;
   ghostty_action_size_limit_s size_limit;
   ghostty_action_initial_size_s initial_size;
+  ghostty_action_resize_window_s resize_window;
   ghostty_action_cell_size_s cell_size;
   ghostty_action_scrollbar_s scrollbar;
   ghostty_action_inspector_e inspector;
@@ -1028,6 +1045,7 @@ typedef union {
   ghostty_action_search_selected_s search_selected;
   ghostty_action_readonly_e readonly;
   ghostty_action_open_config_e open_config;
+  ghostty_action_window_theme_e set_window_theme;
   struct { uint32_t index; } goto_namespace;
 } ghostty_action_u;
 

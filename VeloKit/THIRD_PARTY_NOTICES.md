@@ -12,13 +12,13 @@ VeloKit includes a locally maintained fork of the libghostty terminal engine
 and its macOS embedding layer. The retained source originated from:
 
 - Project: [libghostty source repository](https://github.com/ghostty-org/ghostty)
-- Revision: `492300cad104195411d12217dd22f1cd05f31376`
-- Commit date: 2026-09-04
-- Imported: 2026-09-05
-- Upstream package version: `1.3.2-dev`
-- Zig version: `0.16.0`
-- Source archive: https://codeload.github.com/ghostty-org/ghostty/tar.gz/492300cad104195411d12217dd22f1cd05f31376
-- Archive SHA-256: `12ff0ed206e42049433c2afbacfd9656d568241e482e718b930868915e21cb93`
+- Revision: `57c8bb9dbc97b416980d7c84483666a88245a5f7`
+- Commit date: 2026-11-25
+- Imported: 2026-11-25
+- Upstream package version: `1.4.1-dev`
+- Zig version: `0.17.1`
+- Source archive: https://codeload.github.com/ghostty-org/ghostty/tar.gz/57c8bb9dbc97b416980d7c84483666a88245a5f7
+- Archive SHA-256: `4312a59600a45e0f0ed5d35397b781c303796e684190d6b4554ad89b4573822a`
 
 The macOS host also adapts application behavior from upstream revision
 `97f2ddb06e43ed73948385944cd1b0c19c282807` (configuration editor selection and
@@ -233,7 +233,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### libxev
 
-Source: [libxev-0.0.0-86vtcwIRFADbH4hk-EjROXxlrKIRPQdA41XiTSytYO-F](https://deps.files.ghostty.org/libxev-9ce8e8e6ff89e583258a7f8e7adeeeaeae8611bf.tar.gz)
+Source: [libxev-0.0.0-86vtc8QQFACz0sVc7U-VDiDIgH-XfBuEY5JpABLjHNpn](https://deps.files.ghostty.org/libxev-819ffa180ca20e31c7eded74e2e1aceb1eab557f.tar.gz)
 
 ```text
 MIT License
@@ -261,7 +261,7 @@ SOFTWARE.
 
 ### libvaxis
 
-Source: [vaxis-0.6.0-BWNV_CrbCQCscGpzsAlR402rYQ_tV3aAl081c2iRRkka](https://deps.files.ghostty.org/vaxis-1dbbe575dff4586fe51e3217aa5c3fecdcbb6089.tar.gz)
+Source: [vaxis-0.6.0-BWNV_LoTDQCQSGhvBbu_-fOf3I2P3TIiGaUzCDniO12E](https://deps.files.ghostty.org/vaxis-0620b34e091deaa6f64608922be3814147128dfb.tar.gz)
 
 ```text
 MIT License
@@ -289,7 +289,7 @@ SOFTWARE.
 
 ### zig-objc
 
-Source: [zig_objc-0.0.0-Ir_Sp9gsAQCPAJc0oF5xoWePHWP6Y6tCphDeyNUThJoi](https://deps.files.ghostty.org/zig_objc-c8de82ff80281215ad92900866dab7103a8efa8b.tar.gz)
+Source: [zig_objc-0.0.0-Ir_Sp_4tAQDXtPi51nW_jD9LOEzBvU9lofwO9Pzi6IB4](https://deps.files.ghostty.org/zig_objc-3352c12a868f8787ab71bf2ca6eab9fcfb635c52.tar.gz)
 
 ```text
 MIT License
@@ -317,7 +317,7 @@ SOFTWARE.
 
 ### zf
 
-Source: [zf-0.11.0-OIRy8X-RAAAwaRXHMYpj2uvBnuGTZWEE_3V7acqHQNtW](https://deps.files.ghostty.org/zf-c35c421f84895193246db06c40683c1a30e616ef.tar.gz)
+Source: [zf-0.11.0-OIRy8XCRAAB6FiMwIrtD6FqlagnFwpI6YyOu7bXeYH5J](https://deps.files.ghostty.org/zf-87153bb86b75d21fbac897b738f316d449f5d0c9.tar.gz)
 
 ```text
 MIT License
@@ -345,7 +345,7 @@ SOFTWARE.
 
 ### Zig runtime and translate-c
 
-Source: [translate_c-0.0.0-Q_BUWmU6BwB_9JKG2l2W7i_mhmYWeRseTGBEHi_YlV5f](https://deps.files.ghostty.org/translate_c-80f8b6e4f45a303268717d8e5f4f91d7837138bb.tar.gz)
+Source: [translate_c-2.0.0-Q_BUWltOBwBYABF84EUL208pIFeUIwbBs29FmVBaafN5](https://deps.files.ghostty.org/translate_c-02ff0c523fb92a38939b04d0145c4a9602a74d56.tar.gz) (via `pkg/translate-c`)
 
 ```text
 The MIT License (Expat)
@@ -373,7 +373,7 @@ THE SOFTWARE.
 
 ### uucode and Unicode data
 
-Source: [uucode 2826a37](https://github.com/jacobsandlund/uucode/tree/2826a37a4562284fdacd8fa029d49509cc9bffcd)
+Source: [uucode 1fb7343](https://github.com/jacobsandlund/uucode/tree/1fb73433bba5d93366c57f23ff2e9d7939746500)
 
 ```text
 # uucode license

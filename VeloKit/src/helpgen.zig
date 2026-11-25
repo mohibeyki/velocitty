@@ -21,7 +21,11 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn genConfig(alloc: std.mem.Allocator, writer: *std.Io.Writer) !void {
-    var ast = try std.zig.Ast.parse(alloc, @embedFile("config/Config.zig"), .zig);
+    var ast = try std.zig.Ast.parse(
+        alloc,
+        @embedFile("config/Config.zig"),
+        .{ .mode = .zig },
+    );
     defer ast.deinit(alloc);
 
     try writer.writeAll(
@@ -31,9 +35,9 @@ fn genConfig(alloc: std.mem.Allocator, writer: *std.Io.Writer) !void {
         \\
     );
 
-    inline for (@typeInfo(Config).@"struct".fields) |field| {
-        if (field.name[0] == '_') continue;
-        try genConfigField(alloc, writer, ast, field.name);
+    inline for (@typeInfo(Config).@"struct".field_names) |name| {
+        if (name[0] == '_') continue;
+        try genConfigField(alloc, writer, ast, name);
     }
 
     try writer.writeAll("};\n");
@@ -67,7 +71,11 @@ fn genConfigField(
 }
 
 fn genKeybindActions(alloc: std.mem.Allocator, writer: *std.Io.Writer) !void {
-    var ast = try std.zig.Ast.parse(alloc, @embedFile("input/Binding.zig"), .zig);
+    var ast = try std.zig.Ast.parse(
+        alloc,
+        @embedFile("input/Binding.zig"),
+        .{ .mode = .zig },
+    );
     defer ast.deinit(alloc);
 
     try writer.writeAll(
@@ -77,9 +85,9 @@ fn genKeybindActions(alloc: std.mem.Allocator, writer: *std.Io.Writer) !void {
         \\
     );
 
-    inline for (@typeInfo(KeybindAction).@"union".fields) |field| {
-        if (field.name[0] == '_') continue;
-        try genConfigField(alloc, writer, ast, field.name);
+    inline for (@typeInfo(KeybindAction).@"union".field_names) |field| {
+        if (field[0] == '_') continue;
+        try genConfigField(alloc, writer, ast, field);
     }
 
     try writer.writeAll("};\n");

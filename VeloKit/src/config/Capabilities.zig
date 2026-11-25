@@ -8,6 +8,7 @@ pub fn supported(action: Binding.Action) bool {
         .{ "toggle_quick_terminal", {} },
         .{ "check_for_updates", {} }, .{ "inspector", {} },
         .{ "show_gtk_inspector", {} }, .{ "crash", {} }, .{ "export_terminal_io", {} },
+        .{ "set_window_theme", {} },
     });
     return !unsupported.has(@tagName(action));
 }

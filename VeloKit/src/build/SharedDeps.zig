@@ -7,6 +7,7 @@ const Config = @import("Config.zig");
 const HelpStrings = @import("HelpStrings.zig");
 const MetallibStep = @import("MetallibStep.zig");
 const UnicodeTables = @import("UnicodeTables.zig");
+const translate_c = @import("translate_c");
 
 config: *const Config,
 
@@ -71,6 +72,12 @@ pub fn init(b: *std.Build, cfg: *const Config) !SharedDeps {
         .tables_path = uucode_tables,
         .build_config_path = b.path("src/build/uucode_config.zig"),
     }).module("uucode");
+
+    // Re-export the uucode module so that Zig programs that embed libgtostty-vt
+    // can use it. This is necessary to use libraries like libvaxis in
+    // the embedding program that need uucode as well (libvaxis provides
+    // -Dexternal_uucode for this).
+    try b.modules.put(b.allocator, b.dupe("uucode"), uucode_mod);
 
     var result: SharedDeps = .{
         .config = cfg,
@@ -160,26 +167,11 @@ pub fn add(
     step.root_module.addImport("uucode", self.uucode_mod);
 
     // C imports for locale constants and functions
-    {
-        const c = b.addTranslateC(.{
-            .root_source_file = b.path("src/os/locale.c"),
-            .target = target,
-            .optimize = optimize,
-        });
-        if (target.result.os.tag.isDarwin()) {
-            const libc = try std.zig.LibCInstallation.findNative(
-                b.allocator,
-                b.graph.io,
-                .{
-                    .environ_map = &b.graph.environ_map,
-                    .target = &target.result,
-                    .verbose = false,
-                },
-            );
-            c.addSystemIncludePath(.{ .cwd_relative = libc.sys_include_dir.? });
-        }
-        step.root_module.addImport("locale-c", c.createModule());
-    }
+    try translate_c.addImportToModule(b, "locale-c", step.root_module, .{
+        .source = .{ .file = b.path("src/os/locale.c") },
+        .target = target,
+        .optimize = optimize,
+    });
 
     // C imports needed to manage/create PTYs
     switch (target.result.os.tag) {
@@ -187,30 +179,29 @@ pub fn add(
         .linux,
         .macos,
         => {
-            const c = b.addTranslateC(.{
-                .root_source_file = b.path("src/pty.c"),
+            try translate_c.addImportToModule(b, "pty-c", step.root_module, .{
+                .source = .{ .file = b.path("src/pty.c") },
                 .target = target,
                 .optimize = optimize,
             });
-            switch (target.result.os.tag) {
-                .macos => {
-                    const libc = try std.zig.LibCInstallation.findNative(
-                        b.allocator,
-                        b.graph.io,
-                        .{
-                            .environ_map = &b.graph.environ_map,
-                            .target = &target.result,
-                            .verbose = false,
-                        },
-                    );
-                    c.addSystemIncludePath(.{ .cwd_relative = libc.sys_include_dir.? });
-                },
-                else => {},
-            }
-            step.root_module.addImport("pty-c", c.createModule());
         },
         else => {},
     }
+
+    // POSIX C imports that are used throughout Ghostty on a general basis.
+    // (note: errno is C stdlib but we just include it here because that's
+    // where it's generally included otherwise)
+    try translate_c.addImportToModule(b, "posix_c", step.root_module, .{
+        .source = .{ .includes = .{ .files = &.{
+            .{ .path = "errno.h" },
+            .{ .path = "pwd.h" },
+            .{ .path = "signal.h" },
+            .{ .path = "sys/types.h" },
+            .{ .path = "unistd.h" },
+        } } },
+        .target = target,
+        .optimize = optimize,
+    });
 
     // Freetype. We always include this even if our font backend doesn't
     // use it because Dear Imgui uses Freetype.
@@ -441,6 +432,17 @@ pub fn add(
         } else |_| {}
     }
 
+    // nothings/stb headers
+    try translate_c.addImportToModule(b, "stb_c", step.root_module, .{
+        .source = .{ .includes = .{ .files = &.{
+            .{ .path = "stb_image.h" },
+            .{ .path = "stb_image_resize.h" },
+        } } },
+        .target = target,
+        .optimize = optimize,
+        .include_paths = &.{b.path("src/stb")},
+    });
+
     // C files
     step.root_module.link_libc = true;
     step.root_module.addIncludePath(b.path("src/stb"));
@@ -637,36 +639,35 @@ pub fn add(
             .flags = &.{},
         });
 
+        // Link EGL for GTK.
+        if (self.config.app_runtime == .gtk) {
+            step.root_module.addCSourceFile(.{
+                .file = b.path("vendor/glad/src/glad_egl.c"),
+                .flags = &.{},
+            });
+            step.root_module.linkSystemLibrary("egl", dynamic_link_opts);
+        }
+
         // When we're targeting flatpak we ALWAYS link GTK so we
         // get access to glib for dbus.
         if (self.config.flatpak) {
             step.root_module.linkSystemLibrary("gtk4", dynamic_link_opts);
 
             // We need to translate gio headers too
-            gio_translate: {
-                // translate-c stuff
-                const translate_c = b.lazyImport(@import("../../build.zig"), "translate_c") orelse
-                    break :gio_translate;
-                const translate_c_dep = b.lazyDependency("translate_c", .{}) orelse
-                    break :gio_translate;
-                const translated: translate_c.Translator = .init(translate_c_dep, .{
-                    .c_source_file = b.addWriteFiles().add("gio_c.h",
-                        \\#include <gio/gio.h>
-                        \\#include <gio/gunixfdlist.h>
-                    ),
-                    .target = target,
-                    .optimize = optimize,
-                    .link_system_libs = &.{
-                        .{ .name = "gio-2.0", .options = dynamic_link_opts },
-                    },
-                });
-                step.root_module.addImport("gio_c", translated.mod);
-            }
+            try translate_c.addImportToModule(b, "gio_c", step.root_module, .{
+                .source = .{ .includes = .{ .files = &.{
+                    .{ .path = "gio/gio.h" },
+                    .{ .path = "gio/gunixfdlist.h" },
+                } } },
+                .target = target,
+                .optimize = optimize,
+                .link_system_libs = &.{"gio-2.0"},
+            });
         }
 
         switch (self.config.app_runtime) {
             .none => {},
-            .gtk => try self.addGtkNg(step),
+            .gtk => try self.addGtk(step),
         }
     }
 
@@ -677,7 +678,7 @@ pub fn add(
 }
 
 /// Setup the dependencies for the GTK apprt build.
-fn addGtkNg(
+fn addGtk(
     self: *const SharedDeps,
     step: *std.Build.Step.Compile,
 ) !void {
@@ -685,70 +686,60 @@ fn addGtkNg(
     const target = step.root_module.resolved_target.?;
     const optimize = step.root_module.optimize.?;
 
-    const gobject_ = b.lazyDependency("gobject", .{
+    const gobject = b.lazyDependency("gobject", .{
         .target = target,
         .optimize = optimize,
-    });
-    if (gobject_) |gobject| {
-        const gobject_imports = .{
-            .{ "adw", "adw1" },
-            .{ "gdk", "gdk4" },
-            .{ "gio", "gio2" },
-            .{ "glib", "glib2" },
-            .{ "glibunix", "glibunix2" },
-            .{ "gobject", "gobject2" },
-            .{ "gtk", "gtk4" },
-            .{ "xlib", "xlib2" },
-        };
-        inline for (gobject_imports) |import| {
-            const name, const module = import;
-            step.root_module.addImport(name, gobject.module(module));
-        }
+    }) orelse return;
+    const gobject_imports = .{
+        .{ "adw", "adw1" },
+        .{ "gdk", "gdk4" },
+        .{ "gio", "gio2" },
+        .{ "glib", "glib2" },
+        .{ "glibunix", "glibunix2" },
+        .{ "gobject", "gobject2" },
+        .{ "graphene", "graphene1" },
+        .{ "gsk", "gsk4" },
+        .{ "gtk", "gtk4" },
+        .{ "xlib", "xlib2" },
+    };
+    inline for (gobject_imports) |import| {
+        const name, const module = import;
+        step.root_module.addImport(name, gobject.module(module));
     }
-    gtk_adw_translate: {
-        // translate-c stuff
-        const translate_c = b.lazyImport(@import("../../build.zig"), "translate_c") orelse break :gtk_adw_translate;
-        const translate_c_dep = b.lazyDependency("translate_c", .{}) orelse break :gtk_adw_translate;
-        const Translator = translate_c.Translator;
 
-        {
-            // GTK headers
-            const translated: Translator = .init(translate_c_dep, .{
-                .c_source_file = b.addWriteFiles().add("gtk_c.h",
-                    \\#include <gtk/gtk.h>
-                ),
-                .target = target,
-                .optimize = optimize,
-                .link_system_libs = &.{
-                    .{ .name = "gtk4", .options = dynamic_link_opts },
-                },
-            });
-            step.root_module.addImport("gtk_c", translated.mod);
-        }
-        {
-            // Adwaita headers
-            const translated: Translator = .init(translate_c_dep, .{
-                .c_source_file = b.addWriteFiles().add("adw_c.h",
-                    \\#include <adwaita.h>
-                ),
-                .target = target,
-                .optimize = optimize,
-                .link_system_libs = &.{
-                    .{ .name = "libadwaita-1", .options = dynamic_link_opts },
-                },
-            });
-            step.root_module.addImport("adw_c", translated.mod);
-        }
-    }
+    // GTK C translation
+    try translate_c.addImportToModule(b, "gtk_c", step.root_module, .{
+        .source = .{ .includes = .{ .files = &.{.{ .path = "gtk/gtk.h" }} } },
+        .target = target,
+        .optimize = optimize,
+        .link_system_libs = &.{"gtk4"},
+    });
+
+    // Adwaita C translation
+    try translate_c.addImportToModule(b, "adw_c", step.root_module, .{
+        .source = .{ .includes = .{ .files = &.{.{ .path = "adwaita.h" }} } },
+        .target = target,
+        .optimize = optimize,
+        .link_system_libs = &.{"libadwaita-1"},
+    });
 
     if (self.config.x11) {
-        step.root_module.linkSystemLibrary("X11", dynamic_link_opts);
-        if (gobject_) |gobject| {
-            step.root_module.addImport(
-                "gdk_x11",
-                gobject.module("gdkx114"),
-            );
-        }
+        // X11 headers
+        try translate_c.addImportToModule(b, "x11_c", step.root_module, .{
+            .source = .{ .includes = .{ .files = &.{
+                .{ .path = "X11/Xlib.h" },
+                .{ .path = "X11/Xatom.h" },
+                .{ .path = "X11/XKBlib.h" },
+            } } },
+            .target = target,
+            .optimize = optimize,
+            .link_system_libs = &.{"X11"},
+        });
+
+        step.root_module.addImport(
+            "gdk_x11",
+            gobject.module("gdkx114"),
+        );
     }
 
     if (self.config.wayland) wayland: {
@@ -810,7 +801,7 @@ fn addGtkNg(
         step.root_module.addImport("wayland", b.createModule(.{
             .root_source_file = scanner.result,
         }));
-        if (gobject_) |gobject| step.root_module.addImport(
+        step.root_module.addImport(
             "gdk_wayland",
             gobject.module("gdkwayland4"),
         );
@@ -820,10 +811,8 @@ fn addGtkNg(
             .optimize = optimize,
         })) |gtk4_layer_shell| {
             const layer_shell_module = gtk4_layer_shell.module("gtk4-layer-shell");
-            if (gobject_) |gobject| {
-                layer_shell_module.addImport("gtk", gobject.module("gtk4"));
-                layer_shell_module.addImport("gdk", gobject.module("gdk4"));
-            }
+            layer_shell_module.addImport("gtk", gobject.module("gtk4"));
+            layer_shell_module.addImport("gdk", gobject.module("gdk4"));
             step.root_module.addImport(
                 "gtk4-layer-shell",
                 layer_shell_module,
@@ -900,13 +889,18 @@ pub fn addSimd(
         const HWY_AVX3_DL: c_int = 1 << 7;
         const HWY_AVX3: c_int = 1 << 8;
 
-        var flags: std.ArrayListUnmanaged([]const u8) = .empty;
+        var flags: std.ArrayList([]const u8) = .empty;
 
-        // Zig 0.13 bug: https://github.com/ziglang/zig/issues/20414
-        // To workaround this we just disable AVX512 support completely.
-        // The performance difference between AVX2 and AVX512 is not
-        // significant for our use case and AVX512 is very rare on consumer
-        // hardware anyways.
+        // Highway 1.2 asks for the "evex512" target feature in its AVX-512
+        // target attributes on any clang 18 or newer, and clang 22 removed
+        // that feature (llvm/llvm-project#157034), so with the clang in
+        // current Zig those targets don't compile. (Before that, Zig 0.13
+        // couldn't build them either:
+        // https://github.com/ziglang/zig/issues/20414.) Highway 1.4 only
+        // asks for it where the compiler has it, so this can go when we
+        // update to it. Our Highway code gains little from AVX-512 over
+        // AVX2; simdutf, which does the UTF-8 decoding, keeps its AVX-512
+        // kernels.
         const HWY_DISABLED_TARGETS: c_int = HWY_AVX10_2 | HWY_AVX3_SPR | HWY_AVX3_ZEN4 | HWY_AVX3_DL | HWY_AVX3;
         if (target.result.cpu.arch == .x86_64) try flags.append(
             b.allocator,
@@ -937,6 +931,12 @@ pub fn addSimd(
             b.allocator,
             "-DSIMDUTF_NO_LIBCXX",
         );
+
+        // Only our own Zig code calls the ghostty_simd_* functions, so they
+        // must not be exported from libghostty-vt. Its version script can't
+        // hide them because they match its ghostty_* pattern, and it doesn't
+        // apply to Mach-O.
+        try flags.append(b.allocator, "-fvisibility=hidden");
 
         // Disable ubsan for Windows C/C++ objects to avoid undefined
         // __ubsan_handle_* references. The Zig libraries on Windows don't

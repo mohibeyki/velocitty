@@ -12,7 +12,7 @@
       devShells.${system}.default = pkgs.mkShell {
         packages = with pkgs; [
           just
-          zig_0_16
+          zig_0_17
           gettext
           pkg-config
         ];

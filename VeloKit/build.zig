@@ -29,11 +29,12 @@ pub fn build(b: *std.Build) !void {
     const database = tic.addOutputDirectoryArg("terminfo");
     tic.addFileArg(source);
     // Keep the installed tree exact when generated entries are renamed or removed.
-    const destination = b.getInstallPath(.prefix, "share/terminfo");
-    const mkdir = b.addSystemCommand(&.{ "/bin/mkdir", "-p", destination });
+    const destination = b.graph.path(.install_prefix, "share/terminfo");
+    const mkdir = b.addSystemCommand(&.{ "/bin/mkdir", "-p" });
+    mkdir.addDirectoryArg(destination);
     const install = b.addSystemCommand(&.{ "/usr/bin/rsync", "-a", "--delete" });
-    install.addDecoratedDirectoryArg("", database, "/");
-    install.addArg(destination);
+    install.addDirectoryArg2(database, .{ .suffix = "/" });
+    install.addDirectoryArg(destination);
     install.step.dependOn(&mkdir.step);
     b.getInstallStep().dependOn(&install.step);
 }

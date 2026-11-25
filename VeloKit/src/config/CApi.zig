@@ -49,7 +49,7 @@ export fn velokit_config_set(self: *Config, key_z: [*:0]const u8, value_z: [*:0]
     if (key.len == 0) return false;
     const alloc = self.arenaAlloc();
     if (!(@import("Capabilities.zig").optionSupported(key, value, alloc) catch return false)) {
-        self._diagnostics.append(alloc, .{ .key = alloc.dupeZ(u8, key) catch return false,
+        self._diagnostics.append(alloc, .{ .key = alloc.dupeSentinel(u8, key, 0) catch return false,
             .message = "action is not supported by Velocitty" }) catch return false;
         return false;
     }
@@ -69,11 +69,11 @@ export fn velokit_config_set(self: *Config, key_z: [*:0]const u8, value_z: [*:0]
 
     // The native numeric parser accepts NaN/Infinity. They cannot be used by
     // the renderer safely, even when supplied as TOML strings.
-    inline for (@typeInfo(Config).@"struct".fields) |field| {
-        if (comptime @typeInfo(field.type) == .float) {
-            if (!std.math.isFinite(@field(self, field.name))) {
+    inline for (@typeInfo(Config).@"struct".field_names, @typeInfo(Config).@"struct".field_types) |field, field_type| {
+        if (comptime @typeInfo(field_type) == .float) {
+            if (!std.math.isFinite(@field(self, field))) {
                 self._diagnostics.append(alloc, .{
-                    .key = field.name,
+                    .key = field,
                     .message = "must be finite",
                 }) catch return false;
             }
@@ -277,7 +277,7 @@ export fn velokit_config_format(self: *Config, key_z: [*:0]const u8) ?[*:0]const
             @import("formatter.zig").formatEntry(@TypeOf(value), @tagName(tag), value, &buf.writer) catch return null;
         },
     }
-    return (self.arenaAlloc().dupeZ(u8, buf.written()) catch return null).ptr;
+    return (self.arenaAlloc().dupeSentinel(u8, buf.written(), 0) catch return null).ptr;
 }
 
 comptime { _ = @import("Capabilities.zig"); }
