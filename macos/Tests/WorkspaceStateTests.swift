@@ -13,6 +13,32 @@ final class WorkspaceStateTests: XCTestCase {
     XCTAssertEqual(state.namespaces.map(\.id), ["c", "a"])
   }
 
+  func testWindowGroupsFilterSavedWindowsAndPlaceUnknownNamespacesInActiveWindow() {
+    var state = WorkspaceState()
+    state.windows = [.init(id: "w1", namespaceIDs: ["a", "gone"], selectedNamespaceID: "a", frame: nil, sidebar: nil),
+      .init(id: "w2", namespaceIDs: ["b"], selectedNamespaceID: "b", frame: nil, sidebar: nil),
+      .init(id: "w3", namespaceIDs: ["attached"], selectedNamespaceID: nil, frame: nil, sidebar: nil)]
+    state.activeWindowID = "w2"
+    XCTAssertEqual(state.windowGroups(available: ["a", "b", "new"]).map(\.namespaceIDs), [["a"], ["b", "new"]])
+    state.windows = nil
+    state.selectedNamespaceID = "new"
+    let groups = state.windowGroups(available: ["c", "new"])
+    XCTAssertEqual(groups.map(\.namespaceIDs), [["c", "new"]])
+    XCTAssertEqual(groups.first?.selectedNamespaceID, "new")
+  }
+
+  func testAssignedWindowOwnsItsNamespaces() {
+    var state = WorkspaceState()
+    state.windows = [.init(id: "w1", namespaceIDs: ["a", "b"], selectedNamespaceID: "a", frame: nil, sidebar: nil),
+      .init(id: "w2", namespaceIDs: ["c"], selectedNamespaceID: "c", frame: nil, sidebar: nil)]
+    state.assign(window: .init(id: "w2", namespaceIDs: ["c", "b"], selectedNamespaceID: "b", frame: nil, sidebar: nil))
+    XCTAssertEqual(state.windows?.map(\.namespaceIDs), [["a"], ["c", "b"]])
+    state.assign(window: .init(id: "w3", namespaceIDs: ["a"], selectedNamespaceID: "a", frame: nil, sidebar: nil))
+    XCTAssertEqual(state.windows?.map(\.id), ["w2", "w3"])
+    state.assign(window: .init(id: "w4", namespaceIDs: [], selectedNamespaceID: nil, frame: nil, sidebar: nil))
+    XCTAssertEqual(state.windows?.map(\.id), ["w2", "w3"])
+  }
+
   func testLegacyStateDecodes() throws {
     let legacy = try JSONDecoder().decode(WorkspaceState.self, from: Data("{\"version\":1,\"namespaces\":[]}".utf8))
     XCTAssertNil(legacy.windows)

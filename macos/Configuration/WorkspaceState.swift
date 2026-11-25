@@ -146,6 +146,39 @@ public struct WorkspaceState: Codable, Equatable, Sendable {
     return result
   }
 
+  /// Window groups to open for the available namespaces, in saved order. Namespaces with no
+  /// saved window join the active window, or a new one when no saved window survives.
+  public func windowGroups(available: [String]) -> [Window] {
+    var groups = (windows ?? []).compactMap { saved -> Window? in
+      var window = saved
+      window.namespaceIDs = window.namespaceIDs.filter { available.contains($0) }
+      return window.namespaceIDs.isEmpty ? nil : window
+    }
+    let assigned = Set(groups.flatMap(\.namespaceIDs))
+    let unknown = available.filter { !assigned.contains($0) }
+    guard !unknown.isEmpty else { return groups }
+    if let index = groups.firstIndex(where: { $0.id == activeWindowID }) ?? groups.indices.first {
+      groups[index].namespaceIDs += unknown
+    } else {
+      groups.append(.init(id: UUID().uuidString, namespaceIDs: unknown,
+        selectedNamespaceID: selectedNamespaceID ?? unknown.first, frame: nil, sidebar: sidebar))
+    }
+    return groups
+  }
+
+  /// Save one window's presentation. A namespace has one presentation owner, even after a
+  /// cross-window move, so other windows lose the namespaces it now presents.
+  public mutating func assign(window presentation: Window) {
+    var saved = windows ?? []
+    for index in saved.indices where saved[index].id != presentation.id {
+      saved[index].namespaceIDs.removeAll { presentation.namespaceIDs.contains($0) }
+    }
+    if let index = saved.firstIndex(where: { $0.id == presentation.id }) { saved[index] = presentation }
+    else if !presentation.namespaceIDs.isEmpty { saved.append(presentation) }
+    saved.removeAll { $0.namespaceIDs.isEmpty }
+    windows = saved
+  }
+
   /// Update the namespaces owned by one window. Detached windows remain saved;
   /// namespaces explicitly removed by this window are removed from its saved scope.
   public mutating func update(_ current: [Namespace], replacing ownedIDs: Set<String>) {

@@ -716,17 +716,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         if let submenu = item.submenu { update(submenu) }
         guard let action = actions[item.title] else { continue }
         item.keyEquivalent = ""
-        var trigger = ghostty_input_trigger_s()
-        guard action.withCString({ velokit_config_trigger(config, $0, &trigger) }) else { continue }
-        if trigger.tag == GHOSTTY_TRIGGER_UNICODE, let scalar = UnicodeScalar(trigger.key.unicode) {
-          item.keyEquivalent = String(scalar)
-        } else if trigger.tag == GHOSTTY_TRIGGER_PHYSICAL {
-          let code = velokit_keycode_for_key(trigger.key.physical)
-          // Menu equivalents use the active keyboard layout, not US-only key labels.
-          item.keyEquivalent = GlobalShortcuts.character(for: code) ?? ""
-        }
+        guard let shortcut = GlobalShortcuts.resolvedShortcut(action: action, config: config) else { continue }
+        item.keyEquivalent = shortcut.key
         var flags: NSEvent.ModifierFlags = []
-        let raw = trigger.mods.rawValue
+        let raw = shortcut.mods.rawValue
         if raw & GHOSTTY_MODS_SHIFT.rawValue != 0 { flags.insert(.shift) }
         if raw & GHOSTTY_MODS_CTRL.rawValue != 0 { flags.insert(.control) }
         if raw & GHOSTTY_MODS_ALT.rawValue != 0 { flags.insert(.option) }
@@ -1862,31 +1855,7 @@ extension AppDelegate {
         let displaySnapshot = snapshot.excluding(terminals: self.retainedTerminalIDs)
         let available = restored.namespaces.filter { space in space.tabs.contains { tab in displaySnapshot.panes.contains { pane in tab.matches(pane) } } }.map(\.id).filter { !attachedNamespaces.contains($0) }
         self.workspaceState = restored
-        var groups = (restored.windows ?? []).compactMap { saved -> WorkspaceState.Window? in
-          var window = saved
-          window.namespaceIDs = window.namespaceIDs.filter { available.contains($0) }
-          return window.namespaceIDs.isEmpty ? nil : window
-        }
-        let assigned = Set(groups.flatMap(\.namespaceIDs))
-        let unknown = available.filter { !assigned.contains($0) }
-        if !unknown.isEmpty {
-          if let index = groups.firstIndex(where: { $0.id == restored.activeWindowID }) ?? groups.indices.first {
-            groups[index].namespaceIDs += unknown
-          } else {
-            groups.append(.init(id: UUID().uuidString, namespaceIDs: unknown,
-              selectedNamespaceID: restored.selectedNamespaceID ?? unknown.first, frame: nil, sidebar: restored.sidebar))
-          }
-        }
-        self.restoringWorkspace = true
-        var opened: [TerminalWindowController] = []
-        do {
-          for group in groups { opened.append(try self.attachHerdrWindow(displaySnapshot, client: client, presentation: group, state: restored)) }
-        } catch {
-          for controller in opened { controller.closing = true; controller.window?.close() }
-          self.restoringWorkspace = false
-          throw error
-        }
-        self.restoringWorkspace = false
+        let opened = try self.attachHerdrWindows(restored.windowGroups(available: available), snapshot: displaySnapshot, client: client, state: restored)
         self.connectionStatus[client.endpointID] = .connected
         self.restoreUnavailableTabs()
         for controller in opened {
@@ -1912,6 +1881,20 @@ extension AppDelegate {
         self.showMuxError(error)
       }
     }
+  }
+  /// Attach one window per saved group with saves suppressed; on failure, close the windows already opened.
+  private func attachHerdrWindows(_ groups: [WorkspaceState.Window], snapshot: HerdrClient.Snapshot, client: HerdrClient,
+    state: WorkspaceState) throws -> [TerminalWindowController] {
+    restoringWorkspace = true
+    defer { restoringWorkspace = false }
+    var opened: [TerminalWindowController] = []
+    do {
+      for group in groups { opened.append(try attachHerdrWindow(snapshot, client: client, presentation: group, state: state)) }
+    } catch {
+      for controller in opened { controller.closing = true; controller.window?.close() }
+      throw error
+    }
+    return opened
   }
   func observeHerdr(_ client: HerdrClient, snapshot: HerdrClient.Snapshot) {
     connectionCoordinator.observe(client, snapshot: snapshot) { [weak self, weak client] result in
@@ -2097,7 +2080,7 @@ extension AppDelegate {
 extension TerminalWindowController {
   func addHerdrTerminals(_ snapshot: HerdrClient.Snapshot, excluding excluded: Set<String>, restoring: Bool = false, client explicitClient: HerdrClient? = nil) throws {
     guard let client = explicitClient ?? session?.herdrTerminal?.client, let runtime = session?.runtime else { return }
-    let attached = owner?.attachedTerminalIDs ?? Set(allPanes.compactMap { $0.herdrTerminal?.pane.terminal_id }).union(owner?.retainedTerminalIDs ?? [])
+    let attached = (owner?.attachedTerminalIDs ?? Set(allPanes.compactMap { $0.herdrTerminal?.pane.terminal_id })).union(owner?.retainedTerminalIDs ?? [])
     let excluded = excluded.union(attached)
     var prepared: [String: TerminalSession] = [:]
     do {
@@ -2297,21 +2280,15 @@ extension TerminalWindowController {
     guard let source = namespace(for: tab.selected), let owner,
       let destination = owner.windows.first(where: { $0.namespaces.contains { $0.id == id } }),
       let space = destination.namespaces.first(where: { $0.id == id }), source !== space else { return }
-    source.tabs.removeAll { $0 === tab }
+    removeTab(tab, from: source)
     space.tabs.append(tab)
     tab.panes.forEach { $0.windowController = destination }
-    if let first = source.tabs.first {
-      if source.selected === tab { source.selected = first }
-    } else { namespaces.removeAll { $0 === source } }
-    if let first = namespaces.first {
-      if activeNamespace === source && source.tabs.isEmpty { activeNamespace = first }
-      selectTab(activeNamespace.selected)
-    }
+    reselectAfterRemoval()
     destination.selectTab(tab)
     // Save the destination first so ownership is transferred before pruning the source.
     owner.scheduleWorkspaceSave(destination)
     owner.scheduleWorkspaceSave(self)
-    if namespaces.isEmpty { persistenceReady = false; closing = true; window?.close() }
+    closeIfEmpty()
     refreshTabBars(); destination.refreshTabBars()
   }
 
@@ -2337,19 +2314,12 @@ extension TerminalWindowController {
     source.panes.removeAll { $0 === pane }; source.ensureLayout()
     target.panes.append(pane); pane.windowController = destination
     if source.panes.isEmpty {
-      if let space = namespaces.first(where: { $0.tabs.contains { $0 === source } }) {
-        space.tabs.removeAll { $0 === source }
-        if let first = space.tabs.first { if space.selected === source { space.selected = first } }
-        else { namespaces.removeAll { $0 === space } }
-      }
+      if let space = namespaces.first(where: { $0.tabs.contains { $0 === source } }) { removeTab(source, from: space) }
     } else if source.selected === pane { source.selected = source.panes[0] }
-    if let first = namespaces.first {
-      if !namespaces.contains(where: { $0 === activeNamespace }) { activeNamespace = first }
-      selectTab(activeNamespace.selected)
-    }
+    reselectAfterRemoval()
     destination.selectTab(pane)
     owner.scheduleWorkspaceSave(destination); owner.scheduleWorkspaceSave(self)
-    if namespaces.isEmpty { persistenceReady = false; closing = true; window?.close() }
+    closeIfEmpty()
     workspaceView.present(); destination.workspaceView.present()
   }
 
@@ -2532,37 +2502,62 @@ extension AppDelegate {
 
   func scheduleWorkspaceSave(_ controller: TerminalWindowController) {
     guard !restoringWorkspace, controller.persistenceReady, workspacePersistenceEnabled, var state = workspaceState else { return }
-    let current = controller.namespaces.compactMap { namespace -> WorkspaceState.Namespace? in
-      guard let id = namespace.id else { return nil }
-      var space = WorkspaceState.Namespace(id: id, tabs: namespace.tabs.compactMap { tab in
-        guard let id = tab.herdrID else { return nil }
-        var saved = WorkspaceState.Tab(id: id, selectedPaneID: tab.selected.herdrTerminal?.pane.pane_id, zoomed: tab.zoomed)
-        saved.title = tab.title
-        tab.ensureLayout(); saved.layout = tab.localLayout
-        saved.panes = tab.panes.compactMap { pane in pane.herdrTerminal.map { savedPane($0.pane, cwd: pane.currentDirectory) } }
-        return saved
-      }, selectedTabID: namespace.selected.herdrID)
-      space.name = namespace.name
-      // Preserve individual unavailable tabs until their endpoint confirms deletion.
-      if let old = state.namespaces.first(where: { $0.id == id }) {
-        let attached = Set(windows.flatMap(\.namespaces).flatMap(\.tabs).compactMap(\.herdrID))
-        space.tabs += old.tabs.compactMap { tab in
-          let unavailable = tab.panes?.contains { !clientIsAvailable($0.connectionID) } ?? !clientIsAvailable(tab.connectionID)
-          guard !attached.contains(tab.id), unavailable else { return nil }
-          var saved = tab
-          if let panes = saved.panes {
-            saved.panes = panes.filter { !hiddenTerminalIDs.contains($0.terminalID) }
-            if saved.panes?.isEmpty == true { return nil }
-            saved.layout = saved.layout?.retaining(Set(saved.panes?.map(\.terminalID) ?? []))
-          }
-          return saved
-        }
-        if let selected = old.selectedTabID, space.tabs.contains(where: { $0.id == selected }), !attached.contains(selected) { space.selectedTabID = selected }
-      }
-      return space
+    let current = controller.namespaces.compactMap { namespace in
+      savedNamespace(for: namespace, old: state.namespaces.first { $0.id == namespace.id })
     }
     state.update(current, replacing: controller.persistedNamespaceIDs)
     controller.persistedNamespaceIDs = Set(current.map(\.id))
+    let presentation = windowPresentation(for: controller, namespaces: current, state: state)
+    state.assign(window: presentation)
+    state.version = WorkspaceState.currentVersion
+    if focusedWindow == nil || focusedWindow === controller {
+      state.activeWindowID = controller.workspaceWindowID
+      state.selectedNamespaceID = controller.activeNamespace.id
+      state.sidebar = controller.workspaceView.savedSidebarState
+    }
+    guard state != workspaceState || workspacePersistence.dirty else { return }
+    workspacePersistence.dirty = true
+    workspaceState = state
+    workspacePersistence.timer?.invalidate()
+    workspacePersistence.timer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
+      self?.flushWorkspaceSave()
+    }
+  }
+
+  /// The saved form of one attached namespace. Individual unavailable tabs from its previous
+  /// saved form are kept until their endpoint confirms deletion.
+  private func savedNamespace(for namespace: TerminalNamespace, old: WorkspaceState.Namespace?) -> WorkspaceState.Namespace? {
+    guard let id = namespace.id else { return nil }
+    var space = WorkspaceState.Namespace(id: id, tabs: namespace.tabs.compactMap { tab in
+      guard let id = tab.herdrID else { return nil }
+      var saved = WorkspaceState.Tab(id: id, selectedPaneID: tab.selected.herdrTerminal?.pane.pane_id, zoomed: tab.zoomed)
+      saved.title = tab.title
+      tab.ensureLayout(); saved.layout = tab.localLayout
+      saved.panes = tab.panes.compactMap { pane in pane.herdrTerminal.map { savedPane($0.pane, cwd: pane.currentDirectory) } }
+      return saved
+    }, selectedTabID: namespace.selected.herdrID)
+    space.name = namespace.name
+    guard let old else { return space }
+    let attached = Set(windows.flatMap(\.namespaces).flatMap(\.tabs).compactMap(\.herdrID))
+    space.tabs += old.tabs.compactMap { tab in
+      let unavailable = tab.panes?.contains { !clientIsAvailable($0.connectionID) } ?? !clientIsAvailable(tab.connectionID)
+      guard !attached.contains(tab.id), unavailable else { return nil }
+      var saved = tab
+      if let panes = saved.panes {
+        saved.panes = panes.filter { !hiddenTerminalIDs.contains($0.terminalID) }
+        if saved.panes?.isEmpty == true { return nil }
+        saved.layout = saved.layout?.retaining(Set(saved.panes?.map(\.terminalID) ?? []))
+      }
+      return saved
+    }
+    if let selected = old.selectedTabID, space.tabs.contains(where: { $0.id == selected }), !attached.contains(selected) { space.selectedTabID = selected }
+    return space
+  }
+
+  /// The saved presentation of one window: its namespaces (plus offline ones it still owns),
+  /// frame, sidebar and comparison, keeping a saved comparison whose companion is unavailable.
+  private func windowPresentation(for controller: TerminalWindowController, namespaces current: [WorkspaceState.Namespace],
+    state: WorkspaceState) -> WorkspaceState.Window {
     let frame = controller.normalFrame ?? controller.window?.frame
     let attachedIDs = Set(windows.flatMap(\.namespaces).compactMap(\.id))
     let offlineIDs = (state.windows?.first { $0.id == controller.workspaceWindowID }?.namespaceIDs ?? []).filter { id in state.namespaces.contains { $0.id == id } && !attachedIDs.contains(id) && !controller.persistedNamespaceIDs.contains(id) }
@@ -2586,28 +2581,7 @@ extension AppDelegate {
       presentation.companionRatio = old.companionRatio
       presentation.focusedTerminalID = old.focusedTerminalID
     }
-    var savedWindows = state.windows ?? []
-    // A namespace has one presentation owner, even after a cross-window move.
-    for index in savedWindows.indices where savedWindows[index].id != presentation.id {
-      savedWindows[index].namespaceIDs.removeAll { presentation.namespaceIDs.contains($0) }
-    }
-    if let index = savedWindows.firstIndex(where: { $0.id == presentation.id }) { savedWindows[index] = presentation }
-    else if !presentation.namespaceIDs.isEmpty { savedWindows.append(presentation) }
-    savedWindows.removeAll { $0.namespaceIDs.isEmpty }
-    state.windows = savedWindows
-    state.version = WorkspaceState.currentVersion
-    if focusedWindow == nil || focusedWindow === controller {
-      state.activeWindowID = controller.workspaceWindowID
-      state.selectedNamespaceID = controller.activeNamespace.id
-      state.sidebar = controller.workspaceView.savedSidebarState
-    }
-    guard state != workspaceState || workspacePersistence.dirty else { return }
-    workspacePersistence.dirty = true
-    workspaceState = state
-    workspacePersistence.timer?.invalidate()
-    workspacePersistence.timer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
-      self?.flushWorkspaceSave()
-    }
+    return presentation
   }
 
   func flushWorkspaceSave() {
@@ -3145,9 +3119,7 @@ extension TerminalWindowController {
   func moveTabToNewWindow() {
     guard !closing, let owner else { return }
     let tab = activeTab, source = activeNamespace
-    source.tabs.removeAll { $0 === tab }
-    if let first = source.tabs.first { if source.selected === tab { source.selected = first } }
-    else { namespaces.removeAll { $0 === source } }
+    removeTab(tab, from: source)
     let destination = TerminalWindowController(session: tab.selected, owner: owner)
     destination.activeNamespace.id = "space:" + UUID().uuidString
     destination.activeNamespace.name = source.name
@@ -3156,12 +3128,29 @@ extension TerminalWindowController {
     owner.windows.append(destination); destination.openWindow(cascadingFrom: window)
     destination.persistenceReady = persistenceReady || owner.workspacePersistenceEnabled
     destination.selectTab(tab)
-    if let first = namespaces.first {
-      if activeNamespace === source && source.tabs.isEmpty { activeNamespace = first }
-      selectTab(activeNamespace.selected)
-    }
+    reselectAfterRemoval()
     owner.scheduleWorkspaceSave(destination); owner.scheduleWorkspaceSave(self)
-    if namespaces.isEmpty { persistenceReady = false; closing = true; window?.close() }
+    closeIfEmpty()
+  }
+
+  /// Remove a tab that moved elsewhere, keeping its namespace's selection valid and dropping the namespace once empty.
+  private func removeTab(_ tab: TerminalTab, from space: TerminalNamespace) {
+    space.tabs.removeAll { $0 === tab }
+    if let first = space.tabs.first { if space.selected === tab { space.selected = first } }
+    else { namespaces.removeAll { $0 === space } }
+  }
+
+  /// After a removal, fall back to the first namespace if the active one was dropped, and reselect its tab.
+  private func reselectAfterRemoval() {
+    guard let first = namespaces.first else { return }
+    if !namespaces.contains(where: { $0 === activeNamespace }) { activeNamespace = first }
+    selectTab(activeNamespace.selected)
+  }
+
+  /// Close the window once its last namespace has moved elsewhere, without saving it as closed.
+  private func closeIfEmpty() {
+    guard namespaces.isEmpty else { return }
+    persistenceReady = false; closing = true; window?.close()
   }
 
   func toggleDecorations() {

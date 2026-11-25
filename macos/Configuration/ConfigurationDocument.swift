@@ -100,7 +100,7 @@ public final class ConfigurationDocument {
     guard Self.valueEnd(Array(toml.utf8), from: 0) == toml.utf8.count else { throw ConfigurationError("Enter one TOML value; use Advanced to edit multiple settings.") }
     guard ["terminal", "interface"].contains(table), !key.isEmpty,
       key.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) || $0 == "_" }) else { throw ConfigurationError("Use the advanced editor for this setting.") }
-    let parsed = try AppConfiguration.parse(Data("[\(table)]\n\(key) = \(toml)\n".utf8), source: url)
+    let parsed = try AppConfiguration.parseFragment(table: table, key: key, value: toml, source: url)
     guard parsed.diagnostics.isEmpty else { throw ConfigurationError(parsed.diagnostics.joined(separator: "\n")) }
     let (entries, ends, _) = assignments()
     let matches = entries.filter { $0.table == table && $0.key == key }

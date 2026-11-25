@@ -177,17 +177,8 @@ final class CommandPalette: NSPanel, NSTextFieldDelegate, NSWindowDelegate, NSTa
     Self.formatShortcut(for: action, config: terminal?.config)
   }
   static func formatShortcut(for action: String, config: ghostty_config_t?) -> String {
-    guard let config else { return "" }
-    var trigger = ghostty_input_trigger_s()
-    guard action.withCString({ velokit_config_trigger(config, $0, &trigger) }) else { return "" }
-    let key: String
-    if trigger.tag == GHOSTTY_TRIGGER_UNICODE, let scalar = UnicodeScalar(trigger.key.unicode) {
-      key = String(scalar)
-    } else if trigger.tag == GHOSTTY_TRIGGER_PHYSICAL {
-      key = GlobalShortcuts.character(for: velokit_keycode_for_key(trigger.key.physical)) ?? ""
-    } else { return "" }
-    guard !key.isEmpty else { return "" }
-    let mods = trigger.mods.rawValue
+    guard let config, let shortcut = GlobalShortcuts.resolvedShortcut(action: action, config: config), !shortcut.key.isEmpty else { return "" }
+    let key = shortcut.key, mods = shortcut.mods.rawValue
     return (mods & GHOSTTY_MODS_CTRL.rawValue != 0 ? "⌃" : "")
       + (mods & GHOSTTY_MODS_ALT.rawValue != 0 ? "⌥" : "")
       + (mods & GHOSTTY_MODS_SHIFT.rawValue != 0 ? "⇧" : "")

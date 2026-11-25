@@ -127,20 +127,7 @@ public struct AppConfiguration: Equatable, Sendable {
       let aliases = Dictionary(grouping: (document.terminal ?? [:]).keys) {
         $0.replacingOccurrences(of: "_", with: "-")
       }
-      var interface: [String: String] = [:]
-      let interfaceAliases = Dictionary(grouping: (document.interface ?? [:]).keys) { $0.replacingOccurrences(of: "-", with: "_") }
-      for (spelling, value) in document.interface ?? [:] {
-        let key = spelling.replacingOccurrences(of: "-", with: "_")
-        guard interfaceAliases[key]?.count == 1 else {
-          diagnostics.append("\(source.path): Duplicate setting aliases: interface.\(spelling)")
-          continue
-        }
-        if case .scalar(let text) = value, NamespaceAppearance.validate(text, for: key) {
-          interface[key] = text
-        } else {
-          diagnostics.append("\(source.path): Invalid or unknown interface.\(key); using the default.")
-        }
-      }
+      let interface = parseInterface(document.interface ?? [:], source: source, diagnostics: &diagnostics)
       var directory = defaults(home: home, source: source).workingDirectory
       for (spelling, value) in (document.terminal ?? [:]).sorted(by: { $0.key < $1.key }) {
         let key = spelling.replacingOccurrences(of: "_", with: "-")
@@ -148,85 +135,20 @@ public struct AppConfiguration: Equatable, Sendable {
           guard aliases[key]?.count == 1 else {
             throw ConfigurationError("Duplicate setting aliases: terminal.\(spelling)")
           }
-          if TerminalSettings.otherPlatformKeys.contains(key) { continue }
-          if let reason = TerminalSettings.unavailable[key] {
-            throw ConfigurationError("terminal.\(spelling) is not available yet. \(reason)")
-          }
-          guard TerminalSettings.supported.contains(key) else {
-            throw ConfigurationError("Unknown configuration key: terminal.\(spelling)")
-          }
-          let values: [String]
-          switch value {
-          case .invalid(let reason):
-            throw ConfigurationError("terminal.\(spelling): \(reason)")
-          case .scalar(let scalar): values = [scalar]
-          case .array(let array):
-            guard TerminalSettings.repeatable.contains(key) else {
-              throw ConfigurationError("terminal.\(spelling) does not accept an array.")
-            }
-            // Empty repeatable arrays explicitly reset to the engine default.
-            values =
-              array.isEmpty
-              ? [""]
-              : array.compactMap { element in
-                if let text = element.text { return text }
-                diagnostics.append(
-                  "\(source.path): terminal.\(spelling): Invalid array element; expected a string, boolean, or finite number."
-                )
-                return nil
-              }
-          }
-          for text in values {
+          for text in try terminalValues(key: key, spelling: spelling, value: value, source: source, diagnostics: &diagnostics) {
             do {
-              guard !text.contains("\0") else {
-                throw ConfigurationError("terminal.\(spelling) cannot contain a NUL character.")
-              }
-              if key == "shell-integration-features" {
-                let flags = text.split(separator: ",").map {
-                  $0.trimmingCharacters(in: .whitespaces)
-                }
-                for feature in ["ssh-env", "ssh-terminfo"] {
-                  if flags.last(where: { $0 == feature || $0 == "no-" + feature }) == feature {
-                    throw ConfigurationError(
-                      "terminal.shell_integration_features: \(feature) requires an upstream command-line helper that Velocitty does not bundle."
-                    )
-                  }
-                }
-              }
+              try validateTerminalValue(text, key: key, spelling: spelling)
               if key == "working-directory" {
                 directory = try resolveDirectory(text, home: home)
                 options.append(TerminalOption(key: key, value: directory.path, source: source))
               } else {
-                var resolved = text
-                if ["background-image", "custom-shader", "bell-audio-path"].contains(key),
-                  !text.isEmpty
-                {
-                  let optional = text.hasPrefix("?")
-                  resolved =
-                    (optional ? "?" : "")
-                    + Self.assetURL(
-                      optional ? String(text.dropFirst()) : text, relativeTo: source, home: home
-                    ).path
-                }
-                if key == "input", text.hasPrefix("path:") {
-                  resolved =
-                    "path:"
-                    + Self.assetURL(String(text.dropFirst(5)), relativeTo: source, home: home).path
-                }
-                options.append(TerminalOption(key: key, value: resolved, source: source))
+                options.append(TerminalOption(key: key, value: resolveTerminalValue(text, key: key, source: source, home: home), source: source))
               }
             } catch { diagnostics.append("\(source.path): \(error.localizedDescription)") }
           }
         } catch { diagnostics.append("\(source.path): \(error.localizedDescription)") }
       }
-      var connections: [HerdrConnection]?
-      if let definitions = document.connections {
-        do {
-          let values = try definitions.map { try $0.connection() }
-          try HerdrConnection.validateList(values)
-          connections = values
-        } catch { diagnostics.append("\(source.path): Connections: \(error.localizedDescription)") }
-      }
+      let connections = parseConnections(document.connections, source: source, diagnostics: &diagnostics)
       return Self(
         connections: connections, interface: interface, workingDirectory: directory.standardizedFileURL, options: options,
         diagnostics: diagnostics, source: source, home: home)
@@ -244,6 +166,106 @@ public struct AppConfiguration: Equatable, Sendable {
       let detail = (error as? ConfigurationError)?.message ?? String(describing: error)
       throw ConfigurationError("\(source.path): \(detail)")
     }
+  }
+
+  /// Valid interface settings by underscore spelling; invalid ones fall back to their defaults.
+  private static func parseInterface(_ table: [String: Value], source: URL, diagnostics: inout [String]) -> [String: String] {
+    var interface: [String: String] = [:]
+    let aliases = Dictionary(grouping: table.keys) { $0.replacingOccurrences(of: "-", with: "_") }
+    for (spelling, value) in table {
+      let key = spelling.replacingOccurrences(of: "-", with: "_")
+      guard aliases[key]?.count == 1 else {
+        diagnostics.append("\(source.path): Duplicate setting aliases: interface.\(spelling)")
+        continue
+      }
+      if case .scalar(let text) = value, NamespaceAppearance.validate(text, for: key) {
+        interface[key] = text
+      } else {
+        diagnostics.append("\(source.path): Invalid or unknown interface.\(key); using the default.")
+      }
+    }
+    return interface
+  }
+
+  /// The raw entries of one supported terminal setting. Settings for other platforms have none.
+  private static func terminalValues(key: String, spelling: String, value: Value, source: URL, diagnostics: inout [String]) throws -> [String] {
+    if TerminalSettings.otherPlatformKeys.contains(key) { return [] }
+    if let reason = TerminalSettings.unavailable[key] {
+      throw ConfigurationError("terminal.\(spelling) is not available yet. \(reason)")
+    }
+    guard TerminalSettings.supported.contains(key) else {
+      throw ConfigurationError("Unknown configuration key: terminal.\(spelling)")
+    }
+    switch value {
+    case .invalid(let reason):
+      throw ConfigurationError("terminal.\(spelling): \(reason)")
+    case .scalar(let scalar): return [scalar]
+    case .array(let array):
+      guard TerminalSettings.repeatable.contains(key) else {
+        throw ConfigurationError("terminal.\(spelling) does not accept an array.")
+      }
+      // Empty repeatable arrays explicitly reset to the engine default.
+      if array.isEmpty { return [""] }
+      return array.compactMap { element in
+        if let text = element.text { return text }
+        diagnostics.append(
+          "\(source.path): terminal.\(spelling): Invalid array element; expected a string, boolean, or finite number."
+        )
+        return nil
+      }
+    }
+  }
+
+  /// Reject entries Velocitty cannot pass to the engine.
+  private static func validateTerminalValue(_ text: String, key: String, spelling: String) throws {
+    guard !text.contains("\0") else {
+      throw ConfigurationError("terminal.\(spelling) cannot contain a NUL character.")
+    }
+    guard key == "shell-integration-features" else { return }
+    let flags = text.split(separator: ",").map {
+      $0.trimmingCharacters(in: .whitespaces)
+    }
+    for feature in ["ssh-env", "ssh-terminfo"] {
+      if flags.last(where: { $0 == feature || $0 == "no-" + feature }) == feature {
+        throw ConfigurationError(
+          "terminal.shell_integration_features: \(feature) requires an upstream command-line helper that Velocitty does not bundle."
+        )
+      }
+    }
+  }
+
+  /// Resolve relative asset paths in one entry against its TOML file.
+  private static func resolveTerminalValue(_ text: String, key: String, source: URL, home: URL) -> String {
+    if ["background-image", "custom-shader", "bell-audio-path"].contains(key), !text.isEmpty {
+      let optional = text.hasPrefix("?")
+      return (optional ? "?" : "")
+        + assetURL(optional ? String(text.dropFirst()) : text, relativeTo: source, home: home).path
+    }
+    if key == "input", text.hasPrefix("path:") {
+      return "path:" + assetURL(String(text.dropFirst(5)), relativeTo: source, home: home).path
+    }
+    return text
+  }
+
+  private static func parseConnections(_ definitions: [ConnectionDefinition]?, source: URL, diagnostics: inout [String]) -> [HerdrConnection]? {
+    guard let definitions else { return nil }
+    do {
+      let values = try definitions.map { try $0.connection() }
+      try HerdrConnection.validateList(values)
+      return values
+    } catch {
+      diagnostics.append("\(source.path): Connections: \(error.localizedDescription)")
+      return nil
+    }
+  }
+
+  /// Parse a single `[table] key = value` setting, where value is a TOML literal.
+  public static func parseFragment(
+    table: String, key: String, value: String,
+    home: URL = FileManager.default.homeDirectoryForCurrentUser,
+    source: URL = fileURL()
+  ) throws -> Self {
+    try parse(Data("[\(table)]\n\(key) = \(value)\n".utf8), home: home, source: source)
   }
 
   /// Decode one TOML value literal as the entries of a repeatable setting.

@@ -233,9 +233,17 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
     value.isEnabled = true; reset.isEnabled = true
     let fallback = defaults.value(table: setting.table, key: setting.key) ?? "\"\""
     value.stringValue = configDocument.value(table: setting.table, key: setting.key) ?? fallback
-    let fragment = try? AppConfiguration.parse(Data("[\(setting.table)]\n\(setting.key) = \(value.stringValue)\n".utf8), source: configDocument.url)
+    configureControls(for: setting, normalized: normalizedValue(for: setting))
+    showDetail(for: setting, fallback: fallback)
+  }
+  /// The value field as the parser reads it, so booleans, numbers and colors are recognized.
+  private func normalizedValue(for setting: Setting) -> String {
+    let fragment = try? AppConfiguration.parseFragment(table: setting.table, key: setting.key, value: value.stringValue, source: configDocument.url)
     let decoded = setting.table == "interface" ? fragment?.interface[setting.key] : fragment?.options.first { $0.key == setting.key.replacingOccurrences(of: "_", with: "-") }?.value
-    let normalized = decoded ?? value.stringValue
+    return decoded ?? value.stringValue
+  }
+  /// Show the editing controls that fit the setting's current value.
+  private func configureControls(for setting: Setting, normalized: String) {
     enabled.isHidden = !["true", "false"].contains(normalized)
     enabled.state = normalized == "true" ? .on : .off
     choices.removeAllItems()
@@ -265,6 +273,9 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
     addEntry.isHidden = !repeatable; removeEntry.isHidden = !repeatable
     if repeatable { enabled.isHidden = true }
     reset.isHidden = false
+  }
+  /// Describe the setting: its effective value, this file's override and where it was loaded from.
+  private func showDetail(for setting: Setting, fallback: String) {
     let config = appOwner?.runtime?.settings
     let key = setting.key.replacingOccurrences(of: "_", with: "-")
     let sources = setting.table == "interface" ? [config?.interfaceSources[setting.key]?.path].compactMap { $0 } : config?.options.filter { $0.key == key }.compactMap { $0.source?.path } ?? []
@@ -279,7 +290,6 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
       + "\nEffective: " + String(effective.prefix(160)) + "\nFile override: " + override
       + "\nSource: " + (sources.last ?? "Built-in default") + "\n" + effect
     detail.toolTip = "Default: " + fallback + "\nEffective: " + effective + "\nSources in load order: " + sources.joined(separator: " → ")
-
   }
   func textDidChange(_ notification: Notification) {
     configDocument.text = editor.string
@@ -350,7 +360,7 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
     let setting = filtered[table.selectedRow]
     if !choices.isHidden { chooseValue() }
     do {
-      let fragment = try AppConfiguration.parse(Data("[\(setting.table)]\n\(setting.key) = \(value.stringValue)\n".utf8), source: configDocument.url)
+      let fragment = try AppConfiguration.parseFragment(table: setting.table, key: setting.key, value: value.stringValue, source: configDocument.url)
       var diagnostics: [String] = fragment.diagnostics
       let prepared = try TerminalRuntime.makeConfig(fragment, diagnostic: { diagnostics.append($0) })
       velokit_config_free(prepared)
@@ -727,7 +737,7 @@ final class ThemePickerWindow: NSWindowController, NSTableViewDataSource, NSTabl
   private func renderPreview() {
     var diagnostics: [String] = []
     do {
-      let config = try AppConfiguration.parse(Data(("[terminal]\ntheme = " + ConfigurationDocument.quote(chosen)).utf8), home: configuration.home, source: themeDocument.url)
+      let config = try AppConfiguration.parseFragment(table: "terminal", key: "theme", value: ConfigurationDocument.quote(chosen), home: configuration.home, source: themeDocument.url)
       let options = try TerminalTheme.options(for: config, dark: variant.selectedSegment == 1) { diagnostics.append($0) }
       guard diagnostics.isEmpty else { throw ConfigurationError(diagnostics.joined(separator: "\n")) }
       func color(_ hex: String?, fallback: NSColor) -> NSColor {
@@ -769,7 +779,7 @@ final class ThemePickerWindow: NSWindowController, NSTableViewDataSource, NSTabl
       guard previous?.value == latest?.value && previous?.source == latest?.source else {
         throw ConfigurationError("The theme changed on disk. Reopen the picker to load the latest selection.")
       }
-      let candidate = try AppConfiguration.parse(Data(("[terminal]\ntheme = " + ConfigurationDocument.quote(value)).utf8), home: configuration.home, source: themeDocument.url)
+      let candidate = try AppConfiguration.parseFragment(table: "terminal", key: "theme", value: ConfigurationDocument.quote(value), home: configuration.home, source: themeDocument.url)
       var diagnostics: [String] = []
       for dark in [false, true] { _ = try TerminalTheme.options(for: candidate, dark: dark) { diagnostics.append($0) } }
       guard diagnostics.isEmpty else { throw ConfigurationError(diagnostics.joined(separator: "\n")) }

@@ -190,32 +190,24 @@ final class HerdrClient {
   func perform<T>(
     _ work: @escaping (HerdrClient) throws -> T,
     completion: @escaping (Result<T, Error>) -> Void
-  ) {
-    availabilityLock.lock()
-    let generation = availabilityGeneration, submittedEnabled = enabled
-    availabilityLock.unlock()
-    queue.async {
-      self.availabilityLock.lock()
-      let enabled = self.enabled && self.availabilityGeneration == generation && submittedEnabled
-      self.availabilityLock.unlock()
-      let result = Result { guard enabled else { throw ConfigurationError("Connection disabled or changed.") }; return try work(self) }
-      DispatchQueue.main.async {
-        self.availabilityLock.lock()
-        let current = self.enabled && generation == self.availabilityGeneration
-        self.availabilityLock.unlock()
-        completion(current ? result : .failure(ConfigurationError("Connection disabled or changed.")))
-      }
-    }
-  }
+  ) { submit(on: queue, work, completion: completion) }
 
   func performMetadata<T>(
+    _ work: @escaping (HerdrClient) throws -> T,
+    completion: @escaping (Result<T, Error>) -> Void
+  ) { submit(on: metadataQueue, work, completion: completion) }
+
+  /// Run work on a queue and complete on the main queue, failing if the connection
+  /// was disabled or changed between submission and either step.
+  private func submit<T>(
+    on queue: DispatchQueue,
     _ work: @escaping (HerdrClient) throws -> T,
     completion: @escaping (Result<T, Error>) -> Void
   ) {
     availabilityLock.lock()
     let generation = availabilityGeneration, submittedEnabled = enabled
     availabilityLock.unlock()
-    metadataQueue.async {
+    queue.async {
       self.availabilityLock.lock()
       let enabled = self.enabled && self.availabilityGeneration == generation && submittedEnabled
       self.availabilityLock.unlock()
@@ -240,15 +232,22 @@ final class HerdrClient {
     let process = Process()
     process.executableURL = executable
     process.arguments = connectionArguments + arguments.map(raw)
-    process.environment = ProcessInfo.processInfo.environment.filter {
-      !$0.key.hasPrefix("HERDR_") || $0.key == "HERDR_CONFIG_PATH"
-    }
-    if process.environment?["SHELL"] == nil, let user = getpwuid(getuid()) {
-      process.environment?["SHELL"] = String(cString: user.pointee.pw_shell)
-    }
-    if let forwardedSocket { process.environment?["HERDR_SOCKET_PATH"] = forwardedSocket }
+    process.environment = requestEnvironment
     process.standardInput = FileHandle.nullDevice
     return process
+  }
+
+  /// The environment for herdr CLI processes: inherited herdr state is dropped except its
+  /// config path, and a forwarded remote socket replaces the local one.
+  private var requestEnvironment: [String: String] {
+    var environment = ProcessInfo.processInfo.environment.filter {
+      !$0.key.hasPrefix("HERDR_") || $0.key == "HERDR_CONFIG_PATH"
+    }
+    if environment["SHELL"] == nil, let user = getpwuid(getuid()) {
+      environment["SHELL"] = String(cString: user.pointee.pw_shell)
+    }
+    if let forwardedSocket { environment["HERDR_SOCKET_PATH"] = forwardedSocket }
+    return environment
   }
 
   // Only short-lived CLI requests use this launcher. The persistent server
@@ -299,7 +298,7 @@ final class HerdrClient {
   // extend the deadline. JSON is always read from stdout, never mixed with logs.
   func run(_ arguments: [String], timeout: TimeInterval = 5) throws -> Data {
     if machine != nil { try ensureRemoteTransport() }
-    return try runProgram(executable: executable, arguments: connectionArguments + arguments.map(raw), environment: process(arguments).environment ?? [:], timeout: timeout)
+    return try runProgram(executable: executable, arguments: connectionArguments + arguments.map(raw), environment: requestEnvironment, timeout: timeout)
   }
 
   private func runProgram(executable: URL, arguments: [String], environment: [String: String], timeout: TimeInterval) throws -> Data {
@@ -350,35 +349,34 @@ final class HerdrClient {
 
   private func socketPath() throws -> String {
     if machine != nil { try ensureRemoteTransport(); if let forwardedSocket { return forwardedSocket } }
-    let data = try run(["session", "list", "--json"])
-    let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-    guard let sessions = json?["sessions"] as? [[String: Any]],
-      let path = sessions.first(where: { $0["name"] as? String == sessionName })?["socket_path"] as? String else {
+    guard let path = try Self.socketPath(inSessionList: run(["session", "list", "--json"]), session: sessionName) else {
       throw ConfigurationError("herdr did not report its API socket.")
     }
     return path
   }
 
+  /// The API socket of one session in `herdr session list --json` output.
+  private static func socketPath(inSessionList data: Data, session: String) throws -> String? {
+    let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+    let sessions = json?["sessions"] as? [[String: Any]]
+    return sessions?.first(where: { $0["name"] as? String == session })?["socket_path"] as? String
+  }
+
+  /// Whether the first three version numbers are at least the minimum.
+  private static func version(_ numbers: [Int], isAtLeast minimum: [Int]) -> Bool {
+    numbers.count >= 3 && !Array(numbers.prefix(3)).lexicographicallyPrecedes(minimum)
+  }
+
   // Explicit-ID operations absent from the CLI use the same framed API as herdr.
   func api(_ method: String, _ params: [String: Any]) throws -> [String: Any] {
-    let path = try socketPath()
-    var address = sockaddr_un()
-    address.sun_family = sa_family_t(AF_UNIX)
-    let pathBytes = Array(path.utf8CString)
-    guard pathBytes.count <= MemoryLayout.size(ofValue: address.sun_path) else { throw ConfigurationError("herdr socket path is too long.") }
-    withUnsafeMutableBytes(of: &address.sun_path) { buffer in pathBytes.withUnsafeBytes { buffer.copyBytes(from: $0) } }
-    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-    guard fd >= 0 else { throw POSIXError(.EIO) }
-    defer { Darwin.close(fd) }
-    var timeout = timeval(tv_sec: 2, tv_usec: 0)
-    var noSignal: Int32 = 1
-    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size))
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
-    let connected = withUnsafePointer(to: &address) { pointer in
-      pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+    let fd = try connectUnixSocket(path: try socketPath(), failure: ConfigurationError("Could not connect to herdr.")) { fd in
+      var timeout = timeval(tv_sec: 2, tv_usec: 0)
+      var noSignal: Int32 = 1
+      setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size))
+      setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+      setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
     }
-    guard connected == 0 else { throw ConfigurationError("Could not connect to herdr.") }
+    defer { Darwin.close(fd) }
     var data = try JSONSerialization.data(withJSONObject: ["id": UUID().uuidString, "method": method, "params": mapIDs(params, incoming: false)])
     data.append(10)
     var sent = 0
@@ -459,9 +457,7 @@ final class HerdrClient {
     let match = version.range(of: #"^herdr\s+v?([0-9]+\.[0-9]+\.[0-9]+)"#, options: .regularExpression)
     let numbers = match.map { version[$0].split(whereSeparator: { !$0.isNumber }).compactMap { Int($0) } } ?? []
     let minimum = machine == nil ? [0, 8, 2] : [0, 9, 0]
-    guard numbers.count >= 3,
-      Array(numbers.prefix(3)).lexicographicallyPrecedes(minimum) == false
-    else {
+    guard Self.version(numbers, isAtLeast: minimum) else {
       throw ConfigurationError("herdr \(minimum.map(String.init).joined(separator: ".")) or newer is required for this connection.")
     }
     do { return try snapshot() }
@@ -514,12 +510,11 @@ final class HerdrClient {
     }
     let remoteVersion = String(decoding: try ssh(ShellInput.quote(executable) + " --version"), as: UTF8.self)
     let versionParts = remoteVersion.split(whereSeparator: { !$0.isNumber }).compactMap { Int($0) }
-    guard versionParts.count >= 3, !Array(versionParts.prefix(3)).lexicographicallyPrecedes([0, 9, 0]) else {
+    guard Self.version(versionParts, isAtLeast: [0, 9, 0]) else {
       throw ConfigurationError("Upgrade herdr to 0.9 or newer on " + machine.label + ". Found: " + remoteVersion.trimmingCharacters(in: .whitespacesAndNewlines))
     }
     let command = (["/usr/bin/env"] + remoteEnvironment.sorted { $0.key < $1.key }.map { $0.key + "=" + $0.value } + [executable, "--session", machine.session, "session", "list", "--json"]).map(ShellInput.quote).joined(separator: " ")
-    let response = try JSONSerialization.jsonObject(with: ssh(command)) as? [String: Any]
-    guard let sessions = response?["sessions"] as? [[String: Any]], let socket = sessions.first(where: { $0["name"] as? String == machine.session })?["socket_path"] as? String else { throw ConfigurationError("The selected herdr session was not found on " + machine.label) }
+    guard let socket = try Self.socketPath(inSessionList: ssh(command), session: machine.session) else { throw ConfigurationError("The selected herdr session was not found on " + machine.label) }
     let directory = URL(fileURLWithPath: "/tmp").appendingPathComponent("vt-" + UUID().uuidString.replacingOccurrences(of: "-", with: ""))
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
     let local = directory.appendingPathComponent("herdr.sock").path
@@ -602,6 +597,24 @@ final class HerdrClient {
   }
 }
 
+/// Open a stream socket to a Unix-domain path. `configure` runs on the socket before it connects;
+/// on connection failure the socket is closed and `failure` is thrown.
+private func connectUnixSocket(path: String, failure: Error, configure: (Int32) -> Void = { _ in }) throws -> Int32 {
+  var address = sockaddr_un()
+  address.sun_family = sa_family_t(AF_UNIX)
+  let bytes = Array(path.utf8CString)
+  guard bytes.count <= MemoryLayout.size(ofValue: address.sun_path) else { throw ConfigurationError("herdr socket path is too long.") }
+  withUnsafeMutableBytes(of: &address.sun_path) { target in bytes.withUnsafeBytes { target.copyBytes(from: $0) } }
+  let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+  guard fd >= 0 else { throw POSIXError(.EIO) }
+  configure(fd)
+  let connected = withUnsafePointer(to: &address) { pointer in
+    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+  }
+  guard connected == 0 else { Darwin.close(fd); throw failure }
+  return fd
+}
+
 // A read-only event connection. All mutations and terminal I/O still use explicit IDs.
 private final class HerdrEventStream {
   private let source: DispatchSourceRead
@@ -619,17 +632,7 @@ private final class HerdrEventStream {
     return !stopped
   }
   init(path: String, paneIDs: Set<String>, changed: @escaping () -> Void, ended: @escaping () -> Void) throws {
-    var address = sockaddr_un()
-    address.sun_family = sa_family_t(AF_UNIX)
-    let bytes = Array(path.utf8CString)
-    guard bytes.count <= MemoryLayout.size(ofValue: address.sun_path) else { throw ConfigurationError("herdr socket path is too long.") }
-    withUnsafeMutableBytes(of: &address.sun_path) { target in bytes.withUnsafeBytes { target.copyBytes(from: $0) } }
-    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-    guard fd >= 0 else { throw POSIXError(.EIO) }
-    let connected = withUnsafePointer(to: &address) { pointer in
-      pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
-    }
-    guard connected == 0 else { Darwin.close(fd); throw POSIXError(.ECONNREFUSED) }
+    let fd = try connectUnixSocket(path: path, failure: POSIXError(.ECONNREFUSED))
     var noSignal: Int32 = 1
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size))
     var timeout = timeval(tv_sec: 1, tv_usec: 0)

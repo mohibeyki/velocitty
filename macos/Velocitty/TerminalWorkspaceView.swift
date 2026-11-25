@@ -207,10 +207,17 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     return branches[path]
   }
 
-  private func directory(for namespace: TerminalNamespace) -> String {
-    let pane = namespace.selected.selected
-    return paneDirectories[pane.herdrTerminal?.pane.pane_id ?? ""] ?? pane.currentDirectory
+  private func directory(for namespace: TerminalNamespace) -> String { directory(for: namespace.selected.selected) }
+
+  /// The pane's reported directory, falling back to where it started.
+  private func directory(for pane: TerminalSession) -> String {
+    paneDirectories[pane.herdrTerminal?.pane.pane_id ?? ""] ?? pane.currentDirectory
       ?? pane.initialDirectory?.path ?? pane.settings.workingDirectory.path
+  }
+
+  /// A path with the pane's home directory shown as `~`.
+  private static func abbreviated(_ path: String, home: String) -> String {
+    path == home ? "~" : path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
   }
 
   private func pollBranches(directories: [String: String]) {
@@ -335,8 +342,6 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
       configuredWidth = requestedWidth
       splitView.setPosition(sidebarCompact ? 56 : min(restoredWidth, max(160, bounds.width - 320)), ofDividerAt: 0)
     }
-    toggleSidebar.refusesFirstResponder = true
-    addTab.refusesFirstResponder = true
     toggleSidebar.toolTip = sidebarCompact ? "Expand Sidebar" : "Compact Sidebar"
     toggleSidebar.setAccessibilityLabel(toggleSidebar.toolTip)
     let width = content.bounds.width
@@ -370,9 +375,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
       switch node {
       case .terminal(let id): frames[id] = frame.insetBy(dx: 2, dy: 2)
       case .split(let direction, let ratio, let first, let second):
-        var a = frame, b = frame
-        if direction == "right" { a.size.width *= ratio; b.origin.x = a.maxX; b.size.width -= a.width }
-        else { a.size.height *= ratio; a.origin.y = frame.maxY - a.height; b.size.height -= a.height }
+        let (a, b) = Self.splitFrames(frame, direction: direction, ratio: ratio)
         place(first, in: a); place(second, in: b)
       }
     }
@@ -402,25 +405,16 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     guard !tab.zoomed, let root = tab.localLayout, let tabID = tab.herdrID else { return }
     func visit(_ node: PaneLayout, frame: NSRect, path: [Bool]) {
       guard case .split(let direction, let value, let first, let second) = node else { return }
-      let ratio = CGFloat(value)
       let vertical = direction == "right"
-      var firstFrame = frame, secondFrame = frame
+      let (firstFrame, secondFrame) = Self.splitFrames(frame, direction: direction, ratio: value)
       let divider = PaneDivider()
       divider.color = controller?.native.dividerColor ?? .separatorColor
       divider.vertical = vertical
-      divider.ratio = Double(ratio)
+      divider.ratio = value
       divider.container = frame
-      if vertical {
-        firstFrame.size.width *= ratio
-        secondFrame.origin.x = firstFrame.maxX
-        secondFrame.size.width = frame.width - firstFrame.width
-        divider.frame = NSRect(x: firstFrame.maxX - 3, y: frame.minY, width: 6, height: frame.height)
-      } else {
-        firstFrame.size.height *= ratio
-        firstFrame.origin.y = frame.maxY - firstFrame.height
-        secondFrame.size.height = frame.height - firstFrame.height
-        divider.frame = NSRect(x: frame.minX, y: firstFrame.minY - 3, width: frame.width, height: 6)
-      }
+      divider.frame = vertical
+        ? NSRect(x: firstFrame.maxX - 3, y: frame.minY, width: 6, height: frame.height)
+        : NSRect(x: frame.minX, y: firstFrame.minY - 3, width: frame.width, height: 6)
       divider.onCommit = { [weak self] ratio in
         self?.controller?.setSplitRatio(tabID: tabID, path: path, ratio: ratio)
         self?.needsLayout = true
@@ -431,6 +425,21 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
       visit(second, frame: secondFrame, path: path + [true])
     }
     visit(root, frame: region, path: [])
+  }
+
+  /// The frames of a split's first and second child: side by side for "right", stacked otherwise.
+  private static func splitFrames(_ frame: NSRect, direction: String, ratio: Double) -> (NSRect, NSRect) {
+    var first = frame, second = frame
+    if direction == "right" {
+      first.size.width *= ratio
+      second.origin.x = first.maxX
+      second.size.width = frame.width - first.width
+    } else {
+      first.size.height *= ratio
+      first.origin.y = frame.maxY - first.height
+      second.size.height = frame.height - first.height
+    }
+    return (first, second)
   }
 
   override func draw(_ dirtyRect: NSRect) {
@@ -461,79 +470,8 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     refreshNamespaces(controller)
     var contentWidth: CGFloat = 0
     for (index, tab) in controller.tabs.enumerated() {
-      let label = title(for: tab)
-      let client = tab.selected.herdrTerminal?.client
-      let endpointState = connectionState(for: tab)
-      let state = endpointState.label
-      let unavailable = state != "Connected"
-      let location = client?.machine?.target ?? "Local"
-      let connections = Set(tab.panes.compactMap { $0.herdrTerminal?.client.endpointLabel }).sorted()
-      let connection = connections.count > 1 ? connections.joined(separator: " + ") + " · " + state : [client?.endpointLabel ?? "Standalone", location, client?.sessionName ?? "", state].joined(separator: " · ")
-      let item = WorkspaceTabItem(frame: NSRect(x: 0, y: 0, width: 160, height: 28))
-      item.selected = controller.activeTab === tab
-      item.onDropTab = { [weak controller, weak tab] id in
-        guard let controller, let tab else { return false }
-        return controller.placeTab(id: id, before: tab)
-      }
-      let button = WorkspaceActionButton(title: (tab.hasBell ? "● " : "") + label,
-        target: nil, action: nil)
-      button.dragID = tab.herdrID
-      button.isBordered = false
-      button.alignment = .center
-      button.font = .systemFont(ofSize: 12, weight: controller.activeTab === tab ? .medium : .regular)
-      button.contentTintColor = controller.activeTab === tab ? .labelColor : .secondaryLabelColor
-      button.lineBreakMode = .byTruncatingTail
-      button.toolTip = label + "\n" + connection + (endpointState.error.map { "\n" + $0 } ?? "")
-      button.setAccessibilityLabel(label + ", " + connection + (tab.hasBell ? ", bell pending" : ""))
-      button.setAccessibilitySelected(controller.activeTab === tab)
-      button.target = button
-      button.action = #selector(WorkspaceActionButton.invoke)
-      button.onPress = { [weak controller, weak tab] in
-        if let tab { controller?.selectTab(tab) }
-      }
-      let width = min(220, max(150, button.intrinsicContentSize.width + 88))
-      item.frame.size.width = width
-      button.frame = NSRect(x: 44, y: 2, width: width - 88, height: 24)
-      button.autoresizingMask = [.width]
-      let close = WorkspaceActionButton(title: "", target: nil, action: nil)
-      close.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close Tab")
-      close.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .medium)
-      close.isBordered = false
-      close.font = .systemFont(ofSize: 14)
-      close.contentTintColor = .secondaryLabelColor
-      close.toolTip = "Close \(label)"
-      close.setAccessibilityLabel("Close tab \(index + 1): \(label)")
-      close.frame = NSRect(x: 4, y: 2, width: 24, height: 24)
-      close.target = close
-      close.action = #selector(WorkspaceActionButton.invoke)
-      close.onPress = { [weak controller, weak tab] in
-        if let tab { controller?.closeTab(tab.selected) }
-      }
-      let shortcut = CommandPalette.formatShortcut(for: "goto_tab:\(index + 1)", config: controller.session?.config)
-      let badge = WorkspaceActionButton(title: shortcut.isEmpty ? String(index + 1) : shortcut, target: nil, action: nil)
-      badge.isBordered = false
-      badge.font = .systemFont(ofSize: 10)
-      badge.contentTintColor = .tertiaryLabelColor
-      badge.alignment = .right
-      badge.frame = NSRect(x: width - 44, y: 2, width: 38, height: 24)
-      badge.autoresizingMask = [.minXMargin]
-      badge.toolTip = "Switch to tab \(index + 1)" + (shortcut.isEmpty ? "" : " (\(shortcut))")
-      badge.target = badge
-      badge.action = #selector(WorkspaceActionButton.invoke)
-      badge.onPress = button.onPress
-      let connectionIcon = NSImageView(frame: NSRect(x: 28, y: 8, width: 12, height: 12))
-      connectionIcon.image = NSImage(systemSymbolName: unavailable ? "network.slash" : connections.count > 1 ? "square.stack.3d.up" : client?.machine == nil ? "desktopcomputer" : "network", accessibilityDescription: connection)
-      connectionIcon.contentTintColor = unavailable ? .systemOrange : .tertiaryLabelColor
-      connectionIcon.toolTip = connection
-      item.addSubview(connectionIcon)
-      item.addSubview(button)
-      item.addSubview(close)
-      item.addSubview(badge)
-      let widthConstraint = item.widthAnchor.constraint(equalToConstant: width)
-      widthConstraint.identifier = "tabWidth"
-      widthConstraint.isActive = true
-      item.heightAnchor.constraint(equalToConstant: 28).isActive = true
-      contentWidth += width
+      let item = makeTabItem(for: tab, index: index, controller: controller)
+      contentWidth += item.frame.width
       tabButtons.addArrangedSubview(item)
     }
     tabButtons.frame = NSRect(origin: .zero, size: NSSize(width: contentWidth, height: 30))
@@ -548,6 +486,82 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     controller.allPanes.forEach { $0.view?.announceAccessibilityLabelChange() }
     needsLayout = true
   }
+  /// One tab bar item: connection icon, title button, close button and switch shortcut badge.
+  private func makeTabItem(for tab: TerminalTab, index: Int, controller: TerminalWindowController) -> WorkspaceTabItem {
+    let label = title(for: tab)
+    let client = tab.selected.herdrTerminal?.client
+    let endpointState = connectionState(for: tab)
+    let state = endpointState.label
+    let unavailable = state != "Connected"
+    let location = client?.machine?.target ?? "Local"
+    let connections = Set(tab.panes.compactMap { $0.herdrTerminal?.client.endpointLabel }).sorted()
+    let connection = connections.count > 1 ? connections.joined(separator: " + ") + " · " + state : [client?.endpointLabel ?? "Standalone", location, client?.sessionName ?? "", state].joined(separator: " · ")
+    let item = WorkspaceTabItem(frame: NSRect(x: 0, y: 0, width: 160, height: 28))
+    item.selected = controller.activeTab === tab
+    item.onDropTab = { [weak controller, weak tab] id in
+      guard let controller, let tab else { return false }
+      return controller.placeTab(id: id, before: tab)
+    }
+    let button = WorkspaceActionButton(title: (tab.hasBell ? "● " : "") + label,
+      target: nil, action: nil)
+    button.dragID = tab.herdrID
+    button.isBordered = false
+    button.alignment = .center
+    button.font = .systemFont(ofSize: 12, weight: controller.activeTab === tab ? .medium : .regular)
+    button.contentTintColor = controller.activeTab === tab ? .labelColor : .secondaryLabelColor
+    button.lineBreakMode = .byTruncatingTail
+    button.toolTip = label + "\n" + connection + (endpointState.error.map { "\n" + $0 } ?? "")
+    button.setAccessibilityLabel(label + ", " + connection + (tab.hasBell ? ", bell pending" : ""))
+    button.setAccessibilitySelected(controller.activeTab === tab)
+    button.target = button
+    button.action = #selector(WorkspaceActionButton.invoke)
+    button.onPress = { [weak controller, weak tab] in
+      if let tab { controller?.selectTab(tab) }
+    }
+    let width = min(220, max(150, button.intrinsicContentSize.width + 88))
+    item.frame.size.width = width
+    button.frame = NSRect(x: 44, y: 2, width: width - 88, height: 24)
+    button.autoresizingMask = [.width]
+    let close = WorkspaceActionButton(title: "", target: nil, action: nil)
+    close.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close Tab")
+    close.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .medium)
+    close.isBordered = false
+    close.font = .systemFont(ofSize: 14)
+    close.contentTintColor = .secondaryLabelColor
+    close.toolTip = "Close \(label)"
+    close.setAccessibilityLabel("Close tab \(index + 1): \(label)")
+    close.frame = NSRect(x: 4, y: 2, width: 24, height: 24)
+    close.target = close
+    close.action = #selector(WorkspaceActionButton.invoke)
+    close.onPress = { [weak controller, weak tab] in
+      if let tab { controller?.closeTab(tab.selected) }
+    }
+    let shortcut = CommandPalette.formatShortcut(for: "goto_tab:\(index + 1)", config: controller.session?.config)
+    let badge = WorkspaceActionButton(title: shortcut.isEmpty ? String(index + 1) : shortcut, target: nil, action: nil)
+    badge.isBordered = false
+    badge.font = .systemFont(ofSize: 10)
+    badge.contentTintColor = .tertiaryLabelColor
+    badge.alignment = .right
+    badge.frame = NSRect(x: width - 44, y: 2, width: 38, height: 24)
+    badge.autoresizingMask = [.minXMargin]
+    badge.toolTip = "Switch to tab \(index + 1)" + (shortcut.isEmpty ? "" : " (\(shortcut))")
+    badge.target = badge
+    badge.action = #selector(WorkspaceActionButton.invoke)
+    badge.onPress = button.onPress
+    let connectionIcon = NSImageView(frame: NSRect(x: 28, y: 8, width: 12, height: 12))
+    connectionIcon.image = NSImage(systemSymbolName: unavailable ? "network.slash" : connections.count > 1 ? "square.stack.3d.up" : client?.machine == nil ? "desktopcomputer" : "network", accessibilityDescription: connection)
+    connectionIcon.contentTintColor = unavailable ? .systemOrange : .tertiaryLabelColor
+    connectionIcon.toolTip = connection
+    item.addSubview(connectionIcon)
+    item.addSubview(button)
+    item.addSubview(close)
+    item.addSubview(badge)
+    let widthConstraint = item.widthAnchor.constraint(equalToConstant: width)
+    widthConstraint.identifier = "tabWidth"
+    widthConstraint.isActive = true
+    item.heightAnchor.constraint(equalToConstant: 28).isActive = true
+    return item
+  }
   private func title(for tab: TerminalTab) -> String {
     if let title = tab.title, !title.isEmpty { return title }
     let pane = tab.selected
@@ -555,9 +569,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     let reported = paneTitles[id] ?? pane.terminalTitle
     if !reported.isEmpty && !["Velocitty", "zsh", "bash", "fish", "sh"].contains(reported) { return reported }
     if let agent = agent(for: pane) { return agent.name }
-    let directory = paneDirectories[id] ?? pane.currentDirectory ?? pane.initialDirectory?.path ?? pane.settings.workingDirectory.path
-    let home = pane.settings.home.path
-    return directory == home ? "~" : directory.hasPrefix(home + "/") ? "~" + directory.dropFirst(home.count) : directory
+    return Self.abbreviated(directory(for: pane), home: pane.settings.home.path)
   }
 
   private func refreshNamespaces(_ controller: TerminalWindowController) {
@@ -637,8 +649,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     ])
     if sidebarCompact { return cell }
     let cwd = directory(for: namespace)
-    let home = namespace.selected.selected.settings.home.path
-    let displayDirectory = cwd == home ? "~" : cwd.hasPrefix(home + "/") ? "~" + cwd.dropFirst(home.count) : cwd
+    let displayDirectory = Self.abbreviated(cwd, home: namespace.selected.selected.settings.home.path)
     func detail(_ text: String, top: CGFloat, tooltip: String? = nil) {
       let label = NSTextField(labelWithString: text)
       label.font = .systemFont(ofSize: 11)
