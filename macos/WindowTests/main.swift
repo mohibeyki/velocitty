@@ -1522,6 +1522,36 @@ func runManagementUICheck() throws {
   precondition(settingsTable.selectedRow == 0 && rowName(0) != initialName)
   precondition(settingsDetail().components(separatedBy: "\n")[0].hasSuffix("." + rowName(0).replacingOccurrences(of: " ", with: "_")), "The detail pane must follow the highlighted setting after filtering")
   settingsUI.close()
+  // Settings must not keep a stale snapshot: edits made elsewhere while the window was closed
+  // or open (without a draft) must not make the next Save & Reload fail.
+  func saveSettings(_ window: SettingsWindow, marker: String) -> String {
+    let views = descendants(window.window!.contentView!)
+    views.compactMap { $0 as? NSScrollView }.compactMap { $0.documentView as? NSTextView }.first { $0.isEditable }!.string += "\n# " + marker + "\n"
+    views.compactMap { $0 as? NSButton }.first { $0.title == "Save & Reload" }!.performClick(nil)
+    return views.compactMap { ($0 as? NSTextField)?.stringValue }.first { $0.hasPrefix("Saved") || $0.contains("changed outside") } ?? ""
+  }
+  func editExternally(_ theme: String) throws {
+    let other = try ConfigurationDocument(url: file)
+    try other.setValue(table: "terminal", key: "theme", toml: "'" + theme + "'")
+    try other.save()
+  }
+  owner.showSettings()
+  let closedFirst = owner.settingsWindow!
+  closedFirst.close()
+  try editExternally("Catppuccin Latte")
+  owner.showSettings()
+  precondition(owner.settingsWindow !== closedFirst, "A hidden Settings window must be rebuilt")
+  var result = saveSettings(owner.settingsWindow!, marker: "closed")
+  precondition(result.hasPrefix("Saved"), "Saving after an edit made while Settings was closed failed: " + result)
+  try editExternally("Catppuccin Frappe")
+  owner.reloadConfiguration(nil)
+  result = saveSettings(owner.settingsWindow!, marker: "open")
+  precondition(result.hasPrefix("Saved"), "Saving after a reload while Settings was open failed: " + result)
+  let savedText = try String(contentsOf: file, encoding: .utf8)
+  precondition(savedText.contains("Catppuccin Frappe") && savedText.contains("# open"))
+  owner.settingsWindow!.close()
+  try editExternally("light:Rose Pine Dawn,dark:Rose Pine")
+  owner.reloadConfiguration(nil)
   let picker = try ThemePickerWindow(owner: owner); show(picker, snapshot: "themes")
   let controls = descendants(picker.window!.contentView!)
   let mode = controls.compactMap { $0 as? NSPopUpButton }.first!

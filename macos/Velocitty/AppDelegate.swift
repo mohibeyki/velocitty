@@ -17,7 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
   let secureInputOwner = SecureInputOwner()
   let fullscreenPresentation = FullscreenPresentation()
   var windows: [TerminalWindowController] = []
-  private var settingsWindow: SettingsWindow?
+  private(set) var settingsWindow: SettingsWindow?
   private var themePicker: ThemePickerWindow?
   // Test sessions do not read or overwrite the user's workspace file.
   var workspaceStateURL: URL?
@@ -491,6 +491,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     do {
       try runtime?.updateConfiguration(AppConfiguration.load())
       loadConnections(reload: true)
+      settingsWindow?.configurationReloaded()
       showConfigurationDiagnostics()
     } catch { configurationAlert(error).runModal() }
   }
@@ -521,7 +522,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
 
   @objc func showSettings() {
     do {
-      if settingsWindow == nil { settingsWindow = try SettingsWindow(appOwner: self) }
+      // A hidden window may hold a stale snapshot of the file, so it is rebuilt.
+      if settingsWindow == nil || (settingsWindow?.window?.isVisible != true && settingsWindow?.window?.isMiniaturized != true) {
+        settingsWindow = try SettingsWindow(appOwner: self)
+      }
       settingsWindow?.showWindow(nil)
       settingsWindow?.window?.makeKeyAndOrderFront(nil)
     } catch { showMuxError(error) }
@@ -1053,9 +1057,11 @@ final class TerminalWindowController: NSObject, NSWindowDelegate, NSToolbarDeleg
         return
       }
       muxBusy = true
+      // Session state belongs to the main thread; the client's queue only sees these IDs.
+      let paneIDs = candidates.map { $0.herdrTerminal?.pane.pane_id }
       client.perform({ client in
-        candidates.contains { pane in
-          guard let id = pane.herdrTerminal?.pane.pane_id else { return true }
+        paneIDs.contains { id in
+          guard let id else { return true }
           return (try? client.hasRunningTask(paneID: id)) != false
         }
       }) { [weak self] result in
