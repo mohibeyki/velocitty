@@ -126,7 +126,13 @@ final class HerdrClient {
   private let sequenceLock = NSLock()
   private var requestSequence: UInt64 = 0
   private var mutationSequence: UInt64 = 0
-  private var cachedStatus: (TimeInterval, Snapshot)?
+  private let statusLock = NSLock()
+  private var statusStorage: (TimeInterval, Snapshot)?
+  /// Written from request queues and read from the status poll, so every access takes the lock.
+  private var cachedStatus: (TimeInterval, Snapshot)? {
+    get { statusLock.lock(); defer { statusLock.unlock() }; return statusStorage }
+    set { statusLock.lock(); defer { statusLock.unlock() }; statusStorage = newValue }
+  }
 
   init(executable: URL, sessionName: String = "velocitty", machine: Machine? = nil, sshOptions: [String] = [], remoteExecutable: String? = nil, remoteEnvironment: [String: String] = [:], identity: String? = nil, label: String? = nil) {
     self.identity = identity
@@ -340,25 +346,27 @@ final class HerdrClient {
     defer { handles.forEach { try? $0.close() } }
     for handle in handles { _ = fcntl(handle.fileDescriptor, F_SETFL, O_NONBLOCK) }
     var streams = [Data(), Data()]
-    var ended = [false, false]
+    var descriptors = handles.map { pollfd(fd: $0.fileDescriptor, events: Int16(POLLIN), revents: 0) }
     var buffer = [UInt8](repeating: 0, count: 16384)
     let deadline = ProcessInfo.processInfo.systemUptime + timeout
-    while child.isRunning || !ended.allSatisfy({ $0 }) {
-      for index in handles.indices where !ended[index] {
-        let count = read(handles[index].fileDescriptor, &buffer, buffer.count)
-        if count > 0 { streams[index].append(contentsOf: buffer.prefix(count)) }
-        else if count == 0 { ended[index] = true }
-        else if errno != EAGAIN && errno != EINTR { ended[index] = true }
-      }
-      if ProcessInfo.processInfo.systemUptime >= deadline {
+    while child.isRunning || descriptors.contains(where: { $0.fd >= 0 }) {
+      let remaining = deadline - ProcessInfo.processInfo.systemUptime
+      if remaining <= 0 {
         child.killGroup()
         throw RequestError(code: "timeout", message: "herdr request timed out.")
+      }
+      // With both streams closed this only waits briefly for the child to be reaped.
+      let streamsOpen = descriptors.contains { $0.fd >= 0 }
+      _ = poll(&descriptors, nfds_t(descriptors.count), Int32((streamsOpen ? remaining : min(remaining, 0.005)) * 1000) + 1)
+      for index in descriptors.indices where descriptors[index].fd >= 0 && descriptors[index].revents != 0 {
+        let count = read(descriptors[index].fd, &buffer, buffer.count)
+        if count > 0 { streams[index].append(contentsOf: buffer.prefix(count)) }
+        else if count == 0 || (errno != EAGAIN && errno != EINTR) { descriptors[index].fd = -1 }
       }
       if streams.contains(where: { $0.count > 64 * 1024 * 1024 }) {
         child.killGroup()
         throw RequestError(code: nil, message: "herdr response exceeded the size limit.")
       }
-      if !ended.allSatisfy({ $0 }) || child.isRunning { Thread.sleep(forTimeInterval: 0.001) }
     }
     child.waitUntilExit()
     guard child.terminationReason == .exit, child.terminationStatus == 0 else {
