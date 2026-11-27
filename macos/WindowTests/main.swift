@@ -1507,6 +1507,21 @@ func runManagementUICheck() throws {
   toggle.performClick(nil)
   precondition(AppConfiguration.load().connections?.last?.enabled == false)
   connections.close()
+  // A filter that leaves a different setting on the same selected row must refresh the detail pane.
+  let settingsUI = try SettingsWindow(appOwner: owner); show(settingsUI, snapshot: "settings")
+  let settingsControls = descendants(settingsUI.window!.contentView!)
+  let settingsTable = settingsControls.compactMap { $0 as? NSTableView }.first!
+  let settingsSearch = settingsControls.compactMap { $0 as? NSSearchField }.first!
+  func settingsDetail() -> String { settingsControls.compactMap { ($0 as? NSTextField)?.stringValue }.first { $0.contains("\nEffective:") } ?? "" }
+  func rowName(_ row: Int) -> String { (settingsTable.view(atColumn: 0, row: row, makeIfNecessary: true) as! NSTextField).stringValue }
+  precondition(settingsTable.selectedRow == 0 && settingsTable.numberOfRows > 1)
+  let initialName = rowName(0), nextName = rowName(1)
+  precondition(settingsDetail().components(separatedBy: "\n")[0].hasSuffix("." + initialName.replacingOccurrences(of: " ", with: "_")))
+  settingsSearch.stringValue = nextName.replacingOccurrences(of: " ", with: "_")
+  NSApp.sendAction(settingsSearch.action!, to: settingsSearch.target, from: settingsSearch)
+  precondition(settingsTable.selectedRow == 0 && rowName(0) != initialName)
+  precondition(settingsDetail().components(separatedBy: "\n")[0].hasSuffix("." + rowName(0).replacingOccurrences(of: " ", with: "_")), "The detail pane must follow the highlighted setting after filtering")
+  settingsUI.close()
   let picker = try ThemePickerWindow(owner: owner); show(picker, snapshot: "themes")
   let controls = descendants(picker.window!.contentView!)
   let mode = controls.compactMap { $0 as? NSPopUpButton }.first!

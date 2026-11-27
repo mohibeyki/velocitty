@@ -225,7 +225,7 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
       (query.isEmpty || ($0.table + "." + $0.key).localizedCaseInsensitiveContains(query) || $0.summary.localizedCaseInsensitiveContains(search.stringValue))
     }
     table.reloadData()
-    if !filtered.isEmpty { table.selectRowIndexes(IndexSet(integer: filtered.firstIndex { $0.table + "." + $0.key == selected } ?? 0), byExtendingSelection: false) }
+    if !filtered.isEmpty { table.selectRowIndexes(IndexSet(integer: filtered.firstIndex { $0.table + "." + $0.key == selected } ?? 0), byExtendingSelection: false); refreshControls() }
     else { browseThemes.isHidden = true; number.isHidden = true; color.isHidden = true; addEntry.isHidden = true; removeEntry.isHidden = true; detail.stringValue = "No matching settings"; value.isEnabled = false; choices.isHidden = true; enabled.isHidden = true; reset.isEnabled = false }
   }
   func controlTextDidChange(_ obj: Notification) { filterSettings() }
