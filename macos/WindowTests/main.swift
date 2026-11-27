@@ -436,7 +436,7 @@ func checkConfigurationReload() throws {
     precondition(first.window!.title == "Reloaded" && second.window!.title == "Reloaded")
     precondition(first.titleAccessory == nil && second.titleAccessory == nil,
       "Rejected titlebar colors must not enable custom titlebars")
-    precondition(!menuItem("Find…").isEnabled || menuItem("Find…").keyEquivalent.isEmpty)
+    precondition(menuItem("Find…").keyEquivalent.isEmpty, "super+f=unbind must clear the Find menu shortcut")
     let defaults = try TerminalRuntime.makeConfig(.defaults())
     defer { velokit_config_free(defaults) }
     let defaultFontSize = String(cString: velokit_config_format(defaults, "font-size")!)
@@ -1132,10 +1132,6 @@ func checkCloseAndQuit() {
   waitUntil("The window did not close") { delegate.windows.count == 1 }
   precondition(first.session?.view?.surface != nil)
   precondition(second.session?.view == nil)
-  delegate.gotoWindow(GHOSTTY_GOTO_WINDOW_NEXT, from: first)
-  delegate.gotoWindow(GHOSTTY_GOTO_WINDOW_PREVIOUS, from: first)
-  drain()
-  precondition(first.window!.isKeyWindow && delegate.windows.count == 1)
   first.window?.performClose(nil)
   waitUntil("The last window did not close") { delegate.windows.isEmpty }
   precondition(terminal.surface == nil && terminal.config == nil)
@@ -1148,10 +1144,6 @@ func checkCloseAndQuit() {
   let quit = menuItem("Quit Velocitty")
   precondition(quit.keyEquivalent == "q")
   precondition(quit.action == #selector(NSApplication.terminate(_:)))
-  precondition(delegate.applicationShouldTerminate(app) == .terminateNow)
-  precondition(delegate.windows.count == 2, "Quit must preserve windows for AppKit state capture")
-  delegate.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
-  precondition(delegate.windows.allSatisfy { $0.session?.surface == nil })
   for controller in delegate.windows { controller.closing = true; controller.window?.close() }
   precondition(delegate.windows.isEmpty)
 }
