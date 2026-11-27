@@ -322,6 +322,15 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
 
   override func layout() {
     super.layout()
+    layoutSidebar()
+    layoutChrome()
+    guard let controller else { return }
+    layoutPanes(controller)
+    needsDisplay = true
+  }
+
+  /// Shows or hides the sidebar for the mux setting and positions its divider.
+  private func layoutSidebar() {
     for view in [tabMaterial, tabScroll, addTab, toggleSidebar] { view.isHidden = !showsTabBar }
     let hideSidebar = !muxEnabled
     if sidebar.isHidden != hideSidebar {
@@ -344,6 +353,10 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     }
     toggleSidebar.toolTip = sidebarCompact ? "Expand Sidebar" : "Compact Sidebar"
     toggleSidebar.setAccessibilityLabel(toggleSidebar.toolTip)
+  }
+
+  /// Frames the tab bar, the pane container and the undo banner.
+  private func layoutChrome() {
     let width = content.bounds.width
     let height = content.bounds.height
     tabMaterial.frame = NSRect(x: 0, y: height - tabHeight, width: width, height: tabHeight)
@@ -359,7 +372,10 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     panes.frame = NSRect(x: 0, y: 0, width: width, height: max(0, height - tabHeight))
     let bannerWidth = min(460, max(280, width - 24))
     undoBanner.frame = NSRect(x: (width - bannerWidth) / 2, y: 12, width: bannerWidth, height: 38)
-    guard let controller else { return }
+  }
+
+  /// Places each presented tab's panes and dividers, and the divider between a companion pair.
+  private func layoutPanes(_ controller: TerminalWindowController) {
     if !paneDividers.contains(where: \.dragging) {
       paneDividers.forEach { $0.removeFromSuperview() }; paneDividers = []
     }
@@ -397,7 +413,6 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
       }
       panes.addSubview(divider); paneDividers.append(divider)
     }
-    needsDisplay = true
   }
 
   private func layoutDividers(_ tab: TerminalTab, region: NSRect) {

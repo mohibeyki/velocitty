@@ -68,13 +68,7 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_CONFIG_CHANGE:
       guard let config = action.action.config_change.config else { return false }
-      // Copy before returning; dispatching this borrowed pointer would outlive it.
-      let accepted = target.tag == GHOSTTY_TARGET_SURFACE
-        ? view?.session?.configurationChanged(config) ?? false
-        : runtime?.configurationChanged(config) ?? false
-      if !accepted { NSLog("Could not retain the applied terminal configuration.") }
-      perform { [weak self] _, _ in self?.owner?.configurationDidChange() }
-      return accepted
+      return applyConfigChange(config, target: target, view: view, perform: perform)
 
     case GHOSTTY_ACTION_RENDER:
       view?.invalidateAccessibilityText()
@@ -113,11 +107,7 @@ final class RuntimeContext: NSObject {
     case GHOSTTY_ACTION_COLOR_CHANGE:
       let color = action.action.color_change
       if color.kind == GHOSTTY_ACTION_COLOR_KIND_BACKGROUND {
-        perform { view, controller in
-          view?.session?.backgroundColor = NSColor(srgbRed: Double(color.r) / 255,
-            green: Double(color.g) / 255, blue: Double(color.b) / 255, alpha: 1)
-          if controller?.session === view?.session { controller?.applyBackground() }
-        }
+        perform { view, controller in Self.applyBackground(color, view: view, controller: controller) }
       }
 
     case GHOSTTY_ACTION_PWD:
@@ -146,10 +136,7 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_PROGRESS_REPORT:
       let value = action.action.progress_report
-      perform { view, _ in
-        if NativeSettings(config: view?.config).progressStyle { view?.session?.chrome?.progress.update(value) }
-        else { view?.session?.chrome?.progress.clear() }
-      }
+      perform { view, _ in Self.updateProgress(value, view: view) }
 
     default:
       return nil
@@ -192,22 +179,12 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_OPEN_URL:
       let link = action.action.open_url
-      guard let ptr = link.url,
-        let value = String(
-          bytes: UnsafeBufferPointer(
-            start: UnsafeRawPointer(ptr).assumingMemoryBound(to: UInt8.self), count: Int(link.len)),
-          encoding: .utf8)
-      else { return true }
+      guard let value = Self.validLinkText(link) else { return true }
       perform { view, controller in view?.session?.links.open(value, kind: link.kind, from: view) }
 
     case GHOSTTY_ACTION_MOUSE_OVER_LINK:
       let link = action.action.mouse_over_link
-      let value = link.url.map {
-        String(
-          decoding: UnsafeBufferPointer(
-            start: UnsafeRawPointer($0).assumingMemoryBound(to: UInt8.self), count: Int(link.len)),
-          as: UTF8.self)
-      }
+      let value = Self.hoveredLinkText(link)
       perform { view, controller in
         view?.linkURL = value
         view?.toolTip = value
@@ -215,13 +192,7 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_MOUSE_SHAPE:
       let shape = action.action.mouse_shape
-      perform { view, controller in
-        let cursor: NSCursor =
-          shape == GHOSTTY_MOUSE_SHAPE_POINTER
-          ? .pointingHand : shape == GHOSTTY_MOUSE_SHAPE_TEXT ? .iBeam : .arrow
-        view?.pointer = cursor
-        if view?.pointerIsInside == true { cursor.set() }
-      }
+      perform { view, controller in Self.applyCursor(shape, view: view) }
 
     case GHOSTTY_ACTION_MOUSE_VISIBILITY:
       let hidden = action.action.mouse_visibility == GHOSTTY_MOUSE_HIDDEN
@@ -247,13 +218,7 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_SET_TAB_TITLE:
       let title = action.action.set_tab_title.title.map { String(cString: $0) } ?? ""
-      perform { view, controller in
-        if let pane = view?.session {
-          controller?.tab(for: pane)?.title = title.isEmpty ? nil : title
-          for sibling in controller?.tab(for: pane)?.panes ?? [] { sibling.tabTitle = title.isEmpty ? nil : title }
-          controller?.tabMetadataChanged(pane)
-        }
-      }
+      perform { view, controller in Self.setTabTitle(title, view: view, controller: controller) }
 
     case GHOSTTY_ACTION_MOVE_TAB_TO_NEW_WINDOW:
       perform { _, controller in controller?.moveTabToNewWindow() }
@@ -276,10 +241,7 @@ final class RuntimeContext: NSObject {
     case GHOSTTY_ACTION_PREVIOUS_NAMESPACE, GHOSTTY_ACTION_NEXT_NAMESPACE:
       guard Self.isHerdr(view) else { return false }
       let step = action.tag == GHOSTTY_ACTION_NEXT_NAMESPACE ? 1 : -1
-      perform { _, controller in
-        guard let controller, let index = controller.namespaces.firstIndex(where: { $0 === controller.activeNamespace }) else { return }
-        controller.selectNamespace(at: (index + step + controller.namespaces.count) % controller.namespaces.count)
-      }
+      perform { _, controller in Self.stepNamespace(step, controller: controller) }
 
     case GHOSTTY_ACTION_GOTO_NAMESPACE:
       guard Self.isHerdr(view) else { return false }
@@ -287,15 +249,7 @@ final class RuntimeContext: NSObject {
       perform { _, controller in controller?.selectNamespace(at: index) }
 
     case GHOSTTY_ACTION_NEW_SPLIT:
-      let direction = action.action.new_split
-      let name: String
-      switch direction {
-      case GHOSTTY_SPLIT_DIRECTION_RIGHT: name = "right"
-      case GHOSTTY_SPLIT_DIRECTION_DOWN: name = "down"
-      case GHOSTTY_SPLIT_DIRECTION_LEFT: name = "left"
-      case GHOSTTY_SPLIT_DIRECTION_UP: name = "up"
-      default: return false
-      }
+      guard let name = Self.splitName(action.action.new_split) else { return false }
       perform { view, controller in controller?.splitPane(name, from: view?.session) }
 
     case GHOSTTY_ACTION_EQUALIZE_SPLITS:
@@ -312,7 +266,8 @@ final class RuntimeContext: NSObject {
       let directions = ["previous", "next", "up", "left", "down", "right"]
       let index = Int(action.action.goto_split.rawValue)
       guard directions.indices.contains(index) else { return false }
-      perform { view, controller in controller?.focusPane(directions[index], from: view?.session) }
+      let direction = directions[index]
+      perform { view, controller in controller?.focusPane(direction, from: view?.session) }
 
     case GHOSTTY_ACTION_RESIZE_SPLIT:
       let value = action.action.resize_split
@@ -328,19 +283,7 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_GOTO_TAB:
       let direction = action.action.goto_tab
-      perform { view, controller in
-        guard let controller, let source = view?.session ?? controller.session,
-          let namespace = controller.namespace(for: source) else { return }
-        switch direction {
-        case GHOSTTY_GOTO_TAB_PREVIOUS: controller.cycleTab(-1, from: view?.session)
-        case GHOSTTY_GOTO_TAB_NEXT: controller.cycleTab(1, from: view?.session)
-        case GHOSTTY_GOTO_TAB_LAST:
-          if let last = namespace.tabs.last { controller.selectTab(last) }
-        default:
-          let index = Int(direction.rawValue) - 1
-          if namespace.tabs.indices.contains(index) { controller.selectTab(namespace.tabs[index]) }
-        }
-      }
+      perform { view, controller in Self.gotoTab(direction, view: view, controller: controller) }
 
     case GHOSTTY_ACTION_MOVE_TAB:
       let amount = action.action.move_tab.amount
@@ -388,14 +331,7 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_CELL_SIZE:
       let cell = action.action.cell_size
-      perform { view, controller in
-        guard let window = view?.window,
-          NativeSettings(config: view?.config).windowStepResize
-        else { return }
-        window.contentResizeIncrements = NSSize(
-          width: max(1, CGFloat(cell.width) / window.backingScaleFactor),
-          height: max(1, CGFloat(cell.height) / window.backingScaleFactor))
-      }
+      perform { view, controller in Self.applyCellSize(cell, view: view) }
 
     case GHOSTTY_ACTION_RESET_WINDOW_SIZE:
       perform { view, controller in controller?.resetWindowSize() }
@@ -404,12 +340,7 @@ final class RuntimeContext: NSObject {
       perform { view, controller in (NSApp.delegate as? AppDelegate)?.closeAllWindows() }
 
     case GHOSTTY_ACTION_TOGGLE_BACKGROUND_OPACITY:
-      perform { view, controller in
-        guard let controller else { return }
-        do { try view?.session?.toggleOpacity() }
-        catch { NSLog("Opacity update failed: %@", error.localizedDescription) }
-        if controller.session === view?.session { controller.applyWindowSettings() }
-      }
+      perform { view, controller in Self.toggleOpacity(view: view, controller: controller) }
 
     case GHOSTTY_ACTION_TOGGLE_WINDOW_DECORATIONS:
       perform { _, controller in controller?.toggleDecorations() }
@@ -433,15 +364,7 @@ final class RuntimeContext: NSObject {
       perform { view, controller in controller?.toggleFullscreen() }
 
     case GHOSTTY_ACTION_TOGGLE_VISIBILITY:
-      perform { view, controller in
-        if NSApp.isHidden || !NSApp.isActive {
-          NSApp.unhide(nil)
-          (NSApp.delegate as? AppDelegate)?.openWindow()
-          NSApp.activate(ignoringOtherApps: true)
-        } else {
-          NSApp.hide(nil)
-        }
-      }
+      perform { _, _ in Self.toggleApplicationVisibility() }
 
     case GHOSTTY_ACTION_RELOAD_CONFIG:
       let soft = action.action.reload_config.soft
@@ -455,13 +378,7 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_FLOAT_WINDOW:
       let level = action.action.float_window
-      perform { view, controller in
-        guard let window = view?.window else { return }
-        window.level =
-          level == GHOSTTY_FLOAT_WINDOW_ON
-            || (level == GHOSTTY_FLOAT_WINDOW_TOGGLE && window.level != .floating)
-          ? .floating : .normal
-      }
+      perform { view, _ in Self.floatWindow(level, view: view) }
 
     case GHOSTTY_ACTION_CLOSE_WINDOW:
       perform { _, controller in controller?.window?.performClose(nil) }
@@ -481,6 +398,126 @@ final class RuntimeContext: NSObject {
       return nil
     }
     return true
+  }
+
+  // MARK: Action bodies
+
+  /// Accepts a changed surface or app configuration; false when it could not be retained.
+  private func applyConfigChange(_ config: ghostty_config_t, target: ghostty_target_s, view: TerminalView?, perform: Perform) -> Bool {
+    // Copy before returning; dispatching this borrowed pointer would outlive it.
+    let accepted = target.tag == GHOSTTY_TARGET_SURFACE
+      ? view?.session?.configurationChanged(config) ?? false
+      : runtime?.configurationChanged(config) ?? false
+    if !accepted { NSLog("Could not retain the applied terminal configuration.") }
+    perform { [weak self] _, _ in self?.owner?.configurationDidChange() }
+    return accepted
+  }
+
+  private static func applyBackground(_ color: ghostty_action_color_change_s, view: TerminalView?, controller: TerminalWindowController?) {
+    view?.session?.backgroundColor = NSColor(srgbRed: Double(color.r) / 255,
+      green: Double(color.g) / 255, blue: Double(color.b) / 255, alpha: 1)
+    if controller?.session === view?.session { controller?.applyBackground() }
+  }
+
+  private static func updateProgress(_ value: ghostty_action_progress_report_s, view: TerminalView?) {
+    if NativeSettings(config: view?.config).progressStyle { view?.session?.chrome?.progress.update(value) }
+    else { view?.session?.chrome?.progress.clear() }
+  }
+
+  /// The URL text of an open-link action; nil when it is not valid UTF-8.
+  private static func validLinkText(_ link: ghostty_action_open_url_s) -> String? {
+    guard let ptr = link.url else { return nil }
+    return String(
+      bytes: UnsafeBufferPointer(
+        start: UnsafeRawPointer(ptr).assumingMemoryBound(to: UInt8.self), count: Int(link.len)),
+      encoding: .utf8)
+  }
+
+  private static func hoveredLinkText(_ link: ghostty_action_mouse_over_link_s) -> String? {
+    link.url.map {
+      String(
+        decoding: UnsafeBufferPointer(
+          start: UnsafeRawPointer($0).assumingMemoryBound(to: UInt8.self), count: Int(link.len)),
+        as: UTF8.self)
+    }
+  }
+
+  private static func applyCursor(_ shape: ghostty_action_mouse_shape_e, view: TerminalView?) {
+    let cursor: NSCursor =
+      shape == GHOSTTY_MOUSE_SHAPE_POINTER
+      ? .pointingHand : shape == GHOSTTY_MOUSE_SHAPE_TEXT ? .iBeam : .arrow
+    view?.pointer = cursor
+    if view?.pointerIsInside == true { cursor.set() }
+  }
+
+  private static func setTabTitle(_ title: String, view: TerminalView?, controller: TerminalWindowController?) {
+    guard let pane = view?.session else { return }
+    controller?.tab(for: pane)?.title = title.isEmpty ? nil : title
+    for sibling in controller?.tab(for: pane)?.panes ?? [] { sibling.tabTitle = title.isEmpty ? nil : title }
+    controller?.tabMetadataChanged(pane)
+  }
+
+  private static func stepNamespace(_ step: Int, controller: TerminalWindowController?) {
+    guard let controller, let index = controller.namespaces.firstIndex(where: { $0 === controller.activeNamespace }) else { return }
+    controller.selectNamespace(at: (index + step + controller.namespaces.count) % controller.namespaces.count)
+  }
+
+  private static func splitName(_ direction: ghostty_action_split_direction_e) -> String? {
+    switch direction {
+    case GHOSTTY_SPLIT_DIRECTION_RIGHT: return "right"
+    case GHOSTTY_SPLIT_DIRECTION_DOWN: return "down"
+    case GHOSTTY_SPLIT_DIRECTION_LEFT: return "left"
+    case GHOSTTY_SPLIT_DIRECTION_UP: return "up"
+    default: return nil
+    }
+  }
+
+  private static func gotoTab(_ direction: ghostty_action_goto_tab_e, view: TerminalView?, controller: TerminalWindowController?) {
+    guard let controller, let source = view?.session ?? controller.session,
+      let namespace = controller.namespace(for: source) else { return }
+    switch direction {
+    case GHOSTTY_GOTO_TAB_PREVIOUS: controller.cycleTab(-1, from: view?.session)
+    case GHOSTTY_GOTO_TAB_NEXT: controller.cycleTab(1, from: view?.session)
+    case GHOSTTY_GOTO_TAB_LAST:
+      if let last = namespace.tabs.last { controller.selectTab(last) }
+    default:
+      let index = Int(direction.rawValue) - 1
+      if namespace.tabs.indices.contains(index) { controller.selectTab(namespace.tabs[index]) }
+    }
+  }
+
+  private static func applyCellSize(_ cell: ghostty_action_cell_size_s, view: TerminalView?) {
+    guard let window = view?.window,
+      NativeSettings(config: view?.config).windowStepResize
+    else { return }
+    window.contentResizeIncrements = NSSize(
+      width: max(1, CGFloat(cell.width) / window.backingScaleFactor),
+      height: max(1, CGFloat(cell.height) / window.backingScaleFactor))
+  }
+
+  private static func toggleOpacity(view: TerminalView?, controller: TerminalWindowController?) {
+    guard let controller else { return }
+    do { try view?.session?.toggleOpacity() }
+    catch { NSLog("Opacity update failed: %@", error.localizedDescription) }
+    if controller.session === view?.session { controller.applyWindowSettings() }
+  }
+
+  private static func toggleApplicationVisibility() {
+    if NSApp.isHidden || !NSApp.isActive {
+      NSApp.unhide(nil)
+      (NSApp.delegate as? AppDelegate)?.openWindow()
+      NSApp.activate(ignoringOtherApps: true)
+    } else {
+      NSApp.hide(nil)
+    }
+  }
+
+  private static func floatWindow(_ level: ghostty_action_float_window_e, view: TerminalView?) {
+    guard let window = view?.window else { return }
+    window.level =
+      level == GHOSTTY_FLOAT_WINDOW_ON
+        || (level == GHOSTTY_FLOAT_WINDOW_TOGGLE && window.level != .floating)
+      ? .floating : .normal
   }
 
   private static func isHerdr(_ view: TerminalView?) -> Bool { view?.session?.herdrTerminal != nil }
