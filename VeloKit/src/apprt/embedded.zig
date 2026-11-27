@@ -1593,6 +1593,43 @@ pub const CAPI = struct {
         result.* = .{};
     }
 
+    const HistoryText = extern struct {
+        text: ?[*:0]const u8 = null,
+        text_len: usize = 0,
+    };
+
+    /// The last `max_lines` rows of the primary screen (scrollback and visible rows) as plain
+    /// text, so a full-screen program on the alternate screen does not replace the shell's output.
+    export fn velokit_surface_read_history(surface: *Surface, max_lines: usize, result: *HistoryText) bool {
+        result.* = .{};
+        const core = &surface.core_surface;
+        core.renderer_state.mutex.lockUncancelable(global.io());
+        defer core.renderer_state.mutex.unlock(global.io());
+        const screen = core.io.terminal.screens.get(.primary) orelse return false;
+        const end = screen.pages.getBottomRight(.screen) orelse return false;
+        const start = switch (end.upOverflow(max_lines -| 1)) {
+            .offset => |pin| pin,
+            .overflow => screen.pages.getTopLeft(.screen),
+        };
+        const text = screen.selectionString(global.alloc(), .{
+            .sel = .{ .bounds = .{ .untracked = .{ .start = start, .end = end } }, .rectangle = false },
+            .trim = true,
+        }) catch return false;
+        result.text = text.ptr;
+        result.text_len = text.len;
+        return true;
+    }
+
+    export fn velokit_free_history(result: *HistoryText) void {
+        if (result.text) |ptr| global.alloc().free(ptr[0..result.text_len :0]);
+        result.* = .{};
+    }
+
+    /// Display bytes as terminal output, as if the child had written them.
+    export fn velokit_surface_write_output(surface: *Surface, ptr: [*]const u8, len: usize) void {
+        surface.core_surface.io.processOutput(ptr[0..len]);
+    }
+
     export fn velokit_app_set_color_scheme(v: *App, scheme_raw: c_int) void {
         const scheme = std.enums.fromInt(apprt.ColorScheme, scheme_raw) orelse return;
 

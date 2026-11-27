@@ -1180,6 +1180,16 @@ typedef struct {
 bool velokit_surface_read_accessibility(ghostty_surface_t, velokit_accessibility_s *);
 void velokit_free_accessibility(velokit_accessibility_s *);
 
+// Recent primary-screen text (scrollback and visible rows), at most max_lines rows.
+typedef struct {
+  const char *text;
+  size_t text_len;
+} velokit_history_s;
+bool velokit_surface_read_history(ghostty_surface_t, size_t max_lines, velokit_history_s *);
+void velokit_free_history(velokit_history_s *);
+// Displays bytes as terminal output, as if the child process had written them.
+void velokit_surface_write_output(ghostty_surface_t, const char*, uintptr_t);
+
 bool velokit_action_supported(const char*);
 bool velokit_config_set(ghostty_config_t, const char*, const char*);
 const char* velokit_config_error(ghostty_config_t);
