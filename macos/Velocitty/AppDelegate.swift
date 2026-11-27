@@ -1912,6 +1912,7 @@ extension AppDelegate {
 
   func synchronizeHerdr(_ incoming: HerdrClient.Snapshot, client: HerdrClient) {
     guard client.isEnabled else { return }
+    guard client.isCurrent(incoming) else { client.onWorkspaceEvent?(); return }
     let regainedConnection = connectionStatus[client.endpointID] != .connected
     connectionStatus[client.endpointID] = .connected
     retryPendingClosures(client, snapshot: incoming)
@@ -1932,6 +1933,12 @@ extension AppDelegate {
   // Structural synchronization, deferred while presentation is busy. A deferred snapshot is
   // applied without the connection, agent and close-retry steps, which only suit a fresh snapshot.
   private func applyHerdrSnapshot(_ incoming: HerdrClient.Snapshot, client: HerdrClient) {
+    // A deferred snapshot can predate a mutation whose result is already shown; a fresh one follows.
+    guard client.isCurrent(incoming) else {
+      deferredSnapshots.removeValue(forKey: client.endpointID)
+      client.onWorkspaceEvent?()
+      return
+    }
     let serverSnapshot = incoming.excluding(terminals: hiddenTerminalIDs)
     let targets = herdrTargets(client)
     // Without a window showing this client there is nothing to synchronize or defer.

@@ -67,14 +67,16 @@ final class HerdrClient {
     let tabs: [Tab]
     let panes: [Pane]
     var endpointID: String? = nil
+    /// When the client requested this snapshot, in its request order (nil when not requested).
+    var sequence: UInt64? = nil
     func excluding(terminals: Set<String>) -> Snapshot {
       let panes = panes.filter { !terminals.contains($0.terminal_id) }
       let tabIDs = Set(panes.map(\.tab_id)), namespaceIDs = Set(panes.map(\.workspace_id))
-      return Snapshot(workspaces: workspaces.filter { namespaceIDs.contains($0.workspace_id) }, tabs: tabs.filter { tabIDs.contains($0.tab_id) }, panes: panes, endpointID: endpointID)
+      return Snapshot(workspaces: workspaces.filter { namespaceIDs.contains($0.workspace_id) }, tabs: tabs.filter { tabIDs.contains($0.tab_id) }, panes: panes, endpointID: endpointID, sequence: sequence)
     }
     func filtered(namespaceIDs: Set<String>) -> Snapshot {
       Snapshot(workspaces: workspaces.filter { namespaceIDs.contains($0.workspace_id) }, tabs: tabs.filter { namespaceIDs.contains($0.workspace_id) },
-        panes: panes.filter { namespaceIDs.contains($0.workspace_id) }, endpointID: endpointID)
+        panes: panes.filter { namespaceIDs.contains($0.workspace_id) }, endpointID: endpointID, sequence: sequence)
     }
   }
   final class LayoutNode: Decodable {
@@ -119,6 +121,11 @@ final class HerdrClient {
   private var eventGeneration = UUID()
   var eventsConnected: Bool { eventStream?.isSubscribed == true && eventStream?.isActive == true }
   var onWorkspaceEvent: (() -> Void)?
+  /// Structural notifications delivered so far, including the resynchronization after each subscription.
+  private(set) var workspaceEventCount = 0
+  private let sequenceLock = NSLock()
+  private var requestSequence: UInt64 = 0
+  private var mutationSequence: UInt64 = 0
   private var cachedStatus: (TimeInterval, Snapshot)?
 
   init(executable: URL, sessionName: String = "velocitty", machine: Machine? = nil, sshOptions: [String] = [], remoteExecutable: String? = nil, remoteEnvironment: [String: String] = [:], identity: String? = nil, label: String? = nil) {
@@ -144,7 +151,11 @@ final class HerdrClient {
     perform({ client -> HerdrEventStream in
       let path = try client.socketPath()
       return try HerdrEventStream(path: path, paneIDs: Set(ids.map(client.raw)), changed: { [weak client] in
-        DispatchQueue.main.async { client?.onWorkspaceEvent?() }
+        DispatchQueue.main.async {
+          guard let client else { return }
+          client.workspaceEventCount += 1
+          client.onWorkspaceEvent?()
+        }
       }, ended: { [weak client] in
         DispatchQueue.main.async {
           if client?.eventGeneration == generation { client?.eventStream = nil }
@@ -160,9 +171,26 @@ final class HerdrClient {
     }
   }
 
+  /// The next position in request order; a request that may change the server also moves the
+  /// mutation mark once it has finished, so later snapshots are known to include it.
+  private func nextSequence(mutation: Bool = false) -> UInt64 {
+    sequenceLock.lock(); defer { sequenceLock.unlock() }
+    requestSequence += 1
+    if mutation { mutationSequence = requestSequence }
+    return requestSequence
+  }
+
+  /// False for a snapshot requested before a server change finished: it may lack that change,
+  /// which the app may already show, so applying it would undo the change locally.
+  func isCurrent(_ snapshot: Snapshot) -> Bool {
+    guard let sequence = snapshot.sequence else { return true }
+    sequenceLock.lock(); defer { sequenceLock.unlock() }
+    return sequence > mutationSequence
+  }
+
   /// True only with evidence of a foreground task; nil means we must ask.
   func hasRunningTask(paneID: String) throws -> Bool? {
-    let result = try request(["pane", "process-info", "--pane", paneID], timeout: 1)
+    let result = try request(["pane", "process-info", "--pane", paneID], timeout: 1, mutating: false)
     guard let info = result["process_info"] as? [String: Any],
       let shell = info["shell_pid"] as? Int,
       let group = info["foreground_process_group_id"] as? Int,
@@ -368,7 +396,8 @@ final class HerdrClient {
   }
 
   // Explicit-ID operations absent from the CLI use the same framed API as herdr.
-  func api(_ method: String, _ params: [String: Any]) throws -> [String: Any] {
+  func api(_ method: String, _ params: [String: Any], mutating: Bool = true) throws -> [String: Any] {
+    defer { if mutating { _ = nextSequence(mutation: true) } }
     let fd = try connectUnixSocket(path: try socketPath(), failure: ConfigurationError("Could not connect to herdr.")) { fd in
       var timeout = timeval(tv_sec: 2, tv_usec: 0)
       var noSignal: Int32 = 1
@@ -404,13 +433,14 @@ final class HerdrClient {
   }
 
   func layoutTree(tabID: String) throws -> LayoutNode {
-    let response = try api("layout.export", ["tab_id": tabID])
+    let response = try api("layout.export", ["tab_id": tabID], mutating: false)
     guard let layout = response["layout"] as? [String: Any], let root = layout["root"] else { throw ConfigurationError("herdr did not return a layout tree.") }
     return try JSONDecoder().decode(LayoutNode.self, from: JSONSerialization.data(withJSONObject: root))
   }
 
-  func request(_ arguments: [String], timeout: TimeInterval = 5) throws -> [String: Any] {
+  func request(_ arguments: [String], timeout: TimeInterval = 5, mutating: Bool = true) throws -> [String: Any] {
     cachedStatus = nil
+    defer { if mutating { _ = nextSequence(mutation: true) } }
     let data = try run(arguments, timeout: timeout)
     guard let response = try JSONSerialization.jsonObject(with: data) as? [String: Any],
       let result = response["result"] as? [String: Any]
@@ -430,12 +460,14 @@ final class HerdrClient {
   }
 
   func snapshot(timeout: TimeInterval = 5) throws -> Snapshot {
-    let result = try request(["api", "snapshot"], timeout: timeout)
+    let sequence = nextSequence()
+    let result = try request(["api", "snapshot"], timeout: timeout, mutating: false)
     guard let value = result["snapshot"] else {
       throw ConfigurationError("herdr did not return a session snapshot.")
     }
     var snapshot = try JSONDecoder().decode(Snapshot.self, from: JSONSerialization.data(withJSONObject: value))
     snapshot.endpointID = endpointID
+    snapshot.sequence = sequence
     let workspaceIDs = snapshot.workspaces.map(\.workspace_id)
     let tabIDs = snapshot.tabs.map(\.tab_id)
     let paneIDs = snapshot.panes.map(\.pane_id)
@@ -666,6 +698,9 @@ private final class HerdrEventStream {
           if json["error"] != nil { self.stop(); ended(); return }
           if let result = json["result"] as? [String: Any], result["type"] as? String == "subscription_started" {
             self.stateLock.lock(); self.subscribed = true; self.stateLock.unlock()
+            // Changes made before the acknowledgement, including while a previous stream was
+            // being replaced, produced no event here, so resynchronize once.
+            updated = true
           }
           if json["event"] != nil { updated = true }
         }
