@@ -37,6 +37,12 @@ extension WorkspaceState {
     return rebound
   }
 
+  /// Each saved terminal's working directory, where it has one.
+  public func savedDirectories() -> [String: String] {
+    let panes = namespaces.flatMap(\.tabs).flatMap { $0.panes ?? [] }
+    return Dictionary(panes.compactMap { pane in pane.cwd.map { (pane.terminalID, $0) } }, uniquingKeysWith: { first, _ in first })
+  }
+
   /// This workspace with lost terminals replaced by newly created ones, keyed by the saved terminal ID
   /// each replaces. Tabs, namespaces, windows and layouts follow their terminals to the new IDs.
   public func recreated(replacements: [String: Pane]) -> Self {

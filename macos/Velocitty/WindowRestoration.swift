@@ -30,7 +30,7 @@ final class TerminalWindowRestoration: NSObject, NSWindowRestoration {
       if let key = state.decodeObject(of: NSString.self, forKey: "scrollback") as String?, key.hasPrefix("window-") {
         session.standaloneScrollbackKey = key
         session.restoredOutput = owner.scrollbackStore(for: session)?.load(key)
-          .map { SessionScrollback.terminalOutput($0.text, savedAt: $0.savedAt) }
+          .map { SessionScrollback.display($0.text, savedAt: $0.savedAt, lineEnding: "\r\n") }
       }
       let controller = TerminalWindowController(session: session, owner: owner)
       owner.windows.append(controller)

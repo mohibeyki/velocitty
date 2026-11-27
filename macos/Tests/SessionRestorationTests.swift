@@ -20,33 +20,56 @@ final class SessionRestorationTests: XCTestCase {
     XCTAssertTrue(shown.hasPrefix("\u{1B}[2mone\ntwo\u{1B}[0m\n"))
     XCTAssertTrue(shown.contains("restored session"))
     XCTAssertTrue(shown.hasSuffix("\u{1B}[0m\n"))
-    XCTAssertFalse(SessionScrollback.terminalOutput("one\ntwo").contains("\r\r"))
-    XCTAssertTrue(SessionScrollback.terminalOutput("one\ntwo").contains("one\r\ntwo\u{1B}[0m\r\n"))
+  }
+
+  func testTerminalLineEndingsAreCarriageReturnLineFeed() {
+    let shown = SessionScrollback.display("one\ntwo", lineEnding: "\r\n")
+    XCTAssertTrue(shown.contains("one\r\ntwo\u{1B}[0m\r\n"))
+    XCTAssertFalse(shown.contains("\r\r"))
+  }
+
+  func testBoundedDropsRestoredSeparatorsAndKeepsOversizedLastLine() {
+    let shown = SessionScrollback.display("old", savedAt: Date(timeIntervalSince1970: 0)).replacingOccurrences(of: "\u{1B}", with: "")
+    let plain = shown.replacingOccurrences(of: "[2m", with: "").replacingOccurrences(of: "[0m", with: "")
+    XCTAssertEqual(SessionScrollback.bounded(plain + "new"), "old\nnew", "A relaunch must not stack separators")
+    let kept = SessionScrollback.bounded("start\n" + String(repeating: "é", count: 40), maxBytes: 11)
+    XCTAssertEqual(kept, String(repeating: "é", count: 5), "A single oversized line keeps its end at a character boundary")
   }
 
   // MARK: Files
 
   func testStoreFilesAreOwnerOnlyAndReplacedAtomically() throws {
-    let directory = try makeTemporaryDirectory()
-    let store = ScrollbackStore(besideStateAt: directory.appendingPathComponent("workspace.json"))
-    XCTAssertTrue(try store.save("first", key: "ssh:host::term_1"))
-    XCTAssertFalse(try store.save("first", key: "ssh:host::term_1"), "Unchanged text is not rewritten")
-    XCTAssertTrue(try store.save("second", key: "ssh:host::term_1"))
-    XCTAssertEqual(store.load("ssh:host::term_1")?.text, "second")
-    XCTAssertNotNil(store.load("ssh:host::term_1")?.savedAt)
-    let file = store.url(for: "ssh:host::term_1")
-    XCTAssertEqual(file.deletingLastPathComponent(), store.directory)
-    XCTAssertFalse(file.lastPathComponent.contains(":"))
+    let store = try makeStore()
+    XCTAssertTrue(try store.save("first", key: "k"))
+    XCTAssertFalse(try store.save("first", key: "k"), "Unchanged text is not rewritten")
+    XCTAssertTrue(try store.save("second", key: "k"))
+    XCTAssertEqual(store.load("k")?.text, "second")
+    XCTAssertNotNil(store.load("k")?.savedAt)
+    let file = store.url(for: "k")
     XCTAssertEqual(try permissions(file), 0o600)
     XCTAssertEqual(try permissions(store.directory), 0o700)
     XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: store.directory.path), [file.lastPathComponent],
       "No temporary files may remain")
-    let escaping = store.url(for: "../../etc/passwd")
-    XCTAssertEqual(escaping.deletingLastPathComponent(), store.directory)
+    store.remove(["k", "missing"])
+    XCTAssertNil(store.load("k"))
+  }
+
+  func testKeysAreEncodedIntoFilesInsideTheDirectory() throws {
+    let store = try makeStore()
+    let file = store.url(for: "ssh:host::term_1")
+    XCTAssertEqual(file.deletingLastPathComponent(), store.directory)
+    XCTAssertFalse(file.lastPathComponent.contains(":"))
+    XCTAssertEqual(store.url(for: "../../etc/passwd").deletingLastPathComponent(), store.directory)
+  }
+
+  func testBlankTextIsNotSaved() throws {
+    let store = try makeStore()
     XCTAssertFalse(try store.save("  \n", key: "blank"))
     XCTAssertNil(store.load("blank"))
-    store.remove(["ssh:host::term_1", "missing"])
-    XCTAssertNil(store.load("ssh:host::term_1"))
+  }
+
+  private func makeStore() throws -> ScrollbackStore {
+    ScrollbackStore(besideStateAt: try makeTemporaryDirectory().appendingPathComponent("workspace.json"))
   }
 
   func testPruneKeepsSavedTerminalsAndRecentFiles() throws {
@@ -108,6 +131,28 @@ final class SessionRestorationTests: XCTestCase {
     XCTAssertTrue(saved.lostTerminals(endpoint: "local", live: ["term_1", "term_2", "term_3"]).isEmpty)
   }
 
+  func testReboundTerminalsAreLivePanesAtTheSavedPositionUnderNewTerminals() {
+    func live(_ pane: WorkspaceState.Pane, terminal: String) -> WorkspaceState.Pane {
+      var copy = pane
+      copy.terminalID = terminal
+      return copy
+    }
+    let one = pane(1, tab: 1), two = pane(2, tab: 2)
+    let rebound = saved.reboundTerminals(endpoint: "local", live: [live(one, terminal: "fresh_1"), live(two, terminal: "fresh_2")])
+    XCTAssertEqual(rebound.mapValues(\.terminalID), ["term_1": "fresh_1", "term_2": "fresh_2"])
+    var moved = live(one, terminal: "fresh_1")
+    moved.tabID = "w1:t9"
+    XCTAssertTrue(saved.reboundTerminals(endpoint: "local", live: [moved]).isEmpty, "A pane in another tab is not the same pane")
+    XCTAssertTrue(saved.reboundTerminals(endpoint: "local", live: [one]).isEmpty, "Terminals the workspace knows are not replacements")
+    XCTAssertEqual(saved.reboundTerminals(endpoint: "local", live: [live(one, terminal: "fresh_1")], excluding: ["term_1"]), [:])
+  }
+
+  func testSavedDirectoriesSurviveDuplicateTerminalIDs() {
+    var state = saved
+    state.namespaces[0].tabs[1].panes = [pane(1, tab: 3)]
+    XCTAssertEqual(state.savedDirectories()["term_1"], "/work/1")
+  }
+
   func testRecreatedStateFollowsNewTerminalsAndKeepsLayoutAndSelection() throws {
     // The new server numbers its IDs from the start again, so old and new IDs overlap.
     func created(_ old: Int, as new: Int, tab: Int) -> (String, WorkspaceState.Pane) {
@@ -154,13 +199,5 @@ final class SessionRestorationTests: XCTestCase {
       second: .split(direction: "right", ratio: 0.2, first: .terminal("b"), second: .terminal("c")))
     XCTAssertEqual(layout.mapping { $0.uppercased() }, .split(direction: "down", ratio: 0.7, first: .terminal("A"),
       second: .split(direction: "right", ratio: 0.2, first: .terminal("B"), second: .terminal("C"))))
-  }
-
-  func testRestoreSessionSettingDefaultsOnAndValidates() throws {
-    XCTAssertEqual(NamespaceAppearance.defaults["restore_session"], "true")
-    XCTAssertTrue(NamespaceAppearance.validate("false", for: "restore_session"))
-    XCTAssertFalse(NamespaceAppearance.validate("maybe", for: "restore_session"))
-    let config = try AppConfiguration.parse(Data("[interface]\nrestore_session = false\n".utf8))
-    XCTAssertEqual(config.interface["restore_session"], "false")
   }
 }

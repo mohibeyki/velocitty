@@ -13,29 +13,40 @@ public enum SessionScrollback {
     // Escape sequences in saved text must never be replayed to a terminal.
     let normalized = text.replacingOccurrences(of: "\r\n", with: "\n")
     let plain = String(String.UnicodeScalarView(normalized.unicodeScalars.filter(isPlain)))
-    var lines = plain.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    // A restored pane shows a separator the next save would otherwise keep, one more at each relaunch.
+    var lines = plain.split(separator: "\n", omittingEmptySubsequences: false).filter { !isSeparator($0) }.map(String.init)
     while lines.last?.allSatisfy(\.isWhitespace) == true { lines.removeLast() }
     while lines.first?.allSatisfy(\.isWhitespace) == true { lines.removeFirst() }
     lines = Array(lines.suffix(maxLines))
     var size = lines.reduce(0) { $0 + $1.utf8.count + 1 }
-    while size > maxBytes, !lines.isEmpty { size -= lines.removeFirst().utf8.count + 1 }
-    return lines.joined(separator: "\n")
+    while size > maxBytes, lines.count > 1 { size -= lines.removeFirst().utf8.count + 1 }
+    return lines.joined(separator: "\n").lastBytes(maxBytes)
   }
+
+  private static let separatorMarker = "─── restored session"
+
+  private static func isSeparator(_ line: Substring) -> Bool { line.hasPrefix(separatorMarker) && line.hasSuffix(" ───") }
 
   private static func isPlain(_ scalar: Unicode.Scalar) -> Bool {
     scalar == "\n" || scalar == "\t" || (scalar.value >= 0x20 && scalar.value != 0x7f && !(0x80...0x9f).contains(scalar.value))
   }
 
-  /// Dimmed saved text followed by a separator, as terminal output with "\n" line endings.
-  public static func display(_ text: String, savedAt: Date? = nil) -> String {
+  /// Dimmed saved text followed by a separator. Terminal emulators need a carriage return to start
+  /// each line, so they take "\r\n"; a shell printing the text takes "\n".
+  public static func display(_ text: String, savedAt: Date? = nil, lineEnding: String = "\n") -> String {
     let dim = "\u{1B}[2m", reset = "\u{1B}[0m"
     let when = savedAt.map { " · " + $0.formatted(date: .abbreviated, time: .shortened) } ?? ""
-    return dim + text + reset + "\n" + dim + "─── restored session" + when + " ───" + reset + "\n"
+    let shown = dim + text + reset + "\n" + dim + separatorMarker + when + " ───" + reset + "\n"
+    return lineEnding == "\n" ? shown : shown.replacingOccurrences(of: "\n", with: lineEnding)
   }
+}
 
-  /// Output for a terminal emulator, which needs a carriage return to start each line.
-  public static func terminalOutput(_ text: String, savedAt: Date? = nil) -> String {
-    display(text, savedAt: savedAt).replacingOccurrences(of: "\n", with: "\r\n")
+private extension String {
+  /// The last `count` UTF-8 bytes, starting at a character boundary.
+  func lastBytes(_ count: Int) -> String {
+    guard utf8.count > count else { return self }
+    let tail = utf8.suffix(count).drop { $0 & 0xC0 == 0x80 }
+    return String(decoding: tail, as: UTF8.self)
   }
 }
 

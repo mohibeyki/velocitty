@@ -19,10 +19,14 @@ final class AppConfigurationTests: XCTestCase {
       waiting_style = "dotted"
       idle_style = "invalid"
       agent_border_width = -1
+      restore_session = false
       [terminal]
       font_size = 14
       """)
     XCTAssertEqual(config.interface["theme"], "light")
+    XCTAssertEqual(config.interface["restore_session"], "false")
+    XCTAssertEqual(NamespaceAppearance.defaults["restore_session"], "true")
+    XCTAssertFalse(NamespaceAppearance.validate("maybe", for: "restore_session"))
     XCTAssertEqual(config.interface["chrome_background_color"], "#112233")
     XCTAssertEqual(config.interface["agent_icon_size"], "18")
     XCTAssertEqual(config.interface["waiting_color"], "#998877")

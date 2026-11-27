@@ -325,7 +325,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     deferredSnapshotTimer = nil
     agentPollTimer?.invalidate()
     agentPollTimer = nil
-    scrollbackCapture.timer?.invalidate()
+    scrollbackCapture.stop()
     // Before any surface closes, while its text can still be read.
     saveScrollback(of: windows.flatMap(\.allPanes), blocking: true)
     secureInputOwner.update(wanted: false)
@@ -1840,7 +1840,7 @@ extension AppDelegate {
         let connected = try result.get()
         let incoming = connected.snapshot
         self.loadWorkspaceState(for: client)
-        self.adoptRecreation(connected.replacements)
+        self.adoptRecreation(connected, client: client)
         self.retryPendingClosures(client, snapshot: incoming)
         let snapshot = incoming.excluding(terminals: self.hiddenTerminalIDs)
         if snapshot.panes.isEmpty {
@@ -2788,7 +2788,7 @@ extension AppDelegate {
       do {
         let connected = try result.get()
         let incoming = connected.snapshot
-        self.adoptRecreation(connected.replacements)
+        self.adoptRecreation(connected, client: client)
         self.connectionStatus[client.endpointID] = .connected
         self.retryPendingClosures(client, snapshot: incoming)
         let authoritative = incoming.excluding(terminals: self.hiddenTerminalIDs)
@@ -2979,7 +2979,7 @@ extension AppDelegate {
     refreshCloseUndoBanner()
     guard operation.applied else { return }
     if operation.destroy { closeHistory.pending.formUnion(operation.terminalIDs) }
-    discardScrollback(of: operation.panes.filter { operation.destroy || $0.herdrTerminal == nil })
+    discardScrollback(keys: operation.panes.filter { operation.destroy || $0.herdrTerminal == nil }.map(\.scrollbackKey))
     operation.panes.forEach { $0.close() }
     guard persistCloseIntent() else { return }
     let clients = uniqueByEndpoint(operation.panes.compactMap { $0.herdrTerminal?.client })
