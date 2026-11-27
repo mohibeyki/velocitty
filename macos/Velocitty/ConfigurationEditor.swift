@@ -43,33 +43,8 @@ struct ConfigurationEditor {
 final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSTextViewDelegate, NSWindowDelegate {
   private struct Setting {
     let table: String; let key: String
-    var category: String {
-      if table == "interface" { return "Workspace" }
-      if key.hasPrefix("font") || key.hasPrefix("adjust_") { return "Font" }
-      if ["theme", "background", "foreground", "palette", "cursor", "selection", "unfocused"].contains(where: { key.hasPrefix($0) }) { return "Colors & Appearance" }
-      if ["keybind", "mouse", "clipboard", "copy", "paste", "click", "link"].contains(where: { key.hasPrefix($0) }) { return "Input & Clipboard" }
-      if ["window", "macos", "tab", "resize", "focus", "split", "quit", "confirm", "undo"].contains(where: { key.hasPrefix($0) }) { return "Windows & Tabs" }
-      if ["shell", "command", "initial_command", "working_directory", "env", "term", "scrollback"].contains(where: { key.hasPrefix($0) }) { return "Shell & Terminal" }
-      return "Advanced"
-    }
-    var summary: String {
-      if key == "agent_notifications" { return "Notify when an agent needs input or finishes. Notifications focus its terminal when clicked." }
-      if key == "restore_session" { return "Save each terminal's recent output and recreate lost herdr terminals after a reboot. Running processes are not restored." }
-      if table == "interface" { return "Workspace appearance. Terminal colors are configured separately." }
-      switch key {
-      case "font_family": return "Typeface for terminal text. Font fallback remains available in Advanced."
-      case "font_size": return "Terminal font size in points."
-      case "theme": return "Use a bundled theme, a file path, or light:Name,dark:Name for automatic appearance."
-      case "working_directory": return "Starting directory for new terminals when directory inheritance does not apply."
-      case "command", "initial_command": return "An explicit command creates standalone terminals instead of herdr sessions."
-      case "keybind": return "Keyboard bindings. This repeatable setting accepts an array of bindings."
-      case "quit_after_last_window_closed": return "Quit after closing the last window. Herdr terminals keep running."
-      case "undo_timeout": return "How long explicit terminal closes can be undone before ending the process."
-      case "background_opacity": return "Terminal background opacity, from 0 (transparent) to 1 (opaque)."
-      case "cursor_style": return "Shape of the terminal cursor. Applications can request a different shape."
-      default: return table == "interface" ? "Workspace appearance. Terminal colors are configured separately." : "Edit the value below or use the source document for advanced syntax."
-      }
-    }
+    var category: String { SettingsCatalog.category(table: table, key: key) }
+    var summary: String { SettingsCatalog.summary(table: table, key: key) }
   }
   private weak var appOwner: AppDelegate?
   private var configDocument: ConfigurationDocument
@@ -101,18 +76,7 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
     let config = appOwner.runtime?.settings ?? AppConfiguration.load()
     files = [config.source] + config.sourceFiles.filter { $0 != config.source }
     configDocument = try ConfigurationDocument(url: config.source)
-    defaults = try ConfigurationDocument(url: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
-    guard let engine = velokit_config_new() else { throw ConfigurationError("Could not load setting defaults.") }
-    defer { velokit_config_free(engine) }
-    let template = try ConfigurationTemplate.render { key in
-      guard let formatted = key.withCString({ velokit_config_format(engine, $0) }) else { throw ConfigurationError("Could not format \(key).") }
-      return String(cString: formatted)
-    }
-    defaults.text = template.split(separator: "\n", omittingEmptySubsequences: false).map { line in
-      line.hasPrefix("# ") ? String(line.dropFirst(2)) : String(line)
-    }.filter { line in
-      line.hasPrefix("[") || line.contains(" = ") || line.hasPrefix("  ") || line == "]" || line.isEmpty
-    }.joined(separator: "\n")
+    defaults = try Self.buildDefaultsDocument()
     let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 640), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
     super.init(window: window)
     window.title = "Settings"
@@ -123,11 +87,49 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
       + NamespaceAppearance.defaults.keys.sorted().map { Setting(table: "interface", key: $0) }
     let root = NSView()
     window.contentView = root
+    let controls = buildControls(appOwner: appOwner)
+    for view in controls.allViews {
+      view.translatesAutoresizingMaskIntoConstraints = false
+      root.addSubview(view)
+    }
+    activateConstraints(root: root, controls)
+    detail.font = .systemFont(ofSize: 12)
+    detail.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+    filterSettings()
+  }
+
+  /// The engine's default value for each setting, as an unsaved document for lookups.
+  private static func buildDefaultsDocument() throws -> ConfigurationDocument {
+    let document = try ConfigurationDocument(url: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+    guard let engine = velokit_config_new() else { throw ConfigurationError("Could not load setting defaults.") }
+    defer { velokit_config_free(engine) }
+    let template = try ConfigurationTemplate.render { key in
+      guard let formatted = key.withCString({ velokit_config_format(engine, $0) }) else { throw ConfigurationError("Could not format \(key).") }
+      return String(cString: formatted)
+    }
+    document.text = template.split(separator: "\n", omittingEmptySubsequences: false).map { line in
+      line.hasPrefix("# ") ? String(line.dropFirst(2)) : String(line)
+    }.filter { line in
+      line.hasPrefix("[") || line.contains(" = ") || line.hasPrefix("  ") || line == "]" || line.isEmpty
+    }.joined(separator: "\n")
+    return document
+  }
+
+  /// The controls the layout needs by name, besides the stored ones.
+  private struct Controls {
+    let list: NSScrollView, advanced: NSScrollView
+    let apply: NSButton, save: NSButton, revert: NSButton, external: NSButton
+    let rawLabel: NSTextField
+    var allViews: [NSView] = []
+  }
+
+  /// Creates the controls, wires their targets and returns them in the order they are added.
+  private func buildControls(appOwner: AppDelegate) -> Controls {
     search.placeholderString = "Search settings"
     search.delegate = self
     search.target = self
     search.action = #selector(filterSettings)
-    category.addItems(withTitles: ["All Settings", "Font", "Colors & Appearance", "Input & Clipboard", "Windows & Tabs", "Shell & Terminal", "Workspace", "Advanced"])
+    category.addItems(withTitles: ["All Settings"] + SettingsCatalog.categories)
     category.target = self; category.action = #selector(filterSettings)
     number.target = self; number.action = #selector(stepValue); number.minValue = -1_000_000; number.maxValue = 1_000_000
     color.target = self; color.action = #selector(colorValue)
@@ -177,10 +179,13 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
     let revert = NSButton(title: "Reload File", target: self, action: #selector(revertDocument))
     let external = NSButton(title: "Open in Editor", target: self, action: #selector(openExternal))
     status.textColor = .secondaryLabelColor
-    for view in [filePicker, search, category, list, detail, value, choices, enabled, reset, apply, rawLabel, advanced, status, save, revert, external, number, color, addEntry, removeEntry, diagnostics, browseThemes] {
-      view.translatesAutoresizingMaskIntoConstraints = false
-      root.addSubview(view)
-    }
+    var controls = Controls(list: list, advanced: advanced, apply: apply, save: save, revert: revert, external: external, rawLabel: rawLabel)
+    controls.allViews = [filePicker, search, category, list, detail, value, choices, enabled, reset, apply, rawLabel, advanced, status, save, revert, external, number, color, addEntry, removeEntry, diagnostics, browseThemes]
+    return controls
+  }
+
+  private func activateConstraints(root: NSView, _ controls: Controls) {
+    let (list, advanced, apply, save, revert, external, rawLabel) = (controls.list, controls.advanced, controls.apply, controls.save, controls.revert, controls.external, controls.rawLabel)
     NSLayoutConstraint.activate([
       filePicker.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16), filePicker.topAnchor.constraint(equalTo: root.topAnchor, constant: 14), filePicker.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
       search.topAnchor.constraint(equalTo: filePicker.bottomAnchor, constant: 12), search.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16), search.widthAnchor.constraint(equalToConstant: 245),
@@ -205,9 +210,6 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
       external.trailingAnchor.constraint(equalTo: revert.leadingAnchor, constant: -8), external.centerYAnchor.constraint(equalTo: save.centerYAnchor),
       status.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16), status.trailingAnchor.constraint(equalTo: external.leadingAnchor, constant: -12), status.centerYAnchor.constraint(equalTo: save.centerYAnchor), status.heightAnchor.constraint(lessThanOrEqualToConstant: 46),
     ])
-    detail.font = .systemFont(ofSize: 12)
-    detail.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
-    filterSettings()
   }
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
   func numberOfRows(in tableView: NSTableView) -> Int { filtered.count }
@@ -227,7 +229,9 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
     else { browseThemes.isHidden = true; number.isHidden = true; color.isHidden = true; addEntry.isHidden = true; removeEntry.isHidden = true; detail.stringValue = "No matching settings"; value.isEnabled = false; choices.isHidden = true; enabled.isHidden = true; reset.isEnabled = false }
   }
   func controlTextDidChange(_ obj: Notification) { filterSettings() }
-  func tableViewSelectionDidChange(_ notification: Notification) {
+  func tableViewSelectionDidChange(_ notification: Notification) { refreshControls() }
+  /// Shows the selected setting's value, controls and description.
+  private func refreshControls() {
     guard filtered.indices.contains(table.selectedRow) else { return }
     let setting = filtered[table.selectedRow]
     browseThemes.isHidden = setting.table != "terminal" || setting.key != "theme"
@@ -265,11 +269,9 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
     if let numeric = Double(normalized), numeric.isFinite {
       number.doubleValue = numeric; number.increment = normalized.contains(".") ? 0.1 : 1
     }
-    let isColor = normalized.hasPrefix("#") && normalized.count == 7 && UInt32(normalized.dropFirst(), radix: 16) != nil
-    color.isHidden = !isColor
-    if isColor, let hex = UInt32(normalized.dropFirst(), radix: 16) {
-      color.color = NSColor(rgb: hex)
-    }
+    let swatch = normalized.hasPrefix("#") ? NSColor(hex: normalized) : nil
+    color.isHidden = swatch == nil
+    if let swatch { color.color = swatch }
     let repeatable = setting.table == "terminal" && TerminalSettings.repeatable.contains(setting.key.replacingOccurrences(of: "_", with: "-"))
     addEntry.isHidden = !repeatable; removeEntry.isHidden = !repeatable
     if repeatable { enabled.isHidden = true }
@@ -349,7 +351,7 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
     do {
       try configDocument.removeValue(table: setting.table, key: setting.key)
       editor.string = configDocument.text; window?.isDocumentEdited = configDocument.hasChanges
-      tableViewSelectionDidChange(Notification(name: NSTableView.selectionDidChangeNotification))
+      refreshControls()
       status.textColor = .secondaryLabelColor
       status.stringValue = "Override removed from this file. Included files may still supply a value."
     } catch { showError(error) }
@@ -390,7 +392,7 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
       status.textColor = diagnostics.isEmpty ? .secondaryLabelColor : .systemOrange
       status.stringValue = diagnostics.isEmpty ? "Saved. Process settings apply to new terminals." : "Saved with configuration warnings. " + diagnostics.joined(separator: "\n")
       status.toolTip = status.stringValue
-      tableViewSelectionDidChange(Notification(name: NSTableView.selectionDidChangeNotification))
+      refreshControls()
     } catch { showError(error) }
   }
   private func confirmDiscard(_ proceed: @escaping () -> Void) {
@@ -414,7 +416,7 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
       filePicker.selectItem(at: index)
       editor.string = configDocument.text
       window?.isDocumentEdited = false
-      tableViewSelectionDidChange(Notification(name: NSTableView.selectionDidChangeNotification))
+      refreshControls()
       status.stringValue = ""
     } catch { showError(error) }
   }
@@ -741,28 +743,8 @@ final class ThemePickerWindow: NSWindowController, NSTableViewDataSource, NSTabl
       let config = try AppConfiguration.parseFragment(table: "terminal", key: "theme", value: ConfigurationDocument.quote(chosen), home: configuration.home, source: themeDocument.url)
       let options = try TerminalTheme.options(for: config, dark: variant.selectedSegment == 1) { diagnostics.append($0) }
       guard diagnostics.isEmpty else { throw ConfigurationError(diagnostics.joined(separator: "\n")) }
-      func color(_ hex: String?, fallback: NSColor) -> NSColor {
-        guard let hex, let rgb = UInt32(hex.trimmingCharacters(in: CharacterSet(charactersIn: "#")), radix: 16) else { return fallback }
-        return NSColor(rgb: rgb)
-      }
-      let foreground = color(options.last { $0.key == "foreground" }?.value, fallback: .white)
-      preview.backgroundColor = color(options.last { $0.key == "background" }?.value, fallback: .black)
-      let text = NSMutableAttributedString()
-      func append(_ string: String, _ tint: NSColor = .white) {
-        text.append(NSAttributedString(string: string, attributes: [.foregroundColor: tint, .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)]))
-      }
-      let palette = (0..<16).map { index in
-        color(options.last { $0.key == "palette" && $0.value.hasPrefix("\(index)=") }?.value.split(separator: "=").last.map(String.init), fallback: foreground)
-      }
-      append((chosen.isEmpty ? "Engine defaults" : chosen) + "\n\n", foreground)
-      append("~/workspace/velocitty ", palette[4]); append("main\n", palette[2])
-      append("❯ ", palette[5]); append("just build\n", foreground)
-      append("✓ Build completed\n\n", palette[2])
-      append("const ", palette[5]); append("session", foreground); append(" = ", palette[6]); append("\"velocitty\";\n", palette[3])
-      append("// Your agents, one window.\n\n", palette[8])
-      append("Error  ", palette[1]); append("Warning  ", palette[3]); append("Success\n\n", palette[2])
-      for row in 0..<2 { for index in row*8..<row*8+8 { append("██ ", palette[index]) }; append("\n") }
-      preview.textStorage?.setAttributedString(text)
+      preview.backgroundColor = NSColor(hex: options.last { $0.key == "background" }?.value) ?? .black
+      preview.textStorage?.setAttributedString(previewText(options: options))
       selection.stringValue = mode.indexOfSelectedItem == 0 ? "Theme: " + (single.isEmpty ? "None" : single) : "Light: " + light + "\nDark: " + dark
       apply.isEnabled = true
       status.textColor = .secondaryLabelColor; status.stringValue = "Preview only until applied. Explicit terminal colors override theme colors."
@@ -771,6 +753,27 @@ final class ThemePickerWindow: NSWindowController, NSTableViewDataSource, NSTabl
       apply.isEnabled = false; status.textColor = .systemRed; status.stringValue = error.localizedDescription
       status.toolTip = status.stringValue
     }
+  }
+  /// A sample terminal session drawn in the theme's foreground and palette colors.
+  private func previewText(options: [TerminalOption]) -> NSAttributedString {
+    func color(_ hex: String?, fallback: NSColor) -> NSColor { NSColor(hex: hex) ?? fallback }
+    let foreground = color(options.last { $0.key == "foreground" }?.value, fallback: .white)
+    let text = NSMutableAttributedString()
+    func append(_ string: String, _ tint: NSColor = .white) {
+      text.append(NSAttributedString(string: string, attributes: [.foregroundColor: tint, .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)]))
+    }
+    let palette = (0..<16).map { index in
+      color(options.last { $0.key == "palette" && $0.value.hasPrefix("\(index)=") }?.value.split(separator: "=").last.map(String.init), fallback: foreground)
+    }
+    append((chosen.isEmpty ? "Engine defaults" : chosen) + "\n\n", foreground)
+    append("~/workspace/velocitty ", palette[4]); append("main\n", palette[2])
+    append("❯ ", palette[5]); append("just build\n", foreground)
+    append("✓ Build completed\n\n", palette[2])
+    append("const ", palette[5]); append("session", foreground); append(" = ", palette[6]); append("\"velocitty\";\n", palette[3])
+    append("// Your agents, one window.\n\n", palette[8])
+    append("Error  ", palette[1]); append("Warning  ", palette[3]); append("Success\n\n", palette[2])
+    for row in 0..<2 { for index in row*8..<row*8+8 { append("██ ", palette[index]) }; append("\n") }
+    return text
   }
   @objc private func saveTheme() {
     do {

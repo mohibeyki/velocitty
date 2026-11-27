@@ -38,31 +38,34 @@ final class CommandPalette: NSPanel, NSTextFieldDelegate, NSWindowDelegate, NSTa
     hasShadow = true
     delegate = self
     let native = NativeSettings(config: terminal.config)
-    entries = native.commands.compactMap { command in
-      guard command.action.withCString({ velokit_action_supported($0) }), command.title != "Ghostty"
-      else { return nil }
-      return Entry(title: command.title, detail: command.detail, action: command.action)
-    }
-    if provider == nil {
-      entries += [Entry(title: "Terminal Theme…", detail: "Browse and preview terminal themes.", action: "velocitty:themes"),
-        Entry(title: "Herdr Connections…", detail: "Manage local and remote herdr instances.", action: "velocitty:connections")]
-    }
-    if provider == nil, terminal.session?.herdrTerminal != nil {
-      let controller = terminal.session?.windowController
+    if let provider {
+      entries = provider()
+    } else {
+      entries = native.commands.compactMap { command in
+        guard command.action.withCString({ velokit_action_supported($0) }), command.title != "Ghostty"
+        else { return nil }
+        return Entry(title: command.title, detail: command.detail, action: command.action)
+      }
       entries += [
-        Entry(title: "Show Agents", detail: "Find agents across all spaces and connections.", action: "velocitty:agents", run: { [weak controller] in controller?.showAgents() }),
-        Entry(title: "Next Agent Waiting for Input", detail: "Focus the exact terminal that needs attention.", action: "velocitty:next-waiting", run: { [weak controller] in controller?.selectNextWaitingAgent() }),
-        Entry(title: "New Tab on Connection…", detail: "Choose a local or remote server.", action: "velocitty:new-connected-tab", run: { [weak controller] in controller?.chooseConnection() }),
-        Entry(title: "Split Right on Connection…", detail: "Add a pane from any enabled server.", action: "velocitty:split-connected-right", run: { [weak controller] in controller?.chooseConnection(split: "right") }),
-        Entry(title: "Split Down on Connection…", detail: "Add a pane from any enabled server.", action: "velocitty:split-connected-down", run: { [weak controller] in controller?.chooseConnection(split: "down") }),
-        Entry(title: "Show Tab Alongside…", detail: "Show another namespace or server beside this tab.", action: "velocitty:alongside"),
-        Entry(title: "Stop Showing Alongside", detail: "Return to one presented tab without closing terminals.", action: "velocitty:stop-alongside"),
-        Entry(title: "Move Tab to Namespace…", detail: "Move all panes while retaining their running processes.", action: "velocitty:move-tab"),
-        Entry(title: "Move Pane to Tab…", detail: "Move this terminal into another tab.", action: "velocitty:move-pane"),
-        Entry(title: "Move Pane to New Tab", detail: "Detach this pane into its own tab.", action: "velocitty:detach-pane"),
+        terminalEntry("Terminal Theme…", "Browse and preview terminal themes.", "velocitty:themes") { $0.session?.windowController?.owner?.showThemePicker() },
+        terminalEntry("Herdr Connections…", "Manage local and remote herdr instances.", "velocitty:connections") { $0.session?.windowController?.owner?.showConnections() },
       ]
+      if terminal.session?.herdrTerminal != nil {
+        let controller = terminal.session?.windowController
+        entries += [
+          Entry(title: "Show Agents", detail: "Find agents across all spaces and connections.", action: "velocitty:agents", run: { [weak controller] in controller?.showAgents() }),
+          Entry(title: "Next Agent Waiting for Input", detail: "Focus the exact terminal that needs attention.", action: "velocitty:next-waiting", run: { [weak controller] in controller?.selectNextWaitingAgent() }),
+          Entry(title: "New Tab on Connection…", detail: "Choose a local or remote server.", action: "velocitty:new-connected-tab", run: { [weak controller] in controller?.chooseConnection() }),
+          Entry(title: "Split Right on Connection…", detail: "Add a pane from any enabled server.", action: "velocitty:split-connected-right", run: { [weak controller] in controller?.chooseConnection(split: "right") }),
+          Entry(title: "Split Down on Connection…", detail: "Add a pane from any enabled server.", action: "velocitty:split-connected-down", run: { [weak controller] in controller?.chooseConnection(split: "down") }),
+          terminalEntry("Show Tab Alongside…", "Show another namespace or server beside this tab.", "velocitty:alongside") { $0.session?.windowController?.chooseCompanion() },
+          terminalEntry("Stop Showing Alongside", "Return to one presented tab without closing terminals.", "velocitty:stop-alongside") { $0.session?.windowController?.stopAlongside() },
+          terminalEntry("Move Tab to Namespace…", "Move all panes while retaining their running processes.", "velocitty:move-tab") { $0.session?.windowController?.chooseTabNamespace() },
+          terminalEntry("Move Pane to Tab…", "Move this terminal into another tab.", "velocitty:move-pane") { $0.session?.windowController?.choosePaneTab() },
+          terminalEntry("Move Pane to New Tab", "Detach this pane into its own tab.", "velocitty:detach-pane") { $0.session?.windowController?.movePaneToNewTab() },
+        ]
+      }
     }
-    if let provider { entries = provider() }
     let color = native.background.usingColorSpace(.sRGB) ?? .windowBackgroundColor
     let dark = 0.2126 * color.redComponent + 0.7152 * color.greenComponent
       + 0.0722 * color.blueComponent < 0.5
@@ -142,6 +145,15 @@ final class CommandPalette: NSPanel, NSTextFieldDelegate, NSWindowDelegate, NSTa
     }
   }
   deinit { refreshTimer?.invalidate() }
+
+  /// An entry that returns focus to the terminal, then runs `body` against it.
+  private func terminalEntry(_ title: String, _ detail: String, _ action: String, body: @escaping (TerminalView) -> Void) -> Entry {
+    Entry(title: title, detail: detail, action: action, run: { [weak self] in
+      guard let terminal = self?.terminal else { return }
+      terminal.window?.makeFirstResponder(terminal)
+      body(terminal)
+    })
+  }
   func numberOfRows(in tableView: NSTableView) -> Int { filtered.count }
   func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView?
   {
@@ -249,36 +261,19 @@ final class CommandPalette: NSPanel, NSTextFieldDelegate, NSWindowDelegate, NSTa
   @objc func runSelected() {
     guard filtered.indices.contains(table.selectedRow) else { return }
     let entry = filtered[table.selectedRow]
-    let action = entry.action
     close()
     if let run = entry.run { run(); return }
     terminal?.window?.makeFirstResponder(terminal)
-    switch action {
-    case "velocitty:themes": terminal?.session?.windowController?.owner?.showThemePicker()
-    case "velocitty:connections": terminal?.session?.windowController?.owner?.showConnections()
-    case "velocitty:alongside": terminal?.session?.windowController?.chooseCompanion()
-    case "velocitty:stop-alongside": terminal?.session?.windowController?.stopAlongside()
-    case "velocitty:move-tab": terminal?.session?.windowController?.chooseTabNamespace()
-    case "velocitty:move-pane": terminal?.session?.windowController?.choosePaneTab()
-    case "velocitty:detach-pane": terminal?.session?.windowController?.movePaneToNewTab()
-    default: terminal?.performSurfaceAction(action)
-    }
+    terminal?.performSurfaceAction(entry.action)
   }
 }
 
 private final class PaletteRow: NSTableRowView {
-  private var hover = false
-  private var tracking: NSTrackingArea?
-  override func updateTrackingAreas() {
-    if let tracking { removeTrackingArea(tracking) }
-    let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
-      owner: self)
-    addTrackingArea(area)
-    tracking = area
-    super.updateTrackingAreas()
-  }
-  override func mouseEntered(with event: NSEvent) { hover = true; needsDisplay = true }
-  override func mouseExited(with event: NSEvent) { hover = false; needsDisplay = true }
+  private lazy var hoverTracker = HoverTracker(self, syncsWithPointer: false)
+  private var hover: Bool { hoverTracker.isHovered }
+  override func updateTrackingAreas() { hoverTracker.update(); super.updateTrackingAreas() }
+  override func mouseEntered(with event: NSEvent) { hoverTracker.setHovered(true) }
+  override func mouseExited(with event: NSEvent) { hoverTracker.setHovered(false) }
   override var isSelected: Bool { didSet { needsDisplay = true } }
   override func drawBackground(in dirtyRect: NSRect) {
     if isSelected || hover {

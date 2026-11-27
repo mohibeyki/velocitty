@@ -407,8 +407,7 @@ extension TerminalView {
     let strings = (pasteboard.pasteboardItems ?? []).compactMap { item -> String? in
       if let value = item.propertyList(forType: .fileURL),
         let url = NSURL(pasteboardPropertyList: value, ofType: .fileURL) as URL?, url.isFileURL {
-        // ShellInput appends a separator; join pasteboard items ourselves here.
-        return String(ShellInput.paths([url.path]).dropLast())
+        return ShellInput.quote(url.path)
       }
       return item.string(forType: .string)
     }

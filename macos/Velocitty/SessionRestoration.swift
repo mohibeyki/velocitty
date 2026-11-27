@@ -197,10 +197,7 @@ extension AppDelegate {
   /// For a result that will not be adopted: the old text stays with the saved workspace, which still
   /// names the old terminals, and what was prepared for the new ones is removed.
   func abandonRecreation(_ connected: ConnectionResult) {
-    for shell in connected.shells where shell.replacedID != nil || shell.file != nil {
-      if let file = shell.file { try? FileManager.default.removeItem(at: file) }
-      if shell.replacedID != nil { discardScrollback(keys: [shell.pane.terminal_id]) }
-    }
+    HerdrClient.abandon(connected.shells) { discardScrollback(keys: $0) }
   }
 }
 
@@ -238,7 +235,7 @@ extension HerdrClient {
       return ConnectionResult(snapshot: created.panes.isEmpty ? snapshot : try self.snapshot(),
         replacements: rebound.merging(created.panes) { first, _ in first }, shells: shells)
     } catch {
-      Self.abandon(shells, scrollback: scrollback)
+      Self.abandon(shells) { scrollback.remove($0) }
       throw error
     }
   }
@@ -261,11 +258,12 @@ extension HerdrClient {
     return (created, shells)
   }
 
-  /// Removes what prepareShell wrote, when the shells will never be shown.
-  static func abandon(_ shells: [ShellRestore], scrollback: ScrollbackStore) {
+  /// Removes what prepareShell wrote, when the shells will never be shown. `remove` deletes the
+  /// copied text of the new terminals.
+  static func abandon(_ shells: [ShellRestore], remove: ([String]) -> Void) {
     for shell in shells {
       if let file = shell.file { try? FileManager.default.removeItem(at: file) }
-      if shell.replacedID != nil { scrollback.remove([shell.pane.terminal_id]) }
+      if shell.replacedID != nil { remove([shell.pane.terminal_id]) }
     }
   }
 

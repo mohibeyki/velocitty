@@ -19,6 +19,8 @@ public final class ConfigurationDocument {
   public var hasChanges: Bool { text != baselineText }
 
   private struct Assignment { let table: String; let key: String; let start: Int; let value: Range<Int> }
+  private typealias Edit = (range: Range<Int>, replacement: String)
+
   private func assignments() -> ([Assignment], [String: Int], [String: Int]) {
     let bytes = Array(text.utf8)
     var table = "", position = 0
@@ -39,25 +41,29 @@ public final class ConfigurationDocument {
           table = String(trimmed[trimmed.index(after: trimmed.startIndex)..<end]).trimmingCharacters(in: .whitespaces)
         } else { table = "<unsupported>" }
         starts[table] = lineStart
-      } else if !trimmed.hasPrefix("#"), let equals = bytes[position..<lineEnd].firstIndex(of: 61) {
-        var key = String(decoding: bytes[position..<equals], as: UTF8.self).trimmingCharacters(in: .whitespaces)
-        if (key.hasPrefix("\"") && key.hasSuffix("\"")) || (key.hasPrefix("'") && key.hasSuffix("'")) { key = String(key.dropFirst().dropLast()) }
-        if !key.isEmpty && key.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) || $0 == "_" || $0 == "-" }) {
-          var start = equals + 1
-          while start < bytes.count && [9, 32].contains(bytes[start]) { start += 1 }
-          if let end = Self.valueEnd(bytes, from: start) {
-            entries.append(.init(table: table, key: key.replacingOccurrences(of: "-", with: "_"), start: lineStart, value: start..<end))
-            position = end
-            while position < bytes.count && bytes[position] != 10 { position += 1 }
-            position = min(bytes.count, position + 1)
-            continue
-          }
-        }
+      } else if !trimmed.hasPrefix("#"), let entry = Self.assignment(in: bytes, table: table, lineStart: lineStart, lineEnd: lineEnd) {
+        entries.append(entry)
+        position = entry.value.upperBound
+        while position < bytes.count && bytes[position] != 10 { position += 1 }
+        position = min(bytes.count, position + 1)
+        continue
       }
       position = min(bytes.count, lineEnd + 1)
     }
     ends[table] = bytes.count
     return (entries, ends, starts)
+  }
+
+  /// The `key = value` assignment starting a line, when the key and the value are well formed.
+  private static func assignment(in bytes: [UInt8], table: String, lineStart: Int, lineEnd: Int) -> Assignment? {
+    guard let equals = bytes[lineStart..<lineEnd].firstIndex(of: 61) else { return nil }
+    var key = String(decoding: bytes[lineStart..<equals], as: UTF8.self).trimmingCharacters(in: .whitespaces)
+    if (key.hasPrefix("\"") && key.hasSuffix("\"")) || (key.hasPrefix("'") && key.hasSuffix("'")) { key = String(key.dropFirst().dropLast()) }
+    guard !key.isEmpty, key.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) || $0 == "_" || $0 == "-" }) else { return nil }
+    var start = equals + 1
+    while start < bytes.count && [9, 32].contains(bytes[start]) { start += 1 }
+    guard let end = valueEnd(bytes, from: start) else { return nil }
+    return Assignment(table: table, key: key.replacingOccurrences(of: "-", with: "_"), start: lineStart, value: start..<end)
   }
 
   private static func valueEnd(_ bytes: [UInt8], from start: Int) -> Int? {
@@ -136,57 +142,76 @@ public final class ConfigurationDocument {
     try HerdrConnection.validateList(connections)
     let parsed = try AppConfiguration.parse(Data(text.utf8), source: url)
     let (entries, ends, starts) = assignments()
-    let old = parsed.connections ?? []
-    func fields(_ connection: HerdrConnection) -> [(String, String)] {
-      var values = [("id", Self.quote(connection.id)), ("name", Self.quote(connection.label)),
-        ("session", Self.quote(connection.session)), ("enabled", connection.enabled ? "true" : "false")]
-      if let host = connection.target { values.append(("host", Self.quote(host))) }
-      return values
-    }
-    var edits: [(Range<Int>, String)] = []
+    var edits: [Edit]
     if let inline = entries.first(where: { $0.table.isEmpty && $0.key == "connections" }) {
-      let value = "[" + connections.map { "{ " + fields($0).map { $0.0 + " = " + $0.1 }.joined(separator: ", ") + " }" }.joined(separator: ", ") + "]"
-      edits.append((inline.value, value))
+      edits = [inlineConnectionsEdit(inline, connections)]
     } else {
-      let sections = starts.keys.filter { $0.hasPrefix("connections#") }
-      guard sections.count == old.count else { throw ConfigurationError("Use the source editor to fix or edit this connections list first.") }
-      for (index, previous) in old.enumerated() {
-        let section = "connections#\(index)"
-        guard let start = starts[section], let end = ends[section] else { throw ConfigurationError("Unsupported connections syntax. Use the source editor.") }
-        guard let next = connections.first(where: { $0.id == previous.id }) else {
-          edits.append((start..<end, "")); continue
-        }
-        let assignments = entries.filter { $0.table == section }
-        var missing = ""
-        for (key, value) in fields(next) {
-          if let assignment = assignments.first(where: { $0.key == key }) { edits.append((assignment.value, value)) }
-          else { missing += "\(key) = \(value)\n" }
-        }
-        if next.target == nil, let host = assignments.first(where: { $0.key == "host" }) {
-          edits.append((host.start..<host.value.upperBound, ""))
-        }
-        if !missing.isEmpty { edits.append((end..<end, "\n" + missing)) }
-      }
-      for connection in connections where !old.contains(where: { $0.id == connection.id }) {
-        edits.append((text.utf8.count..<text.utf8.count, "\n[[connections]]\n" + fields(connection).map { $0.0 + " = " + $0.1 + "\n" }.joined()))
-      }
-      if connections.isEmpty {
-        let rootEnd = ends[""] ?? 0
-        let prefix = rootEnd > 0 && Array(text.utf8)[rootEnd - 1] != 10 ? "\n" : ""
-        edits.append((rootEnd..<rootEnd, prefix + "connections = []\n"))
-      }
+      edits = try sectionEdits(old: parsed.connections ?? [], new: connections, entries: entries, ends: ends, starts: starts)
+      edits += appendedSections(old: parsed.connections ?? [], new: connections, rootEnd: ends[""] ?? 0)
     }
     var bytes = Array(text.utf8)
-    for (range, replacement) in edits.enumerated().sorted(by: {
-      if $0.element.0.lowerBound != $1.element.0.lowerBound { return $0.element.0.lowerBound > $1.element.0.lowerBound }
-      if $0.element.0.count != $1.element.0.count { return $0.element.0.count > $1.element.0.count }
+    for edit in edits.enumerated().sorted(by: {
+      if $0.element.range.lowerBound != $1.element.range.lowerBound { return $0.element.range.lowerBound > $1.element.range.lowerBound }
+      if $0.element.range.count != $1.element.range.count { return $0.element.range.count > $1.element.range.count }
       return $0.offset > $1.offset
-    }).map(\.element) { bytes.replaceSubrange(range, with: replacement.utf8) }
+    }).map(\.element) { bytes.replaceSubrange(edit.range, with: edit.replacement.utf8) }
     let updated = String(decoding: bytes, as: UTF8.self)
     guard try AppConfiguration.parse(Data(updated.utf8), source: url).connections == connections else {
       throw ConfigurationError("The connections could not be updated without changing their meaning. Use the source editor.")
     }
     text = updated
+  }
+
+  private static func fields(_ connection: HerdrConnection) -> [(key: String, value: String)] {
+    var values = [("id", quote(connection.id)), ("name", quote(connection.label)),
+      ("session", quote(connection.session)), ("enabled", connection.enabled ? "true" : "false")]
+    if let host = connection.target { values.append(("host", quote(host))) }
+    return values
+  }
+
+  /// `connections = [...]` at the top level is replaced as a whole.
+  private func inlineConnectionsEdit(_ inline: Assignment, _ connections: [HerdrConnection]) -> Edit {
+    let items = connections.map { "{ " + Self.fields($0).map { $0.key + " = " + $0.value }.joined(separator: ", ") + " }" }
+    return (inline.value, "[" + items.joined(separator: ", ") + "]")
+  }
+
+  /// Updates and removals of the existing `[[connections]]` sections.
+  private func sectionEdits(old: [HerdrConnection], new connections: [HerdrConnection], entries: [Assignment], ends: [String: Int], starts: [String: Int]) throws -> [Edit] {
+    guard starts.keys.filter({ $0.hasPrefix("connections#") }).count == old.count else {
+      throw ConfigurationError("Use the source editor to fix or edit this connections list first.")
+    }
+    var edits: [Edit] = []
+    for (index, previous) in old.enumerated() {
+      let section = "connections#\(index)"
+      guard let start = starts[section], let end = ends[section] else { throw ConfigurationError("Unsupported connections syntax. Use the source editor.") }
+      guard let next = connections.first(where: { $0.id == previous.id }) else {
+        edits.append((start..<end, "")); continue
+      }
+      let assignments = entries.filter { $0.table == section }
+      var missing = ""
+      for (key, value) in Self.fields(next) {
+        if let assignment = assignments.first(where: { $0.key == key }) { edits.append((assignment.value, value)) }
+        else { missing += "\(key) = \(value)\n" }
+      }
+      if next.target == nil, let host = assignments.first(where: { $0.key == "host" }) {
+        edits.append((host.start..<host.value.upperBound, ""))
+      }
+      if !missing.isEmpty { edits.append((end..<end, "\n" + missing)) }
+    }
+    return edits
+  }
+
+  /// New `[[connections]]` sections at the end, or an explicit empty list when none remain.
+  private func appendedSections(old: [HerdrConnection], new connections: [HerdrConnection], rootEnd: Int) -> [Edit] {
+    let endOfText = text.utf8.count
+    var edits: [Edit] = connections.filter { connection in !old.contains { $0.id == connection.id } }.map { connection in
+      (endOfText..<endOfText, "\n[[connections]]\n" + Self.fields(connection).map { $0.key + " = " + $0.value + "\n" }.joined())
+    }
+    if connections.isEmpty {
+      let prefix = rootEnd > 0 && Array(text.utf8)[rootEnd - 1] != 10 ? "\n" : ""
+      edits.append((rootEnd..<rootEnd, prefix + "connections = []\n"))
+    }
+    return edits
   }
 
   public func save() throws {

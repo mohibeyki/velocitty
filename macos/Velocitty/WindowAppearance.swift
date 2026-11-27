@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0
 import AppKit
 import Darwin
+import VelocittyConfiguration
 
 // Numeric blur follows the same WindowServer API used by upstream's macOS host.
 // Resolve it dynamically so an unavailable private symbol cannot prevent launch.
@@ -51,6 +52,12 @@ enum WindowAppearance {
 }
 
 extension NSColor {
+  /// An opaque sRGB color from "#RRGGBB", or nil when the text is not exactly six hex digits.
+  convenience init?(hex: String?) {
+    guard let hex, let rgb = NamespaceAppearance.rgb(hex) else { return nil }
+    self.init(rgb: rgb)
+  }
+
   /// An opaque sRGB color from a packed 0xRRGGBB value.
   convenience init(rgb hex: UInt32) {
     self.init(srgbRed: CGFloat((hex >> 16) & 255) / 255, green: CGFloat((hex >> 8) & 255) / 255, blue: CGFloat(hex & 255) / 255, alpha: 1)

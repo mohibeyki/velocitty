@@ -87,7 +87,7 @@ final class TerminalSession {
 
   func suspendConnection(_ message: String) {
     connectionSuspended = true
-    recoveryTimer?.invalidate(); recoveryGeneration = UUID(); recovering = false
+    cancelRecoveryTimers(); recoveryGeneration = UUID(); recovering = false
     releaseSurface()
     if view == nil { _ = createView() }
     if chrome == nil, let view { chrome = TerminalChrome(view) }
@@ -105,13 +105,21 @@ final class TerminalSession {
   }
 
   private var recoveryTimer: Timer?
+  /// Resets the retry budget once a replacement attachment has stayed alive.
+  private var attemptResetTimer: Timer?
   private var recoveryGeneration = UUID()
   private var recoveryAttempts = 0
   private(set) var recovering = false
 
+  private func cancelRecoveryTimers() {
+    recoveryTimer?.invalidate(); recoveryTimer = nil
+    attemptResetTimer?.invalidate(); attemptResetTimer = nil
+  }
+
   func attachmentExited() {
     guard !closed, !connectionSuspended, herdrTerminal?.client.isEnabled == true, windowController?.closing == false,
       windowController?.owner?.terminating != true, !recovering else { return }
+    attemptResetTimer?.invalidate(); attemptResetTimer = nil
     recovering = true
     recoveryGeneration = UUID()
     checkAttachment(generation: recoveryGeneration)
@@ -120,7 +128,7 @@ final class TerminalSession {
   func retryAttachment() {
     guard !closed, herdrTerminal?.client.isEnabled == true else { return }
     connectionSuspended = false
-    recoveryTimer?.invalidate()
+    cancelRecoveryTimers()
     recoveryAttempts = 0
     recovering = true
     recoveryGeneration = UUID()
@@ -156,6 +164,7 @@ final class TerminalSession {
     let delay = min(10, pow(2, Double(recoveryAttempts)))
     recoveryAttempts += 1
     chrome?.showConnectionStatus("Disconnected · retrying in \(Int(delay))s", retry: true)
+    recoveryTimer?.invalidate()
     recoveryTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
       guard let self, !self.closed, self.recoveryGeneration == generation else { return }
       if canAttach {
@@ -172,7 +181,8 @@ final class TerminalSession {
           self.view?.updateFocus()
           // A process launch isn't an attachment acknowledgement. Keep the retry
           // budget until the replacement has remained alive for a while.
-          self.recoveryTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: false) { [weak self] _ in
+          self.attemptResetTimer?.invalidate()
+          self.attemptResetTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: false) { [weak self] _ in
             guard let self, !self.recovering else { return }
             self.recoveryAttempts = 0
           }
@@ -237,7 +247,7 @@ final class TerminalSession {
 
   func close() {
     guard !closed else { return }
-    recoveryTimer?.invalidate()
+    cancelRecoveryTimers()
     recoveryGeneration = UUID()
     chrome?.progress.clear()
     chrome?.fadeTimer?.invalidate()

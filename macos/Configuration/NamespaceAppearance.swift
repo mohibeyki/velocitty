@@ -18,12 +18,19 @@ public enum NamespaceAppearance {
     "unknown_color": "#666666", "unknown_style": "dotted",
   ]
 
+  /// Packed 0xRRGGBB from exactly six hex digits, with an optional leading "#".
+  public static func rgb(_ value: String) -> UInt32? {
+    let digits = value.hasPrefix("#") ? value.dropFirst() : Substring(value)
+    guard digits.utf8.count == 6, digits.utf8.allSatisfy({ $0.isASCIIHexDigit }) else { return nil }
+    return UInt32(digits, radix: 16)
+  }
+
   public static func validate(_ value: String, for key: String) -> Bool {
     guard defaults[key] != nil else { return false }
     if key == "agent_notifications" || key == "restore_session" { return ["true", "false"].contains(value) }
     if key == "theme" { return ["dark", "light", "auto"].contains(value) }
     if key.hasSuffix("_color") {
-      return value.count == 7 && value.first == "#" && UInt32(value.dropFirst(), radix: 16) != nil
+      return value.hasPrefix("#") && rgb(value) != nil
     }
     if key.hasSuffix("_style") { return ["solid", "dotted", "animated", "none"].contains(value) }
     guard let number = Double(value), number.isFinite else { return false }
@@ -34,5 +41,11 @@ public enum NamespaceAppearance {
     case "agent_animation_duration": return (0.4...10).contains(number)
     default: return false
     }
+  }
+}
+
+extension UInt8 {
+  fileprivate var isASCIIHexDigit: Bool {
+    (0x30...0x39).contains(self) || (0x41...0x46).contains(self) || (0x61...0x66).contains(self)
   }
 }

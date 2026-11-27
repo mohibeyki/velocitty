@@ -1,6 +1,25 @@
 // SPDX-License-Identifier: GPL-3.0
 import Foundation
 
+/// Velocitty connection preferences do not change herdr's global machine catalog.
+public struct HerdrConnection: Codable, Equatable, Sendable {
+  public var id: String
+  public var label: String
+  public var session: String
+  public var target: String?
+  public var enabled: Bool
+  public init(id: String, label: String, session: String, target: String? = nil, enabled: Bool = true) {
+    self.id = id; self.label = label; self.session = session; self.target = target; self.enabled = enabled
+  }
+  public static let local = HerdrConnection(id: "local", label: "Local", session: "velocitty")
+  public func validate() throws {
+    guard !id.isEmpty, !id.contains("::"), (id != "local" || (target == nil && session == "velocitty")), !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+      !session.isEmpty, session.range(of: "^[a-zA-Z0-9_-]+$", options: .regularExpression) != nil,
+      target.map({ !$0.isEmpty && !$0.hasPrefix("-") && !$0.contains(where: { $0.isWhitespace || $0.isNewline }) }) ?? true
+    else { throw ConfigurationError("Use a name, a session containing letters, numbers, hyphens or underscores, and an SSH destination such as user@host.") }
+  }
+}
+
 struct ConnectionDefinition: Decodable {
   let id: String
   let name: String?

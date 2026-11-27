@@ -64,10 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     closeHistory.pending.union(closeHistory.closed.filter { $0.applied && $0.destroy }.flatMap(\.terminalIDs))
   }
 
-
-  func requestAgentPoll() { pollAgentSnapshots() }
-
-  private func pollAgentSnapshots() {
+  func pollAgentSnapshots() {
     guard !terminating else { return }
     let clients = uniqueByEndpoint(windows.filter { !$0.closing }.flatMap(\.allPanes)
       .compactMap { $0.herdrTerminal?.client }.filter(\.isEnabled)).values
@@ -1133,7 +1130,6 @@ final class TerminalWindowController: NSObject, NSWindowDelegate, NSToolbarDeleg
     updateSecureInput(forceOff: true)
     clearProgress()
     for tab in allPanes { tab.close() }
-    for namespace in namespaces { namespace.tabs.removeAll() }
     namespaces.removeAll()
     pendingTabClosures.removeAll()
     window = nil
@@ -2199,7 +2195,7 @@ extension AppDelegate {
       if let old = client(for: profile.id), !old.isPlaceholder,
         old.machine?.target != profile.target || old.sessionName != profile.session {
         // Saved terminal references belong to their original server, even when offline.
-        if let client = client(for: profile.id) { suspendConnection(client) }
+        suspendConnection(old)
         connectionStatus[profile.id] = .failed("Host/session changed. Use a new connection id to retain the original terminals.")
         continue
       }
@@ -2272,22 +2268,13 @@ extension AppDelegate {
     let wasRestoring = restoringWorkspace
     restoringWorkspace = true
     defer { restoringWorkspace = wasRestoring }
+    // Terminals already shown, hidden or retained must not be recreated. Grows as panes are added.
+    var unavailable = attachedTerminalIDs.union(hiddenTerminalIDs).union(retainedTerminalIDs)
     for group in state.windows ?? [] {
       var controller = windows.first { $0.workspaceWindowID == group.id }
       for saved in state.namespaces where group.namespaceIDs.contains(saved.id) {
         for tab in saved.tabs {
-          guard let allRecords = tab.panes else { continue }
-          let attached = attachedTerminalIDs
-          let records = allRecords.filter { !hiddenTerminalIDs.contains($0.terminalID) && !retainedTerminalIDs.contains($0.terminalID) && !attached.contains($0.terminalID) }
-          var panes: [TerminalSession] = []
-          for record in records {
-            guard let client = client(for: record.connectionID), !clientIsAvailable(record.connectionID) else { continue }
-            let pane = runtime.makeSession()
-            pane.herdrTerminal = .init(client: client, pane: .init(pane_id: record.id, terminal_id: record.terminalID, workspace_id: record.workspaceID, tab_id: record.tabID ?? tab.id, cwd: record.cwd))
-            pane.currentDirectory = record.cwd; pane.tabTitle = tab.title
-            pane.suspendConnection(client.endpointLabel + (client.isEnabled ? " · Disconnected" : " · Disabled"))
-            panes.append(pane)
-          }
+          let panes = suspendedPanes(for: tab, excluding: unavailable, runtime: runtime)
           guard let first = panes.first else { continue }
           if controller == nil {
             let created = TerminalWindowController(session: first, owner: self)
@@ -2297,15 +2284,8 @@ extension AppDelegate {
             created.persistenceReady = workspacePersistenceEnabled; controller = created
           }
           guard let controller else { continue }
-          let space = controller.namespaces.first { $0.id == saved.id } ?? TerminalNamespace(name: saved.name ?? "Namespace", session: first)
-          space.id = saved.id
-          if !controller.namespaces.contains(where: { $0 === space }) { controller.namespaces.append(space) }
-          let restored = space.tabs.first { $0.herdrID == tab.id } ?? TerminalTab(first)
-          restored.herdrID = tab.id
-          restored.panes += panes.filter { pane in !restored.panes.contains { $0 === pane } }; restored.title = tab.title
-          restored.localLayout = tab.layout
-          if !space.tabs.contains(where: { $0 === restored }) { space.tabs.append(restored) }
-          panes.forEach { $0.windowController = controller }
+          merge(panes: panes, of: tab, in: saved, into: controller, first: first)
+          unavailable.formUnion(panes.compactMap { $0.herdrTerminal?.pane.terminal_id })
         }
       }
       if let controller {
@@ -2314,6 +2294,32 @@ extension AppDelegate {
         controller.persistedNamespaceIDs = Set(controller.namespaces.compactMap(\.id))
       }
     }
+  }
+
+  /// Suspended placeholder panes for the saved records whose connection is unavailable.
+  private func suspendedPanes(for tab: WorkspaceState.Tab, excluding unavailable: Set<String>, runtime: TerminalRuntime) -> [TerminalSession] {
+    var panes: [TerminalSession] = []
+    for record in tab.panes ?? [] where !unavailable.contains(record.terminalID) {
+      guard let client = client(for: record.connectionID), !clientIsAvailable(record.connectionID) else { continue }
+      let pane = runtime.makeSession()
+      pane.herdrTerminal = .init(client: client, pane: .init(pane_id: record.id, terminal_id: record.terminalID, workspace_id: record.workspaceID, tab_id: record.tabID ?? tab.id, cwd: record.cwd))
+      pane.currentDirectory = record.cwd; pane.tabTitle = tab.title
+      pane.suspendConnection(client.endpointLabel + (client.isEnabled ? " · Disconnected" : " · Disabled"))
+      panes.append(pane)
+    }
+    return panes
+  }
+
+  private func merge(panes: [TerminalSession], of tab: WorkspaceState.Tab, in saved: WorkspaceState.Namespace, into controller: TerminalWindowController, first: TerminalSession) {
+    let space = controller.namespaces.first { $0.id == saved.id } ?? TerminalNamespace(name: saved.name ?? "Namespace", session: first)
+    space.id = saved.id
+    if !controller.namespaces.contains(where: { $0 === space }) { controller.namespaces.append(space) }
+    let restored = space.tabs.first { $0.herdrID == tab.id } ?? TerminalTab(first)
+    restored.herdrID = tab.id
+    restored.panes += panes.filter { pane in !restored.panes.contains { $0 === pane } }; restored.title = tab.title
+    restored.localLayout = tab.layout
+    if !space.tabs.contains(where: { $0 === restored }) { space.tabs.append(restored) }
+    panes.forEach { $0.windowController = controller }
   }
 }
 

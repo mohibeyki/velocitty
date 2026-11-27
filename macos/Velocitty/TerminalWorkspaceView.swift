@@ -23,7 +23,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     return defaults.merging(controller?.session?.settings.interface ?? [:]) { _, custom in custom }
   }
   func chromeColor(_ key: String) -> NSColor {
-    NSColor(rgb: UInt32((appearanceValues[key] ?? NamespaceAppearance.defaults[key] ?? "#000000").dropFirst(), radix: 16) ?? 0)
+    NSColor(hex: appearanceValues[key]) ?? NSColor(hex: NamespaceAppearance.defaults[key]) ?? NSColor(rgb: 0)
   }
   func metric(_ key: String) -> CGFloat { CGFloat(Double(appearanceValues[key] ?? "") ?? Double(NamespaceAppearance.defaults[key] ?? "") ?? 0) }
   private var paneDividers: [PaneDivider] = []
@@ -37,6 +37,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   private var sidebarAnimation: Timer?
   private var animatedSidebarWidth: CGFloat?
   private var configuredWidth: CGFloat = 0
+  private var lastSidebarWidth: CGFloat = -1
   private var expandedSidebarWidth: CGFloat?
   private var refreshingNamespaces = false
   var sidebarInset: CGFloat { muxEnabled ? sidebar.frame.width + splitView.dividerThickness : 0 }
@@ -51,6 +52,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   private var remoteBranches: [String: String] = [:]
   private var remoteBranchChecks: [String: TimeInterval] = [:]
   private var pollingBranches = false
+  private var repollDirectories: [String: String]?
   private var branchPaths: Set<String> = []
   private var branchesCheckedAt = -Double.infinity
   private var gitWatchers: [String: DispatchSourceFileSystemObject] = [:]
@@ -155,7 +157,7 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
 
   override func viewDidMoveToWindow() {
     super.viewDidMoveToWindow()
-    if window != nil { controller?.owner?.requestAgentPoll() }
+    if window != nil { controller?.owner?.pollAgentSnapshots() }
   }
 
   // Snapshot polling is coordinated once per endpoint by AppDelegate.
@@ -221,7 +223,9 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   }
 
   private func pollBranches(directories: [String: String]) {
-    guard !pollingBranches, let controller else { return }
+    guard let controller else { return }
+    // A request during a poll is repeated afterwards, so the newest directories are not lost.
+    guard !pollingBranches else { repollDirectories = directories; return }
     let paths = Set(controller.namespaces.filter { $0.selected.selected.herdrTerminal?.client.machine == nil }.map { namespace in
       directories[namespace.selected.selected.herdrTerminal?.pane.pane_id ?? ""] ?? directory(for: namespace)
     })
@@ -234,29 +238,8 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
       var results: [String: String] = [:]
       var metadataPaths: Set<String> = []
       for path in paths {
-        func git(_ arguments: [String]) -> String? {
-          let process = Process()
-          process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-          process.arguments = ["--no-optional-locks", "-C", path] + arguments
-          process.environment = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("GIT_") }
-          let output = Pipe()
-          process.standardOutput = output
-          process.standardError = FileHandle.nullDevice
-          process.standardInput = FileHandle.nullDevice
-          do { try process.run() } catch { return nil }
-          let timeout = DispatchWorkItem { if process.isRunning { kill(process.processIdentifier, SIGKILL) } }
-          DispatchQueue.global().asyncAfter(deadline: .now() + 2, execute: timeout)
-          let data = output.fileHandleForReading.readDataToEndOfFile()
-          process.waitUntilExit()
-          timeout.cancel()
-          guard process.terminationStatus == 0 else { return nil }
-          let value = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-          return value.isEmpty ? nil : value
-        }
-        if let directory = git(["rev-parse", "--absolute-git-dir"]) { metadataPaths.insert(directory) }
-        else { metadataPaths.insert(path) }
-        if let branch = git(["symbolic-ref", "--quiet", "--short", "HEAD"]) { results[path] = branch }
-        else if let commit = git(["rev-parse", "--short", "HEAD"]) { results[path] = "Detached · " + commit }
+        metadataPaths.insert(GitBranchReader.gitDirectory(at: path) ?? path)
+        if let branch = GitBranchReader.branch(at: path) { results[path] = branch }
       }
       let updated = results
       let watched = metadataPaths
@@ -267,6 +250,10 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
         if self.branches != updated {
           self.branches = updated
           if let controller = self.controller { self.refreshNamespaces(controller) }
+        }
+        if let pending = self.repollDirectories {
+          self.repollDirectories = nil
+          self.pollBranches(directories: pending)
         }
       }
     }
@@ -379,27 +366,15 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
     if !paneDividers.contains(where: \.dragging) {
       paneDividers.forEach { $0.removeFromSuperview() }; paneDividers = []
     }
-    for (position, tab) in controller.presentedTabs.enumerated() {
-      var region = panes.bounds
-      if controller.presentedTabs.count == 2 {
-        let split = region.width * controller.companionRatio
-        region = position == 0 ? NSRect(x: 0, y: 0, width: split - 3, height: region.height) : NSRect(x: split + 3, y: 0, width: region.width - split - 3, height: region.height)
+    let presented = controller.presentedTabs
+    for (position, tab) in presented.enumerated() {
+      let region = Self.region(position: position, count: presented.count, in: panes.bounds, companionRatio: controller.companionRatio)
+      tab.ensureLayout()
+      let frames = tab.localLayout.map { Self.paneFrames(for: $0, in: region) } ?? [:]
+      for pane in tab.panes {
+        pane.chrome?.frame = tab.zoomed ? region : frames[pane.herdrTerminal?.pane.terminal_id ?? ""] ?? region
       }
-    tab.ensureLayout()
-    var frames: [String: NSRect] = [:]
-    func place(_ node: PaneLayout, in frame: NSRect) {
-      switch node {
-      case .terminal(let id): frames[id] = frame.insetBy(dx: 2, dy: 2)
-      case .split(let direction, let ratio, let first, let second):
-        let (a, b) = Self.splitFrames(frame, direction: direction, ratio: ratio)
-        place(first, in: a); place(second, in: b)
-      }
-    }
-    if let tree = tab.localLayout { place(tree, in: region) }
-    for pane in tab.panes {
-      pane.chrome?.frame = tab.zoomed ? region : frames[pane.herdrTerminal?.pane.terminal_id ?? ""] ?? region
-    }
-    layoutDividers(tab, region: region)
+      layoutDividers(tab, region: region)
     }
     if controller.presentedTabs.count == 2, !paneDividers.contains(where: \.dragging) {
       let divider = PaneDivider()
@@ -412,6 +387,24 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
         controller.owner?.scheduleWorkspaceSave(controller)
       }
       panes.addSubview(divider); paneDividers.append(divider)
+    }
+  }
+
+  /// The area of the presented tab at `position`; a companion pair shares the width around its divider.
+  private static func region(position: Int, count: Int, in bounds: NSRect, companionRatio: CGFloat) -> NSRect {
+    guard count == 2 else { return bounds }
+    let split = bounds.width * companionRatio
+    return position == 0 ? NSRect(x: 0, y: 0, width: split - 3, height: bounds.height)
+      : NSRect(x: split + 3, y: 0, width: bounds.width - split - 3, height: bounds.height)
+  }
+
+  /// Each terminal's frame within the layout tree, inset to leave room for the dividers.
+  private static func paneFrames(for layout: PaneLayout, in frame: NSRect) -> [String: NSRect] {
+    switch layout {
+    case .terminal(let id): return [id: frame.insetBy(dx: 2, dy: 2)]
+    case .split(let direction, let ratio, let first, let second):
+      let (a, b) = splitFrames(frame, direction: direction, ratio: ratio)
+      return paneFrames(for: first, in: a).merging(paneFrames(for: second, in: b)) { current, _ in current }
     }
   }
 
@@ -729,6 +722,9 @@ final class TerminalWorkspaceView: NSView, NSOutlineViewDataSource, NSOutlineVie
   func splitView(_ splitView: NSSplitView, shouldHideDividerAt dividerIndex: Int) -> Bool { sidebar.isHidden }
   func splitViewDidResizeSubviews(_ notification: Notification) {
     needsLayout = true
+    // Resizing the window also resizes the content; only a new sidebar width needs the rest.
+    guard sidebar.frame.width != lastSidebarWidth else { return }
+    lastSidebarWidth = sidebar.frame.width
     if animatedSidebarWidth == nil, let controller { controller.owner?.scheduleWorkspaceSave(controller) }
     if let controller { refreshNamespaces(controller) }
   }
@@ -850,7 +846,7 @@ private final class AgentIconButton: NSButton {
     border.path = CGPath(roundedRect: rect, cornerWidth: 5, cornerHeight: 5, transform: nil)
     border.fillColor = nil
     border.lineWidth = width
-    border.strokeColor = NSColor(rgb: UInt32((values[statusKey + "_color"] ?? "#666666").dropFirst(), radix: 16) ?? 0x666666).cgColor
+    border.strokeColor = (NSColor(hex: values[statusKey + "_color"]) ?? NSColor(rgb: 0x666666)).cgColor
     let style = values[statusKey + "_style"] ?? "solid"
     border.isHidden = style == "none"
     border.removeAnimation(forKey: "activity")
@@ -914,19 +910,11 @@ private final class WorkspaceTabItem: NSView {
     return onDropTab?(id) ?? false
   }
   var selected = false
-  private var hovered = false
-  private var hoverTracking: NSTrackingArea?
-  override func updateTrackingAreas() {
-    super.updateTrackingAreas()
-    if let hoverTracking { removeTrackingArea(hoverTracking) }
-    let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
-    addTrackingArea(area)
-    hoverTracking = area
-    hovered = window.map { bounds.contains(convert($0.mouseLocationOutsideOfEventStream, from: nil)) } ?? false
-    needsDisplay = true
-  }
-  override func mouseEntered(with event: NSEvent) { hovered = true; needsDisplay = true }
-  override func mouseExited(with event: NSEvent) { hovered = false; needsDisplay = true }
+  private lazy var hover = HoverTracker(self)
+  private var hovered: Bool { hover.isHovered }
+  override func updateTrackingAreas() { super.updateTrackingAreas(); hover.update() }
+  override func mouseEntered(with event: NSEvent) { hover.setHovered(true) }
+  override func mouseExited(with event: NSEvent) { hover.setHovered(false) }
   override func draw(_ dirtyRect: NSRect) {
     if selected {
       NSColor.controlBackgroundColor.setFill()
@@ -943,19 +931,11 @@ private final class WorkspaceTabItem: NSView {
 }
 
 private final class NamespaceHoverRow: NSTableRowView {
-  private var hovered = false
-  private var hoverTracking: NSTrackingArea?
-  override func updateTrackingAreas() {
-    super.updateTrackingAreas()
-    if let hoverTracking { removeTrackingArea(hoverTracking) }
-    let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
-    addTrackingArea(area)
-    hoverTracking = area
-    hovered = window.map { bounds.contains(convert($0.mouseLocationOutsideOfEventStream, from: nil)) } ?? false
-    needsDisplay = true
-  }
-  override func mouseEntered(with event: NSEvent) { hovered = true; needsDisplay = true }
-  override func mouseExited(with event: NSEvent) { hovered = false; needsDisplay = true }
+  private lazy var hover = HoverTracker(self)
+  private var hovered: Bool { hover.isHovered }
+  override func updateTrackingAreas() { super.updateTrackingAreas(); hover.update() }
+  override func mouseEntered(with event: NSEvent) { hover.setHovered(true) }
+  override func mouseExited(with event: NSEvent) { hover.setHovered(false) }
   override func drawBackground(in dirtyRect: NSRect) {
     super.drawBackground(in: dirtyRect)
     if hovered && !isSelected {
@@ -1092,4 +1072,30 @@ private final class PaneDivider: NSView {
     (dragging ? NSColor.controlAccentColor : color).setFill()
     bounds.insetBy(dx: vertical ? 2 : 0, dy: vertical ? 0 : 2).fill()
   }
+}
+
+/// Tracks whether the pointer is over a view and redraws it when that changes. The view forwards
+/// `updateTrackingAreas`, `mouseEntered` and `mouseExited`.
+final class HoverTracker {
+  private weak var view: NSView?
+  private var area: NSTrackingArea?
+  private(set) var isHovered = false
+  private let syncsWithPointer: Bool
+
+  /// `syncsWithPointer`: re-read the pointer position whenever tracking areas update, for views
+  /// that are reused or moved under a stationary pointer.
+  init(_ view: NSView, syncsWithPointer: Bool = true) { self.view = view; self.syncsWithPointer = syncsWithPointer }
+
+  func update() {
+    guard let view else { return }
+    if let area { view.removeTrackingArea(area) }
+    let next = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: view)
+    view.addTrackingArea(next)
+    area = next
+    guard syncsWithPointer else { return }
+    isHovered = view.window.map { view.bounds.contains(view.convert($0.mouseLocationOutsideOfEventStream, from: nil)) } ?? false
+    view.needsDisplay = true
+  }
+
+  func setHovered(_ value: Bool) { isHovered = value; view?.needsDisplay = true }
 }
