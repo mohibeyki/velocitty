@@ -48,12 +48,12 @@ for title in ["Find…", "Command Palette…"] {
   precondition(!delegate.validateMenuItem(menuItem(title)))
 }
 precondition(app.sendAction(new.action!, to: new.target, from: new))
-drain()
+waitUntil("The first window did not open") { delegate.windows.count == 1 }
 let first = delegate.windows[0]
 let terminal = first.session!.view!
 let originalEngine = delegate.runtime!.app
 precondition(app.sendAction(new.action!, to: new.target, from: new))
-drain()
+waitUntil("The second window did not open") { delegate.windows.count == 2 }
 precondition(delegate.windows.count == 2)
 precondition(delegate.validateMenuItem(closeMenuItem))
 let second = delegate.windows[1]
@@ -349,7 +349,7 @@ func checkSharedEngine() throws {
     """)
   }
   try runtime.updateConfiguration(configured(0.4))
-  drain()
+  waitUntil("The cell size did not follow the font") { velokit_surface_size(firstSurface).cell_height_px > originalCell }
   precondition(velokit_surface_size(firstSurface).cell_height_px > originalCell)
   precondition(velokit_surface_size(firstSurface).cell_height_px == velokit_surface_size(secondSurface).cell_height_px)
   let scoped = try TerminalRuntime.makeConfig(AppConfiguration.parse(Data("""
@@ -361,13 +361,13 @@ func checkSharedEngine() throws {
   velokit_config_free(scoped)
   let scopedFontSize = String(cString: velokit_config_format(first.session!.config!, "font-size")!)
   precondition(scopedFontSize == "font-size = 36\n", "The host must copy the borrowed applied configuration")
-  drain()
+  waitUntil("The scoped font change did not apply") { velokit_surface_size(firstSurface).cell_height_px > velokit_surface_size(secondSurface).cell_height_px }
   precondition(velokit_surface_size(firstSurface).cell_height_px > velokit_surface_size(secondSurface).cell_height_px,
     "A surface-only update must leave sibling terminals unchanged")
   try runtime.updateConfiguration(configured(0.4))
   drain()
   first.session!.view!.performSurfaceAction("toggle_background_opacity")
-  drain()
+  waitUntil("The opacity toggle did not apply") { first.native.backgroundOpacity == 1 && second.native.backgroundOpacity == 0.4 }
   precondition(first.native.backgroundOpacity == 1 && second.native.backgroundOpacity == 0.4)
   precondition(delegate.native.backgroundOpacity == 0.4)
   delegate.newWindow()
@@ -379,17 +379,17 @@ func checkSharedEngine() throws {
   drain()
   precondition(delegate.runtime === runtime && first.session!.surface == firstSurface)
   try runtime.updateConfiguration(configured(0.6))
-  drain()
+  waitUntil("The reloaded opacity did not apply") { first.native.backgroundOpacity == 1 && second.native.backgroundOpacity == 0.6 }
   precondition(first.native.backgroundOpacity == 1 && second.native.backgroundOpacity == 0.6)
   first.session!.view!.performSurfaceAction("toggle_background_opacity")
-  drain()
+  waitUntil("The opacity toggle did not revert") { first.native.backgroundOpacity == 0.6 && second.native.backgroundOpacity == 0.6 }
   precondition(first.native.backgroundOpacity == 0.6 && second.native.backgroundOpacity == 0.6)
   let broadcast = NSEvent.keyEvent(
     with: .keyDown, location: .zero, modifierFlags: [.control, .shift],
     timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: first.window!.windowNumber,
     context: nil, characters: "A", charactersIgnoringModifiers: "a", isARepeat: false, keyCode: 0)!
   first.session!.view!.sendKey(broadcast, action: GHOSTTY_ACTION_PRESS)
-  drain()
+  waitUntil("The broadcast binding did not apply") { first.window!.title == "Broadcast" && second.window!.title == "Broadcast" }
   precondition(first.window!.title == "Broadcast" && second.window!.title == "Broadcast")
   var global = ghostty_input_key_s()
   global.action = GHOSTTY_ACTION_PRESS
@@ -397,7 +397,7 @@ func checkSharedEngine() throws {
   global.mods = ghostty_input_mods_e(GHOSTTY_MODS_CTRL.rawValue | GHOSTTY_MODS_SHIFT.rawValue)
   global.unshifted_codepoint = 98
   precondition(velokit_app_key(runtime.app!, global))
-  drain()
+  waitUntil("The global binding did not apply") { first.window!.title == "Global" && second.window!.title == "Global" }
   precondition(first.window!.title == "Global" && second.window!.title == "Global")
   precondition(first.session!.surface == firstSurface && second.session!.surface == secondSurface)
   try runtime.updateConfiguration(settings)
@@ -431,7 +431,10 @@ func checkConfigurationReload() throws {
     """.utf8).write(to: file)
     try first.session!.toggleOpacity()
     try runtime.updateConfiguration(AppConfiguration.load(from: file))
-    drain()
+    waitUntil("The reloaded configuration did not apply") {
+      runtime.diagnostics.count == 8 && first.window!.title == "Reloaded" && second.window!.title == "Reloaded"
+        && first.native.backgroundOpacity == 1 && second.native.backgroundOpacity == 0.45
+    }
     precondition(runtime.diagnostics.count == 8, runtime.diagnostics.joined(separator: "\n"))
     precondition(first.session!.surface == firstSurface && second.session!.surface == secondSurface)
     precondition(first.native.backgroundOpacity == 1 && second.native.backgroundOpacity == 0.45)
@@ -450,7 +453,7 @@ func checkConfigurationReload() throws {
     precondition(runtime.settings.workingDirectory == AppConfiguration.defaults().workingDirectory)
 
     delegate.showConfigurationDiagnostics()
-    drain()
+    waitUntil("The diagnostics sheet did not appear") { delegate.activeWindow?.window?.attachedSheet != nil }
     let diagnosticWindow = delegate.activeWindow!.window!
     precondition(diagnosticWindow.attachedSheet != nil, "Reload diagnostics must be visible")
     diagnosticWindow.endSheet(diagnosticWindow.attachedSheet!)
@@ -476,7 +479,7 @@ func checkConfigurationReload() throws {
   // A subsequent clean reload clears diagnostics and the opacity toggle still works.
   try runtime.updateConfiguration(settings)
   try first.session!.toggleOpacity()
-  drain()
+  waitUntil("The clean reload did not clear diagnostics") { runtime.diagnostics.isEmpty && first.native.backgroundOpacity == 1 && second.native.backgroundOpacity == 1 }
   precondition(runtime.diagnostics.isEmpty)
   precondition(first.native.backgroundOpacity == 1 && second.native.backgroundOpacity == 1)
 }
@@ -501,7 +504,7 @@ func checkVisualPolicies() throws {
     precondition(first.session!.surface != nil && !first.window!.isOpaque)
   }
   first.ringBell()
-  drain()
+  waitUntil("The bell did not register") { first.hasBell }
   precondition(first.hasBell && first.chrome!.layer!.borderWidth == 3)
   first.clearBell()
   precondition(!first.hasBell && first.chrome!.layer!.borderWidth == 0)
@@ -515,14 +518,14 @@ func checkVisualPolicies() throws {
   action.action.size_limit.max_width = 1600
   action.action.size_limit.max_height = 1200
   precondition(runtime.context.handleAction(target: target, action: action))
-  drain()
+  waitUntil("The size limit did not apply") { first.window!.contentMaxSize.width == 1600 / first.window!.backingScaleFactor }
   let scale = first.window!.backingScaleFactor
   precondition(first.window!.contentMaxSize.width == 1600 / scale)
   precondition(first.window!.contentMinSize.height == 100 / scale)
   action.action.size_limit.max_width = 0
   action.action.size_limit.max_height = 0
   precondition(runtime.context.handleAction(target: target, action: action))
-  drain()
+  waitUntil("The size limit did not clear") { first.window!.contentMaxSize.width > 100_000 }
   precondition(first.window!.contentMaxSize.width > 100_000)
   try runtime.updateConfiguration(settings)
   drain()
@@ -533,7 +536,7 @@ func checkVisualPolicies() throws {
 func checkQuitAfterLastWindowCloses() -> Never {
   precondition(delegate.native.quitAfterLastWindowClosed)
   first.window?.performClose(nil)
-  drain()
+  waitUntil("The window did not close") { delegate.windows.count == 1 }
   precondition(delegate.windows.count == 1)
   precondition(delegate.quitTimer == nil || delegate.quitTimer?.isValid == false)
   let observer = NotificationCenter.default.addObserver(
@@ -584,7 +587,7 @@ func checkRestorationMetadata() throws {
   try runtime.updateConfiguration(testSettings("window_position_x = 80\nwindow_position_y = 70", saveState: "always"))
   delegate.newWindow()
   let placed = delegate.windows.last!
-  drain()
+  waitUntil("The window was not placed") { abs(placed.window!.frame.minX - placed.window!.screen!.visibleFrame.minX - 80) < 1 }
   let visible = placed.window!.screen!.visibleFrame
   precondition(abs(placed.window!.frame.minX - visible.minX - 80) < 1)
   precondition(abs(placed.window!.frame.maxY - visible.maxY + 70) < 1)
@@ -751,7 +754,7 @@ func checkWindowNavigation() {
   third.closing = true
   cycle(second, "next", to: first)
   third.window!.close()
-  drain()
+  waitUntil("The window did not close") { delegate.windows.count == 2 }
   precondition(delegate.windows.count == 2)
   var target = ghostty_target_s()
   target.tag = GHOSTTY_TARGET_APP
@@ -789,13 +792,13 @@ func checkIndependentSheets() {
   closing.window!.close()
   delegate.newWindow()
   let replacement = delegate.windows.last!
-  drain()
+  waitUntil("The replacement window did not open") { replacement.window != nil && replacement.window!.title != "Stale title" }
   precondition(replacement.window != nil && replacement.window!.title != "Stale title")
   precondition(first.session!.links.confirmation != nil && session.links.confirmation == nil)
   first.session!.links.cancel()
   replacement.closing = true
   replacement.window!.close()
-  drain()
+  waitUntil("The replacement window did not close") { delegate.windows.count == 2 }
   precondition(delegate.windows.count == 2)
 }
 
@@ -902,7 +905,7 @@ func checkFocusReporting() throws {
     expect("\u{1b}[I", "Reattached view did not restore focus")
     controller.closing = true
     window.close()
-    drain()
+    waitUntil("The window did not close") { delegate.windows.count == 2 }
     precondition(delegate.windows.count == 2)
   }
 }
@@ -961,26 +964,26 @@ func checkLinkRouting() {
     windowNumber: alert.window.windowNumber, context: nil,
     characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!
   precondition(alert.buttons[0].performKeyEquivalent(with: cancelKey))
-  drain()
+  waitUntil("The next queued link did not appear") { links.confirmation != nil && links.confirmation !== alert }
   precondition(links.confirmation != nil && links.confirmation !== alert,
     "The next queued link should appear after cancelling the first")
   let queuedText = (links.confirmation!.accessoryView as! NSScrollView).documentView as! NSTextView
   precondition(queuedText.string == "file:///tmp/another")
   links.confirmation!.buttons[0].performClick(nil)
-  drain()
+  waitUntil("The link confirmation did not finish") { links.confirmation == nil && opened.count == 2 }
   precondition(links.confirmation == nil && opened.count == 2,
     "Return cancellation: active=\(app.isActive), key=\(alert.window.isKeyWindow), "
       + "modifiers=\(alert.buttons[0].keyEquivalentModifierMask.rawValue), "
       + "default=\(String(describing: alert.window.defaultButtonCell?.title)), opened=\(opened.count)")
   sendLink(destination)
   links.confirmation!.buttons[1].performClick(nil)
-  drain()
+  waitUntil("The link was not opened") { opened.count == 3 }
   precondition(opened.count == 3 && opened.last!.absoluteString == destination)
   sendLink("file:///tmp/test")
   precondition(links.confirmation != nil)
   controller.closing = true
   controller.window!.close()
-  drain()
+  waitUntil("The link confirmation did not close with its window") { links.confirmation == nil }
   precondition(links.confirmation == nil && opened.count == 3)
   precondition(delegate.windows.count == 2)
 }
@@ -1006,17 +1009,17 @@ func checkClipboardQueue() {
   }
   enqueue(1)
   enqueue(2)
-  drain()
+  waitUntil("The clipboard confirmation did not appear") { queue.confirmation != nil }
   let firstAlert = queue.confirmation!
   precondition(firstAlert.messageText == "Clipboard test 1" && replies.isEmpty)
   firstAlert.suppressionButton!.state = .on
   firstAlert.buttons[0].performClick(nil)
-  drain()
+  waitUntil("The first clipboard reply was not sent") { replies.count == 1 }
   precondition(replies.count == 1 && replies[0].0 == 1 && replies[0].1 && replies[0].2)
   precondition(queue.confirmation!.messageText == "Clipboard test 2")
   queue.confirmation!.suppressionButton!.state = .on
   queue.confirmation!.buttons[1].performClick(nil)
-  drain()
+  waitUntil("The second clipboard reply was not sent") { replies.count == 2 }
   precondition(replies.count == 2 && replies[1].0 == 2 && !replies[1].1 && !replies[1].2)
   precondition(queue.confirmation == nil)
 
@@ -1027,7 +1030,7 @@ func checkClipboardQueue() {
   drain()
   precondition(queue.confirmation == nil && replies.count == 2)
   session.links.cancel()
-  drain()
+  waitUntil("The third clipboard request did not appear") { queue.confirmation?.messageText == "Clipboard test 3" }
   precondition(queue.confirmation?.messageText == "Clipboard test 3")
   enqueue(4)
   let closingAlert = queue.confirmation!
@@ -1037,7 +1040,7 @@ func checkClipboardQueue() {
   precondition(replies[2].0 == 3 && !replies[2].1 && replies[3].0 == 4 && !replies[3].1)
   closingAlert.buttons[0].performClick(nil) // A late UI response cannot complete again.
   queue.cancel()
-  drain()
+  waitUntil("The clipboard queue did not empty") { replies.count == 4 && queue.confirmation == nil }
   precondition(replies.count == 4 && queue.confirmation == nil)
 }
 
@@ -1062,7 +1065,7 @@ func checkClipboardCancellation() {
   controller.closing = true
   controller.window!.close()
   precondition(denied == 1)
-  drain()
+  waitUntil("The clipboard confirmation did not close with its window") { view.clipboard.confirmation == nil && denied == 1 }
   precondition(view.clipboard.confirmation == nil && denied == 1)
   precondition(board.string(forType: .string) == "unchanged")
 }
@@ -1077,7 +1080,7 @@ func checkUnattachedClipboard() throws {
     precondition(!allow && view.surface != nil)
     denied += 1
   }
-  drain()
+  waitUntil("The unattached clipboard request was not denied") { denied == 1 }
   precondition(denied == 1 && view.clipboard.confirmation == nil)
   session.close()
   precondition(denied == 1)
@@ -1116,7 +1119,7 @@ func checkClipboardAtPTY() throws {
     waitUntil("The pending paste did not ask for confirmation") { view.clipboard.confirmation != nil }
     recorder.controller.closing = true
     recorder.controller.window!.close()
-    drain()
+    waitUntil("The pending paste was not cancelled by closing") { view.surface == nil && view.clipboard.confirmation == nil }
     precondition(view.surface == nil && view.clipboard.confirmation == nil)
     precondition(recorder.received() == expected)
     precondition(delegate.windows.count == 2)
@@ -1135,14 +1138,14 @@ func checkCloseAndQuit() {
     action.action.set_title.title = $0
     precondition(first.session!.runtime.context.handleAction(target: target, action: action))
   }
-  drain()
+  waitUntil("The background title did not apply") { first.window?.title == "Background terminal" }
   precondition(first.window?.title == "Background terminal")
   precondition(second.window?.title != "Background terminal")
   second.window?.makeKeyAndOrderFront(nil)
   drain()
   precondition(closeMenuItem.keyEquivalent == "w")
   precondition(app.sendAction(closeMenuItem.action!, to: closeMenuItem.target, from: closeMenuItem))
-  drain()
+  waitUntil("The window did not close") { delegate.windows.count == 1 }
   precondition(delegate.windows.count == 1)
   precondition(first.session?.view?.surface != nil)
   precondition(second.session?.view == nil)
@@ -1151,14 +1154,14 @@ func checkCloseAndQuit() {
   drain()
   precondition(first.window!.isKeyWindow && delegate.windows.count == 1)
   first.window?.performClose(nil)
-  drain()
+  waitUntil("The last window did not close") { delegate.windows.isEmpty }
   precondition(delegate.windows.isEmpty)
   precondition(terminal.surface == nil && terminal.config == nil)
   precondition(!delegate.validateMenuItem(closeMenuItem))
   precondition(delegate.runtime?.app == originalEngine)
   precondition(app.sendAction(new.action!, to: new.target, from: new))
   precondition(app.sendAction(new.action!, to: new.target, from: new))
-  drain()
+  waitUntil("The new windows did not open") { delegate.windows.count == 2 }
   precondition(delegate.windows.count == 2)
   precondition(delegate.windows.allSatisfy { $0.session?.runtime.app == originalEngine })
   let quit = menuItem("Quit Velocitty")
