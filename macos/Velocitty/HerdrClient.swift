@@ -534,9 +534,7 @@ final class HerdrClient {
 
   func gitBranch(directory: String) throws -> String? {
     guard machine != nil else { return nil }
-    let quoted = ShellInput.quote(directory)
-    // Prefix the detached hash with a marker so the label matches the local reader's.
-    let command = "git -C " + quoted + " symbolic-ref --quiet --short HEAD 2>/dev/null || { h=$(git -C " + quoted + " rev-parse --short HEAD 2>/dev/null) && printf 'detached:%s' \"$h\"; } || true"
+    let command = GitBranchReader.remoteCommand(directory: directory)
     let value = String(decoding: try ssh(command, timeout: 3), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
     let marker = "detached:"
     if value.hasPrefix(marker) { let hash = String(value.dropFirst(marker.count)); return hash.isEmpty ? nil : GitBranchReader.detachedLabel(hash) }

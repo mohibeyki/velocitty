@@ -26,20 +26,52 @@ final class AppearanceAndGitTests: XCTestCase {
 
   func testGitBranchReader() throws {
     let root = try makeTemporaryDirectory().resolvingSymlinksInPath().path
-    XCTAssertNil(GitBranchReader.branch(at: root))
-    // Isolate from the developer's global/system git config (signing, hooks, templates).
+    // Isolate from the developer's global/system git config (signing, hooks, templates), and allow for a slow first git launch.
     let isolated = ["HOME": root, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"]
-    func git(_ arguments: [String]) -> String? { GitBranchReader.run(arguments, in: root, extraEnvironment: isolated) }
+    let timeout: TimeInterval = 30
+    func git(_ arguments: [String]) -> String? { GitBranchReader.run(arguments, in: root, timeout: timeout, extraEnvironment: isolated) }
+    func branch() -> String? { GitBranchReader.branch(at: root, timeout: timeout, extraEnvironment: isolated) }
+    XCTAssertNil(branch())
     guard git(["init", "-q", "-b", "trunk"]) == nil else { return XCTFail("git init prints nothing") }
-    let gitDirectory = try XCTUnwrap(GitBranchReader.gitDirectory(at: root))
+    XCTAssertTrue(FileManager.default.fileExists(atPath: root + "/.git"), "git init must have succeeded")
+    let gitDirectory = try XCTUnwrap(GitBranchReader.gitDirectory(at: root, timeout: timeout, extraEnvironment: isolated))
     XCTAssertEqual(URL(fileURLWithPath: gitDirectory).resolvingSymlinksInPath().path, root + "/.git")
     // An unborn branch has a name but no commit.
-    XCTAssertEqual(GitBranchReader.branch(at: root), "trunk")
+    XCTAssertEqual(branch(), "trunk")
     let commit = ["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", "commit", "-q", "--no-verify", "--allow-empty", "-m", "x"]
     XCTAssertNil(git(commit), "git commit prints nothing")
     let head = try XCTUnwrap(git(["rev-parse", "--short", "HEAD"]), "the commit must have succeeded")
-    XCTAssertEqual(GitBranchReader.branch(at: root), "trunk")
+    XCTAssertEqual(branch(), "trunk")
     XCTAssertNil(git(["checkout", "-q", "--detach"]))
-    XCTAssertEqual(GitBranchReader.branch(at: root), GitBranchReader.detachedLabel(head))
+    XCTAssertEqual(branch(), GitBranchReader.detachedLabel(head))
+  }
+
+  func testRemoteBranchCommandIsWrappedForPosixShell() throws {
+    let root = try makeTemporaryDirectory().resolvingSymlinksInPath().appendingPathComponent("it's here").path
+    try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
+    let command = GitBranchReader.remoteCommand(directory: root)
+    XCTAssertTrue(command.hasPrefix("/bin/sh -c '"), command)
+    XCTAssertTrue(command.hasSuffix("'"), command)
+    // A login shell such as fish would receive `command` verbatim; /bin/sh must parse the single quoted script.
+    func output() throws -> String {
+      let process = Process()
+      process.executableURL = URL(fileURLWithPath: "/bin/sh")
+      process.arguments = ["-c", command]
+      let pipe = Pipe()
+      process.standardOutput = pipe
+      try process.run()
+      let data = pipe.fileHandleForReading.readDataToEndOfFile()
+      process.waitUntilExit()
+      return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    let isolated = ["HOME": root, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"]
+    func git(_ arguments: [String]) -> String? { GitBranchReader.run(arguments, in: root, timeout: 30, extraEnvironment: isolated) }
+    XCTAssertEqual(try output(), "", "outside a repository nothing is printed")
+    XCTAssertNil(git(["init", "-q", "-b", "trunk"]))
+    XCTAssertEqual(try output(), "trunk")
+    XCTAssertNil(git(["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", "commit", "-q", "--no-verify", "--allow-empty", "-m", "x"]))
+    let head = try XCTUnwrap(git(["rev-parse", "--short", "HEAD"]))
+    XCTAssertNil(git(["checkout", "-q", "--detach"]))
+    XCTAssertEqual(try output(), "detached:" + head)
   }
 }

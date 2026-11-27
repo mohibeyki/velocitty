@@ -28,13 +28,21 @@ public enum GitBranchReader {
   public static func detachedLabel(_ commit: String) -> String { "Detached · " + commit }
 
   /// The branch name, or "Detached · <commit>"; nil outside a repository.
-  public static func branch(at directory: String) -> String? {
-    if let branch = run(["symbolic-ref", "--quiet", "--short", "HEAD"], in: directory) { return branch }
-    return run(["rev-parse", "--short", "HEAD"], in: directory).map(detachedLabel)
+  public static func branch(at directory: String, timeout: TimeInterval = 2, extraEnvironment: [String: String] = [:]) -> String? {
+    if let branch = run(["symbolic-ref", "--quiet", "--short", "HEAD"], in: directory, timeout: timeout, extraEnvironment: extraEnvironment) { return branch }
+    return run(["rev-parse", "--short", "HEAD"], in: directory, timeout: timeout, extraEnvironment: extraEnvironment).map(detachedLabel)
   }
 
   /// The repository's absolute git directory, whose changes mean the branch may have changed.
-  public static func gitDirectory(at directory: String) -> String? {
-    run(["rev-parse", "--absolute-git-dir"], in: directory)
+  public static func gitDirectory(at directory: String, timeout: TimeInterval = 2, extraEnvironment: [String: String] = [:]) -> String? {
+    run(["rev-parse", "--absolute-git-dir"], in: directory, timeout: timeout, extraEnvironment: extraEnvironment)
+  }
+
+  /// The command to hand to a remote login shell (which may not be POSIX, such as fish): the POSIX script is run by `/bin/sh`.
+  /// Prints the branch, or "detached:<commit>" for a detached HEAD, and nothing outside a repository.
+  public static func remoteCommand(directory: String) -> String {
+    let quoted = ShellInput.quote(directory)
+    let script = "git -C " + quoted + " symbolic-ref --quiet --short HEAD 2>/dev/null || { h=$(git -C " + quoted + " rev-parse --short HEAD 2>/dev/null) && printf 'detached:%s' \"$h\"; } || true"
+    return "/bin/sh -c " + ShellInput.quote(script)
   }
 }
