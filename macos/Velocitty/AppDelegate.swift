@@ -2419,7 +2419,12 @@ extension AppDelegate {
   func uniqueByEndpoint<S: Sequence>(_ clients: S) -> [String: HerdrClient] where S.Element == HerdrClient {
     clients.reduce(into: [String: HerdrClient]()) { $0[$1.endpointID] = $1 }
   }
-  func scheduleExpiry(_ operation: ClosedTerminals, after interval: TimeInterval) {
+  /// Restarts the undo timer for `operation`. `showsBanner` also sets `expiry`, which the undo banner counts down to;
+  /// pass false for a restored (redo-able) operation, which has a timer but no banner.
+  func scheduleExpiry(_ operation: ClosedTerminals, after interval: TimeInterval, showsBanner: Bool = true) {
+    let interval = max(0.01, interval)
+    operation.timer?.invalidate()
+    operation.expiry = showsBanner ? Date(timeIntervalSinceNow: interval) : nil
     operation.timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self, weak operation] _ in
       guard let self, let operation else { return }
       self.expireClose(operation)

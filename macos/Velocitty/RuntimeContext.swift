@@ -40,8 +40,8 @@ final class RuntimeContext: NSObject {
 
     // Resolve presentation at delivery time. A session may have moved since the callback.
     let surfaceTarget = target.tag == GHOSTTY_TARGET_SURFACE
-    let perform: Perform = { [self, view] body in
-      DispatchQueue.main.async { [weak self, weak view] in
+    let perform: Perform = { [weak self, weak view] body in
+      DispatchQueue.main.async {
         guard let self, self.app != nil, self.owner?.terminating != true else { return }
         if surfaceTarget {
           guard let view, view.surface != nil else { return }
@@ -128,7 +128,7 @@ final class RuntimeContext: NSObject {
       let notification = action.action.desktop_notification
       let title = notification.title.map { String(cString: $0) } ?? "Velocitty"
       let body = notification.body.map { String(cString: $0) } ?? ""
-      perform { view, controller in controller?.notify(title: title, body: body) }
+      perform { _, controller in controller?.notify(title: title, body: body) }
 
     case GHOSTTY_ACTION_COMMAND_FINISHED:
       let value = action.action.command_finished
@@ -156,7 +156,7 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_SEARCH_TOTAL:
       let total = action.action.search_total.total
-      perform { view, controller in
+      perform { view, _ in
         let chrome = view?.session?.chrome
         chrome?.total = total
         chrome?.updateCount()
@@ -164,7 +164,7 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_SEARCH_SELECTED:
       let selected = action.action.search_selected.selected
-      perform { view, controller in
+      perform { view, _ in
         let chrome = view?.session?.chrome
         chrome?.selected = selected
         chrome?.updateCount()
@@ -185,7 +185,7 @@ final class RuntimeContext: NSObject {
     case GHOSTTY_ACTION_MOUSE_OVER_LINK:
       let link = action.action.mouse_over_link
       let value = Self.hoveredLinkText(link)
-      perform { view, controller in
+      perform { view, _ in
         view?.linkURL = value
         view?.toolTip = value
       }
@@ -196,7 +196,7 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_MOUSE_VISIBILITY:
       let hidden = action.action.mouse_visibility == GHOSTTY_MOUSE_HIDDEN
-      perform { view, controller in
+      perform { view, _ in
         if view?.pointerIsInside == true { NSCursor.setHiddenUntilMouseMoves(hidden) }
       }
 
@@ -299,7 +299,7 @@ final class RuntimeContext: NSObject {
     switch action.tag {
     case GHOSTTY_ACTION_SET_WINDOW_TITLE:
       let title = action.action.set_title.title.map { String(cString: $0) } ?? ""
-      perform { view, controller in
+      perform { _, controller in
         guard let controller else { return }
         controller.windowTitleOverride = title.isEmpty ? nil : title
         controller.setTitle(controller.terminalTitle)
@@ -307,7 +307,7 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_QUIT_TIMER:
       let start = action.action.quit_timer == GHOSTTY_QUIT_TIMER_START
-      perform { view, controller in
+      perform { _, _ in
         let delegate = NSApp.delegate as? AppDelegate
         if start { delegate?.scheduleQuitIfNeeded() } else { delegate?.quitTimer?.invalidate() }
       }
@@ -319,7 +319,7 @@ final class RuntimeContext: NSObject {
       }
 
     case GHOSTTY_ACTION_COPY_TITLE_TO_CLIPBOARD:
-      perform { view, controller in
+      perform { view, _ in
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(view?.window?.title ?? "Velocitty", forType: .string)
       }
@@ -341,7 +341,7 @@ final class RuntimeContext: NSObject {
       perform { _, controller in controller?.toggleDecorations() }
 
     case GHOSTTY_ACTION_TOGGLE_COMMAND_PALETTE:
-      perform { view, controller in controller?.showCommands() }
+      perform { _, controller in controller?.showCommands() }
 
     case GHOSTTY_ACTION_NEW_WINDOW:
       perform { _, _ in (NSApp.delegate as? AppDelegate)?.newWindow() }
@@ -356,14 +356,14 @@ final class RuntimeContext: NSObject {
       perform { view, _ in view?.window?.zoom(nil) }
 
     case GHOSTTY_ACTION_TOGGLE_FULLSCREEN:
-      perform { view, controller in controller?.toggleFullscreen() }
+      perform { _, controller in controller?.toggleFullscreen() }
 
     case GHOSTTY_ACTION_TOGGLE_VISIBILITY:
       perform { _, _ in Self.toggleApplicationVisibility() }
 
     case GHOSTTY_ACTION_RELOAD_CONFIG:
       let soft = action.action.reload_config.soft
-      perform { view, controller in
+      perform { _, _ in
         let delegate = NSApp.delegate as? AppDelegate
         if soft { delegate?.refreshAppearance() } else { delegate?.reloadConfiguration(nil) }
       }

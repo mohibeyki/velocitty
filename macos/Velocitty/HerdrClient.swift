@@ -14,14 +14,14 @@ final class HerdrClient {
   }
   var endpointID: String { identity ?? machine.map { "ssh:" + $0.id } ?? (sessionName == "velocitty" ? "local" : "local:" + sessionName) }
   private let identity: String?
-  private var label: String?
+  private var storedLabel: String?  // guarded by availabilityLock
   var isPlaceholder = false
   private let availabilityLock = NSLock()
   private var enabled = true
   private var availabilityGeneration = UUID()
   var isEnabled: Bool { availabilityLock.lock(); defer { availabilityLock.unlock() }; return enabled }
-  func updateLabel(_ value: String) { label = value }
-  var endpointLabel: String { label ?? machine?.label ?? (sessionName == "velocitty" ? "Local" : sessionName) }
+  func updateLabel(_ value: String) { availabilityLock.lock(); storedLabel = value; availabilityLock.unlock() }
+  var endpointLabel: String { availabilityLock.lock(); let override = storedLabel; availabilityLock.unlock(); return override ?? machine?.label ?? (sessionName == "velocitty" ? "Local" : sessionName) }
   func owns(_ id: String) -> Bool { Self.owns(id, endpoint: endpointID) }
   /// Local IDs are unqualified; every other endpoint prefixes its IDs with "<endpoint>::". A nil endpoint is local.
   static func owns(_ id: String, endpoint: String?) -> Bool {
@@ -30,10 +30,11 @@ final class HerdrClient {
   }
   func qualify(_ id: String) -> String { endpointID == "local" || id.isEmpty ? id : endpointID + "::" + id }
   private func raw(_ id: String) -> String { let prefix = endpointID + "::"; return id.hasPrefix(prefix) ? String(id.dropFirst(prefix.count)) : id }
+  private static let idKeys: Set<String> = ["workspace_id", "tab_id", "pane_id", "terminal_id", "active_tab_id", "focused_pane_id", "target_pane_id", "source_pane_id"]
   private func mapIDs(_ value: Any, incoming: Bool, key: String = "") -> Any {
-    if let dictionary = value as? [String: Any] { return dictionary.mapValues { $0 }.reduce(into: [String: Any]()) { $0[$1.key] = mapIDs($1.value, incoming: incoming, key: $1.key) } }
+    if let dictionary = value as? [String: Any] { return dictionary.reduce(into: [String: Any]()) { $0[$1.key] = mapIDs($1.value, incoming: incoming, key: $1.key) } }
     if let array = value as? [Any] { return array.map { mapIDs($0, incoming: incoming, key: key) } }
-    if ["workspace_id", "tab_id", "pane_id", "terminal_id", "active_tab_id", "focused_pane_id", "target_pane_id", "source_pane_id"].contains(key), let id = value as? String { return incoming ? qualify(id) : raw(id) }
+    if Self.idKeys.contains(key), let id = value as? String { return incoming ? qualify(id) : raw(id) }
     return value
   }
 
@@ -136,7 +137,7 @@ final class HerdrClient {
 
   init(executable: URL, sessionName: String = "velocitty", machine: Machine? = nil, sshOptions: [String] = [], remoteExecutable: String? = nil, remoteEnvironment: [String: String] = [:], identity: String? = nil, label: String? = nil) {
     self.identity = identity
-    self.label = label
+    self.storedLabel = label
     self.executable = executable
     self.sessionName = machine?.session ?? sessionName
     self.machine = machine
@@ -533,8 +534,12 @@ final class HerdrClient {
 
   func gitBranch(directory: String) throws -> String? {
     guard machine != nil else { return nil }
-    let command = "git -C " + ShellInput.quote(directory) + " symbolic-ref --quiet --short HEAD 2>/dev/null || git -C " + ShellInput.quote(directory) + " rev-parse --short HEAD 2>/dev/null || true"
+    let quoted = ShellInput.quote(directory)
+    // Prefix the detached hash with a marker so the label matches the local reader's.
+    let command = "git -C " + quoted + " symbolic-ref --quiet --short HEAD 2>/dev/null || { h=$(git -C " + quoted + " rev-parse --short HEAD 2>/dev/null) && printf 'detached:%s' \"$h\"; } || true"
     let value = String(decoding: try ssh(command, timeout: 3), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+    let marker = "detached:"
+    if value.hasPrefix(marker) { let hash = String(value.dropFirst(marker.count)); return hash.isEmpty ? nil : GitBranchReader.detachedLabel(hash) }
     return value.isEmpty ? nil : value
   }
 

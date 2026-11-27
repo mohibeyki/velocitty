@@ -3,6 +3,10 @@
 // Terminal options in the vendored VeloKit Config.zig. Keep names in engine spelling.
 // Unsupported options are explicit errors, never silently accepted no-ops.
 public enum TerminalSettings {
+  /// Reason shared by every option that exists only for another platform frontend or font backend.
+  /// `otherPlatformKeys` selects exactly the `unavailable` entries that use it.
+  private static let otherPlatformMessage = "Requires a different platform frontend or font backend; this app uses AppKit and CoreText."
+
   public static let otherPlatformKeys: Set<String> = Set(unavailable.keys.filter {
     $0.hasPrefix("gtk-") || $0.hasPrefix("linux-cgroup") || ["class", "x11-instance-name", "freetype-load-flags"].contains($0)
   })
@@ -150,6 +154,7 @@ public enum TerminalSettings {
     "selection-word-chars",
     "shell-integration",
     "shell-integration-features",
+    "tab-inherit-working-directory",
     "term",
     "theme",
     "title",
@@ -159,6 +164,7 @@ public enum TerminalSettings {
     "window-colorspace",
     "window-decoration",
     "window-height",
+    "window-new-tab-position",
     "window-padding-balance",
     "window-padding-color",
     "window-padding-x",
@@ -175,8 +181,6 @@ public enum TerminalSettings {
     "window-vsync",
     "window-width",
     "working-directory",
-    "tab-inherit-working-directory",
-    "window-new-tab-position",
   ]
 
   public static let repeatable: Set<String> = [
@@ -208,46 +212,27 @@ public enum TerminalSettings {
     "async-backend": "Excluded; the app uses its built-in I/O backend.",
     "auto-update": "Deferred until application distribution is implemented.",
     "auto-update-channel": "Deferred until application distribution is implemented.",
-    "class":
-      "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
+    "class": otherPlatformMessage,
     "config-default-files":
       "Uses the upstream configuration-file format and search policy; Velocitty loads its own TOML file.",
-    "freetype-load-flags":
-      "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
-    "gtk-custom-css":
-      "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
-    "gtk-horizontal-tab-scroll":
-      "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
-    "gtk-opengl-debug":
-      "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
-    "gtk-quick-terminal-layer":
-      "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
-    "gtk-quick-terminal-namespace":
-      "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
-    "gtk-single-instance":
-      "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
-    "gtk-tabs-location":
-      "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
-    "gtk-titlebar":
-      "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
-    "gtk-titlebar-hide-when-maximized":
-      "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
-    "gtk-titlebar-style":
-      "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
-    "gtk-toolbar-style":
-      "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
-    "gtk-wide-tabs":
-      "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
-    "language":
-      "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
-    "linux-cgroup":
-      "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
-    "linux-cgroup-hard-fail":
-      "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
-    "linux-cgroup-memory-limit":
-      "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
-    "linux-cgroup-processes-limit":
-      "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
+    "freetype-load-flags": otherPlatformMessage,
+    "gtk-custom-css": otherPlatformMessage,
+    "gtk-horizontal-tab-scroll": otherPlatformMessage,
+    "gtk-opengl-debug": otherPlatformMessage,
+    "gtk-quick-terminal-layer": otherPlatformMessage,
+    "gtk-quick-terminal-namespace": otherPlatformMessage,
+    "gtk-single-instance": otherPlatformMessage,
+    "gtk-tabs-location": otherPlatformMessage,
+    "gtk-titlebar": otherPlatformMessage,
+    "gtk-titlebar-hide-when-maximized": otherPlatformMessage,
+    "gtk-titlebar-style": otherPlatformMessage,
+    "gtk-toolbar-style": otherPlatformMessage,
+    "gtk-wide-tabs": otherPlatformMessage,
+    "language": otherPlatformMessage,
+    "linux-cgroup": otherPlatformMessage,
+    "linux-cgroup-hard-fail": otherPlatformMessage,
+    "linux-cgroup-memory-limit": otherPlatformMessage,
+    "linux-cgroup-processes-limit": otherPlatformMessage,
     "macos-applescript": "Excluded from the application.",
     "macos-custom-icon": "Excluded; the app uses fixed artwork.",
     "macos-icon": "Excluded; the app uses fixed artwork.",
@@ -262,7 +247,6 @@ public enum TerminalSettings {
     "quick-terminal-screen": "Excluded; there is no quick-terminal window.",
     "quick-terminal-size": "Excluded; there is no quick-terminal window.",
     "quick-terminal-space-behavior": "Excluded; there is no quick-terminal window.",
-    "x11-instance-name":
-      "Requires a different platform frontend or font backend; this app uses AppKit and CoreText.",
+    "x11-instance-name": otherPlatformMessage,
   ]
 }

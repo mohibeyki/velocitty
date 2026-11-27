@@ -21,7 +21,6 @@ extension AppDelegate {
     guard !operation.slots.isEmpty else { return false }
     closeHistory.redo.forEach { $0.timer?.invalidate() }; closeHistory.redo = []
     closeHistory.closed.append(operation)
-    operation.expiry = Date(timeIntervalSinceNow: timeout)
     scheduleExpiry(operation, after: timeout)
     persistCloseIntent()
     controller.hideClosed(operation)
@@ -149,23 +148,18 @@ extension AppDelegate {
       guard let self, let operation, !self.terminating else { return }
       switch result {
       case .success(let snapshot):
-        let live = Set(snapshot.panes.map(\.terminal_id))
-        operation.slots.removeAll { slot in
-          guard let terminal = slot.pane.herdrTerminal, terminal.client === client, !live.contains(terminal.pane.terminal_id) else { return false }
-          slot.pane.close(); return true
-        }
-        operation.slots = operation.slots.map { slot in
-          guard let terminal = slot.pane.herdrTerminal, terminal.client === client,
-            let record = snapshot.panes.first(where: { $0.terminal_id == terminal.pane.terminal_id }) else { return slot }
+        let live = snapshot.panes.reduce(into: [String: HerdrClient.Pane]()) { $0[$1.terminal_id] = $1 }
+        operation.slots = operation.slots.filter { slot in
+          guard let terminal = slot.pane.herdrTerminal, terminal.client === client else { return true }
+          guard let record = live[terminal.pane.terminal_id] else { slot.pane.close(); return false }
           slot.pane.herdrTerminal = .init(client: client, pane: record)
-          return slot
+          return true
         }
         self.validateUndo(operation, clients: Array(clients.dropFirst()))
       case .failure(let error):
         operation.checking = false
         self.showMuxError(error)
-        operation.expiry = Date(timeIntervalSinceNow: max(0.01, self.native.undoTimeout))
-        self.scheduleExpiry(operation, after: max(0.01, self.native.undoTimeout))
+        self.scheduleExpiry(operation, after: self.native.undoTimeout)
         self.refreshCloseUndoBanner()
       }
     }
@@ -199,7 +193,7 @@ extension AppDelegate {
     controller.workspaceView.present()
     controller.window?.makeKeyAndOrderFront(nil)
     scheduleWorkspaceSave(controller)
-    scheduleExpiry(operation, after: max(0.01, controller.native.undoTimeout))
+    scheduleExpiry(operation, after: controller.native.undoTimeout, showsBanner: false)
   }
 
   @objc func redoClose() {

@@ -4,11 +4,11 @@ import Foundation
 /// Reads a directory's git branch by running the system git, never blocking for long.
 public enum GitBranchReader {
   /// Output of `git` run in `directory`, trimmed; nil when it fails, prints nothing or exceeds `timeout`.
-  public static func run(_ arguments: [String], in directory: String, timeout: TimeInterval = 2) -> String? {
+  public static func run(_ arguments: [String], in directory: String, timeout: TimeInterval = 2, extraEnvironment: [String: String] = [:]) -> String? {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
     process.arguments = ["--no-optional-locks", "-C", directory] + arguments
-    process.environment = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("GIT_") }
+    process.environment = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("GIT_") }.merging(extraEnvironment) { $1 }
     let output = Pipe()
     process.standardOutput = output
     process.standardError = FileHandle.nullDevice
@@ -24,10 +24,13 @@ public enum GitBranchReader {
     return value.isEmpty ? nil : value
   }
 
+  /// The label shown for a detached HEAD at `commit`.
+  public static func detachedLabel(_ commit: String) -> String { "Detached · " + commit }
+
   /// The branch name, or "Detached · <commit>"; nil outside a repository.
   public static func branch(at directory: String) -> String? {
     if let branch = run(["symbolic-ref", "--quiet", "--short", "HEAD"], in: directory) { return branch }
-    return run(["rev-parse", "--short", "HEAD"], in: directory).map { "Detached · " + $0 }
+    return run(["rev-parse", "--short", "HEAD"], in: directory).map(detachedLabel)
   }
 
   /// The repository's absolute git directory, whose changes mean the branch may have changed.
