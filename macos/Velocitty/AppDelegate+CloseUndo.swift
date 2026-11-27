@@ -65,6 +65,8 @@ extension AppDelegate {
     for operation in closeHistory.closed { operation.timer?.invalidate(); operation.applied = false }
     // Leave terminals pending when the intent could not be saved; they are ended on a later run.
     guard persistCloseIntent(), !closeHistory.pending.isEmpty else { return false }
+    // Pending terminals no known client can reach stay recorded for a later run; waiting would only time out.
+    guard !clients.isEmpty else { return false }
     var remaining = clients.count
     var replied = false
     let finish = { if !replied { replied = true; NSApp.reply(toApplicationShouldTerminate: true) } }

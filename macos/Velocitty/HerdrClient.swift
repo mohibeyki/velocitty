@@ -461,10 +461,9 @@ final class HerdrClient {
   // Shared by all windows; structural operations always request a fresh snapshot.
   func statusSnapshot() throws -> Snapshot {
     let now = ProcessInfo.processInfo.systemUptime
-    if let (time, snapshot) = cachedStatus, now - time < 1 { return snapshot }
-    let value = try snapshot(timeout: 0.75)
-    cachedStatus = (now, value)
-    return value
+    // A snapshot requested before a later change finished may lack that change, however fresh.
+    if let (time, snapshot) = cachedStatus, now - time < 1, isCurrent(snapshot) { return snapshot }
+    return try snapshot(timeout: 0.75)
   }
 
   func snapshot(timeout: TimeInterval = 5) throws -> Snapshot {
@@ -488,7 +487,7 @@ final class HerdrClient {
     guard snapshot.tabs.allSatisfy({ tab in workspaces.contains(tab.workspace_id) && paneCounts[tab.tab_id, default: 0] == tab.pane_count }),
       snapshot.panes.allSatisfy({ pane in tabs[pane.tab_id]?.workspace_id == pane.workspace_id })
     else { throw ConfigurationError("herdr returned an inconsistent session snapshot.") }
-    cachedStatus = (ProcessInfo.processInfo.systemUptime, snapshot)
+    if isCurrent(snapshot) { cachedStatus = (ProcessInfo.processInfo.systemUptime, snapshot) }
     return snapshot
   }
 

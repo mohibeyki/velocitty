@@ -30,8 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
   var workspaceCompatibilityWarning: String?
   var restoringWorkspace = false
   var synchronizingWorkspace = false
-  var deferredSnapshots: [String: HerdrClient.Snapshot] = [:]
-  var deferredSnapshotTimer: Timer?
+  let deferredSnapshots = DeferredSnapshots()
 
   weak var focusedWindow: TerminalWindowController?
   var runtime: TerminalRuntime? {
@@ -321,8 +320,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
   }
 
   func applicationWillTerminate(_ notification: Notification) {
-    deferredSnapshotTimer?.invalidate()
-    deferredSnapshotTimer = nil
+    deferredSnapshots.cancel()
     agentPollTimer?.invalidate()
     agentPollTimer = nil
     scrollbackCapture.stop()
@@ -2267,43 +2265,6 @@ extension AppDelegate {
   private func connectRemaining(_ clients: [HerdrClient]) {
     guard let client = clients.first, !terminating else { return }
     connectEndpoint(client) { [weak self] in self?.connectRemaining(Array(clients.dropFirst())) }
-  }
-
-  func connectEndpoint(_ client: HerdrClient, completion: (() -> Void)? = nil) {
-    guard !terminating, client.isEnabled else { completion?(); return }
-    if muxOpening {
-      DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-        guard let self else { completion?(); return }; self.connectEndpoint(client, completion: completion)
-      }
-      return
-    }
-    guard let runtime else { completion?(); return }
-    if herdr !== client { connectionCoordinator.clients[client.endpointID] = client }
-    muxOpening = true
-    connectionStatus[client.endpointID] = .connecting; connectionsWindow?.refresh()
-    let directory = runtime.settings.workingDirectory
-    client.perform(connectionWork(for: client, directory: directory)) { [weak self] result in
-      guard let self else { completion?(); return }
-      self.muxOpening = false
-      defer { self.connectionsWindow?.refresh(); completion?() }
-      guard !self.terminating, client.isEnabled else { return }
-      do {
-        let connected = try result.get()
-        let authoritative = self.applyConnection(connected, client: client)
-        self.connectionStatus[client.endpointID] = .connected
-        let snapshot = authoritative.excluding(terminals: self.retainedTerminalIDs)
-        let saved = self.reconcileWorkspace(authoritative, client: client)
-        self.synchronizeHerdr(connected.snapshot, client: client)
-        let attached = try self.attachSavedWindows(saved, snapshot: snapshot, client: client)
-        try self.attachRemaining(snapshot.excluding(terminals: attached), saved: saved, client: client)
-        for pane in self.windows.flatMap(\.allPanes) where pane.herdrTerminal?.client === client && pane.connectionSuspended { pane.retryAttachment() }
-        self.observeHerdr(client, snapshot: snapshot)
-        self.restoreUnavailableTabs()
-      } catch {
-        self.connectionStatus[client.endpointID] = .failed(error.localizedDescription)
-        self.restoreUnavailableTabs()
-      }
-    }
   }
 
   func restoreUnavailableTabs() {

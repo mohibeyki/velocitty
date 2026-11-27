@@ -55,20 +55,24 @@ extension AppDelegate {
     loadWorkspaceState(for: client)
     muxOpening = true
     quitTimer?.invalidate()
-    let attached = attachedTerminalIDs.union(retainedTerminalIDs)
+    // Terminals being closed are not shown either, so they do not count as something to open.
+    let unavailable = attachedTerminalIDs.union(retainedTerminalIDs).union(hiddenTerminalIDs)
     let inheritedDirectory = activeWindow.flatMap { $0.native.windowInheritsDirectory && $0.session?.herdrTerminal?.client === client ? $0.currentDirectory : nil }
     let directory = inheritedDirectory.map { URL(fileURLWithPath: $0) } ?? runtime.settings.workingDirectory
     let shellEnvironment = client.shellEnvironment(settings: runtime.settings)
     let connect = connectionWork(for: client, directory: directory)
     client.perform({ client -> ConnectionResult in
       var connected = try connect(client)
-      if connected.snapshot.panes.contains(where: { !attached.contains($0.terminal_id) }) { return connected }
-      connected.snapshot = try client.create(workspace: nil, name: "Default", directory: client.machine == nil ? directory.path : inheritedDirectory, environment: shellEnvironment)
+      if connected.snapshot.panes.contains(where: { !unavailable.contains($0.terminal_id) }) { return connected }
+      connected.snapshot = try Self.createDefaultWorkspace(client, directory: directory, inherited: inheritedDirectory, environment: shellEnvironment)
       return connected
     }) { [weak self] result in
       guard let self else { return }
       self.muxOpening = false
-      guard !self.terminating else { return }
+      guard !self.terminating else {
+        if case .success(let connected) = result { self.abandonRecreation(connected) }
+        return
+      }
       defer {
         if !self.pendingFiles.isEmpty {
           self.drainDockFiles()
@@ -78,7 +82,7 @@ extension AppDelegate {
         let connected = try result.get()
         let snapshot = self.applyConnection(connected, client: client)
         if snapshot.panes.isEmpty {
-          self.createDefaultWorkspace(client, directory: directory, environment: shellEnvironment)
+          self.createDefaultWorkspace(client, directory: directory, inherited: inheritedDirectory, environment: shellEnvironment)
           return
         }
         let restored = self.reconcileWorkspace(snapshot, client: client)
@@ -126,25 +130,70 @@ extension AppDelegate {
     }
     return opened
   }
+  func connectEndpoint(_ client: HerdrClient, completion: (() -> Void)? = nil) {
+    guard !terminating, client.isEnabled else { completion?(); return }
+    if muxOpening {
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+        guard let self else { completion?(); return }; self.connectEndpoint(client, completion: completion)
+      }
+      return
+    }
+    guard let runtime else { completion?(); return }
+    if herdr !== client { connectionCoordinator.clients[client.endpointID] = client }
+    muxOpening = true
+    connectionStatus[client.endpointID] = .connecting; connectionsWindow?.refresh()
+    let directory = runtime.settings.workingDirectory
+    client.perform(connectionWork(for: client, directory: directory)) { [weak self] result in
+      guard let self else { completion?(); return }
+      self.muxOpening = false
+      defer { self.connectionsWindow?.refresh(); completion?() }
+      guard !self.terminating, client.isEnabled else {
+        if case .success(let connected) = result { self.abandonRecreation(connected) }
+        return
+      }
+      do {
+        let connected = try result.get()
+        let authoritative = self.applyConnection(connected, client: client)
+        self.connectionStatus[client.endpointID] = .connected
+        let snapshot = authoritative.excluding(terminals: self.retainedTerminalIDs)
+        let saved = self.reconcileWorkspace(authoritative, client: client)
+        self.synchronizeHerdr(connected.snapshot, client: client)
+        let attached = try self.attachSavedWindows(saved, snapshot: snapshot, client: client)
+        try self.attachRemaining(snapshot.excluding(terminals: attached), saved: saved, client: client)
+        for pane in self.windows.flatMap(\.allPanes) where pane.herdrTerminal?.client === client && pane.connectionSuspended { pane.retryAttachment() }
+        self.observeHerdr(client, snapshot: snapshot)
+        self.restoreUnavailableTabs()
+      } catch {
+        self.connectionStatus[client.endpointID] = .failed(error.localizedDescription)
+        self.restoreUnavailableTabs()
+      }
+    }
+  }
+
   /// The handling every connection result needs first: adopts terminals the server recreated and
   /// retries closes that were left pending. Returns the live snapshot without hidden terminals.
-  func applyConnection(_ connected: ConnectionResult, client: HerdrClient) -> HerdrClient.Snapshot {
+  fileprivate func applyConnection(_ connected: ConnectionResult, client: HerdrClient) -> HerdrClient.Snapshot {
     adoptRecreation(connected, client: client)
     retryPendingClosures(client, snapshot: connected.snapshot)
     return connected.snapshot.excluding(terminals: hiddenTerminalIDs)
   }
 
   /// Reconciles the saved workspace with what this endpoint is running and keeps the result.
-  func reconcileWorkspace(_ snapshot: HerdrClient.Snapshot, client: HerdrClient) -> WorkspaceState {
+  fileprivate func reconcileWorkspace(_ snapshot: HerdrClient.Snapshot, client: HerdrClient) -> WorkspaceState {
     let reconciled = (workspaceState ?? WorkspaceState()).reconciled(endpoint: client.endpointID, live: savedNamespaces(snapshot))
     workspaceState = reconciled
     return reconciled
   }
 
+  /// A local server starts in the configured directory; a remote one only in a directory inherited from its own terminal.
+  private static func createDefaultWorkspace(_ client: HerdrClient, directory: URL, inherited: String?, environment: [String: String]) throws -> HerdrClient.Snapshot {
+    try client.create(workspace: nil, name: "Default", directory: client.machine == nil ? directory.path : inherited, environment: environment)
+  }
+
   /// A server with nothing to show gets a "Default" workspace, then the window opens again.
-  private func createDefaultWorkspace(_ client: HerdrClient, directory: URL, environment: [String: String]) {
+  private func createDefaultWorkspace(_ client: HerdrClient, directory: URL, inherited: String?, environment: [String: String]) {
     muxOpening = true
-    client.perform({ try $0.create(workspace: nil, name: "Default", directory: client.machine == nil ? directory.path : nil, environment: environment) }) { [weak self] result in
+    client.perform({ try Self.createDefaultWorkspace($0, directory: directory, inherited: inherited, environment: environment) }) { [weak self] result in
       guard let self else { return }; self.muxOpening = false
       switch result {
       case .success: self.openHerdrWindow(using: client)
@@ -155,7 +204,7 @@ extension AppDelegate {
 
   /// Gives each saved window group the terminals of its namespaces that no window shows yet, either
   /// by adding them to the group's open window or by opening one. Returns every terminal now attached.
-  func attachSavedWindows(_ saved: WorkspaceState, snapshot: HerdrClient.Snapshot, client: HerdrClient) throws -> Set<String> {
+  fileprivate func attachSavedWindows(_ saved: WorkspaceState, snapshot: HerdrClient.Snapshot, client: HerdrClient) throws -> Set<String> {
     var attached = attachedTerminalIDs
     for group in saved.windows ?? [] {
       let tabs = Set(saved.namespaces.filter { group.namespaceIDs.contains($0.id) }.flatMap(\.tabs).map(\.id))
@@ -177,7 +226,7 @@ extension AppDelegate {
   }
 
   /// Terminals no saved window group claims go to the active herdr window, or to a new one.
-  func attachRemaining(_ remaining: HerdrClient.Snapshot, saved: WorkspaceState, client: HerdrClient) throws {
+  fileprivate func attachRemaining(_ remaining: HerdrClient.Snapshot, saved: WorkspaceState, client: HerdrClient) throws {
     guard !remaining.panes.isEmpty else { return }
     if let destination = activeWindow, destination.session?.herdrTerminal != nil {
       try destination.addHerdrTerminals(remaining, excluding: [], client: client)
@@ -229,21 +278,20 @@ extension AppDelegate {
   private func applyHerdrSnapshot(_ incoming: HerdrClient.Snapshot, client: HerdrClient) {
     // A deferred snapshot can predate a mutation whose result is already shown; a fresh one follows.
     guard client.isCurrent(incoming) else {
-      deferredSnapshots.removeValue(forKey: client.endpointID)
+      deferredSnapshots.discard(client.endpointID)
       client.onWorkspaceEvent?()
       return
     }
     let serverSnapshot = incoming.excluding(terminals: hiddenTerminalIDs)
     let targets = herdrTargets(client)
     // Without a window showing this client there is nothing to synchronize or defer.
-    guard !targets.isEmpty else { deferredSnapshots.removeValue(forKey: client.endpointID); return }
+    guard !targets.isEmpty else { deferredSnapshots.discard(client.endpointID); return }
     guard !terminating, !muxOpening, !restoringWorkspace, !synchronizingWorkspace,
       targets.allSatisfy({ !$0.muxBusy && !$0.hasPendingMuxActions && $0.window?.attachedSheet == nil }) else {
-      deferredSnapshots[client.endpointID] = incoming
-      scheduleDeferredSnapshotDrain()
+      deferredSnapshots.store(incoming, for: client.endpointID) { [weak self] in self?.drainDeferredSnapshots() }
       return
     }
-    deferredSnapshots.removeValue(forKey: client.endpointID)
+    deferredSnapshots.discard(client.endpointID)
     let visibleNamespaces = Set(windows.flatMap(\.namespaces).compactMap(\.id))
     let detached = Set((workspaceState?.namespaces ?? []).filter { !visibleNamespaces.contains($0.id) }.flatMap(\.tabs).map(\.id))
     let snapshot = serverSnapshot.excluding(terminals: retainedTerminalIDs.union(serverSnapshot.panes.filter { detached.contains(localTabID($0)) }.map(\.terminal_id)))
@@ -271,11 +319,11 @@ extension AppDelegate {
     var sessions = Dictionary(uniqueKeysWithValues: oldPanes.compactMap { pane in
       pane.herdrTerminal.map { ($0.pane.terminal_id, pane) }
     })
+    guard let runtime else { return }
     var created: [TerminalSession] = []
     do {
       // Prepare before touching any existing window, so failures are atomic.
       for record in snapshot.panes where sessions[record.terminal_id] == nil {
-        guard let runtime else { return }
         let pane = runtime.makeSession()
         pane.herdrTerminal = .init(client: client, pane: record)
         pane.currentDirectory = record.cwd
@@ -304,31 +352,21 @@ extension AppDelegate {
     for controller in targets where !controller.closing { scheduleWorkspaceSave(controller) }
   }
 
-  private func scheduleDeferredSnapshotDrain() {
-    guard deferredSnapshotTimer == nil else { return }
-    deferredSnapshotTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
-      self?.drainDeferredSnapshots()
-    }
-  }
-
   private func drainDeferredSnapshots() {
     // Each value is the newest snapshot for its endpoint; older work is obsolete.
-    for (endpoint, snapshot) in deferredSnapshots {
+    for (endpoint, snapshot) in deferredSnapshots.snapshots {
       guard let client = client(for: endpoint), client.isEnabled else {
-        deferredSnapshots.removeValue(forKey: endpoint)
+        deferredSnapshots.discard(endpoint)
         continue
       }
       // A newer failure supersedes the stale snapshot.
       guard connectionStatus[endpoint] == .connected else {
-        deferredSnapshots.removeValue(forKey: endpoint)
+        deferredSnapshots.discard(endpoint)
         continue
       }
       applyHerdrSnapshot(snapshot, client: client)
     }
-    if deferredSnapshots.isEmpty {
-      deferredSnapshotTimer?.invalidate()
-      deferredSnapshotTimer = nil
-    }
+    deferredSnapshots.stopWhenEmpty()
   }
 
   func attachHerdrWindow(_ snapshot: HerdrClient.Snapshot, client: HerdrClient,
@@ -376,4 +414,27 @@ extension AppDelegate {
     }
   }
 
+}
+
+/// The newest snapshot per endpoint that could not be applied while presentation was busy, retried
+/// on a timer until none is left.
+final class DeferredSnapshots {
+  private(set) var snapshots: [String: HerdrClient.Snapshot] = [:]
+  private var timer: Timer?
+
+  /// Keeps the snapshot and makes sure `drain` runs until it has been dealt with.
+  func store(_ snapshot: HerdrClient.Snapshot, for endpoint: String, drain: @escaping () -> Void) {
+    snapshots[endpoint] = snapshot
+    guard timer == nil else { return }
+    timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in drain() }
+  }
+
+  func discard(_ endpoint: String) { snapshots.removeValue(forKey: endpoint) }
+
+  func stopWhenEmpty() { if snapshots.isEmpty { cancel() } }
+
+  func cancel() {
+    timer?.invalidate()
+    timer = nil
+  }
 }

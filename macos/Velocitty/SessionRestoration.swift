@@ -70,49 +70,64 @@ final class ScrollbackCapture {
   }
 }
 
+/// What the settings allow for scrollback, read once per round rather than per pane.
+struct ScrollbackPolicy {
+  let store: ScrollbackStore
+  let restoreSession: Bool
+  let persistsWorkspace: Bool
+  let savesWindows: Bool
+
+  /// Where a terminal's scrollback is kept, or nil when it is not saved. Standalone terminals follow
+  /// window restoration; herdr terminals follow workspace persistence. Remote servers keep their own
+  /// terminals and cannot be recreated from here.
+  func store(for pane: TerminalSession) -> ScrollbackStore? {
+    guard restoreSession else { return nil }
+    if let terminal = pane.herdrTerminal { return persistsWorkspace && terminal.client.machine == nil ? store : nil }
+    return savesWindows ? store : nil
+  }
+}
+
 extension AppDelegate {
   var restoreSessionEnabled: Bool { runtime?.settings.interface["restore_session"] != "false" }
 
-  private var scrollbackLocation: ScrollbackStore {
-    ScrollbackStore(besideStateAt: workspaceStateURL ?? WorkspaceStateStore().url)
+  var scrollbackPolicy: ScrollbackPolicy {
+    ScrollbackPolicy(store: ScrollbackStore(besideStateAt: workspaceStateURL ?? WorkspaceStateStore().url),
+      restoreSession: restoreSessionEnabled, persistsWorkspace: workspacePersistenceEnabled, savesWindows: native.windowSaveState != "never")
   }
 
-  /// Whether terminals a restarted server lost are brought back. Remote servers keep their own
-  /// terminals and cannot be recreated from here.
+  /// Whether terminals a restarted server lost are brought back.
   func restoresTerminals(of client: HerdrClient) -> Bool { restoreSessionEnabled && client.machine == nil }
 
-  /// Where a terminal's scrollback is kept, or nil when it is not saved. Standalone terminals follow
-  /// window restoration; herdr terminals follow workspace persistence.
-  func scrollbackStore(for pane: TerminalSession) -> ScrollbackStore? {
-    guard restoreSessionEnabled else { return nil }
-    if let terminal = pane.herdrTerminal { return workspacePersistenceEnabled && restoresTerminals(of: terminal.client) ? scrollbackLocation : nil }
-    return native.windowSaveState == "never" ? nil : scrollbackLocation
-  }
+  /// Where a terminal's scrollback is kept, or nil when it is not saved.
+  func scrollbackStore(for pane: TerminalSession) -> ScrollbackStore? { scrollbackPolicy.store(for: pane) }
 
   func startScrollbackCapture() {
     pruneScrollback()
     scrollbackCapture.start { [weak self] in
       guard let self else { return }
-      self.scrollbackCapture.enqueue(self.windows.flatMap(\.allPanes).compactMap(self.scrollbackJob), periodic: true)
+      let policy = self.scrollbackPolicy
+      self.scrollbackCapture.enqueue(self.windows.flatMap(\.allPanes).compactMap { self.scrollbackJob(for: $0, policy: policy) }, periodic: true)
     }
   }
 
   /// Everything is removed when the setting is off; otherwise only files of terminals no longer saved.
   func pruneScrollback() {
-    guard restoreSessionEnabled else { scrollbackLocation.prune(keeping: [], olderThan: 0); return }
+    let policy = scrollbackPolicy
+    guard policy.restoreSession else { policy.store.prune(keeping: [], olderThan: 0); return }
     guard let state = workspaceState else { return }
     let saved = state.namespaces.flatMap(\.tabs).flatMap { $0.panes ?? [] }.map(\.terminalID)
-    scrollbackLocation.prune(keeping: Set(saved).subtracting(state.pendingTerminalClosures ?? []))
+    policy.store.prune(keeping: Set(saved).subtracting(state.pendingTerminalClosures ?? []))
   }
 
   /// Reads each pane's text now, on the main thread where its surface lives, and writes it elsewhere.
   func saveScrollback(of panes: [TerminalSession], blocking: Bool = false) {
-    let jobs = panes.compactMap(scrollbackJob)
+    let policy = scrollbackPolicy
+    let jobs = panes.compactMap { scrollbackJob(for: $0, policy: policy) }
     if blocking { scrollbackCapture.runBlocking(jobs, timeout: 2.5) } else { scrollbackCapture.enqueue(jobs, periodic: false) }
   }
 
-  private func scrollbackJob(for pane: TerminalSession) -> (() -> Void)? {
-    guard let store = scrollbackStore(for: pane) else { return nil }
+  private func scrollbackJob(for pane: TerminalSession, policy: ScrollbackPolicy) -> (() -> Void)? {
+    guard let store = policy.store(for: pane) else { return nil }
     let key = pane.scrollbackKey
     if let terminal = pane.herdrTerminal {
       let client = terminal.client, paneID = terminal.pane.pane_id
@@ -122,7 +137,7 @@ extension AppDelegate {
     return { _ = try? store.save(text, key: key) }
   }
 
-  func discardScrollback(keys: [String]) { scrollbackCapture.discard(keys, from: scrollbackLocation) }
+  func discardScrollback(keys: [String]) { scrollbackCapture.discard(keys, from: scrollbackPolicy.store) }
 
   /// A closing window detaches herdr terminals, whose text is kept for a later restart, and ends
   /// standalone terminals, whose text goes with them unless the application is quitting.
@@ -158,7 +173,7 @@ extension AppDelegate {
   func connectionWork(for client: HerdrClient, directory: URL) -> (HerdrClient) throws -> ConnectionResult {
     let saved = restoresTerminals(of: client) ? workspaceState : nil
     let hidden = hiddenTerminalIDs
-    let store = scrollbackLocation
+    let store = scrollbackPolicy.store
     let environment = runtime.map { client.shellEnvironment(settings: $0.settings) } ?? [:]
     return { client in
       let (snapshot, started) = try client.connectReportingStart(directory: directory)
@@ -175,6 +190,17 @@ extension AppDelegate {
     workspaceState = state.recreated(replacements: connected.replacements)
     workspacePersistence.dirty = true
     flushWorkspaceSaveSynchronously()
+    // The saved workspace now names the new terminals, so the old text is no longer needed.
+    discardScrollback(keys: connected.shells.compactMap(\.replacedID))
+  }
+
+  /// For a result that will not be adopted: the old text stays with the saved workspace, which still
+  /// names the old terminals, and what was prepared for the new ones is removed.
+  func abandonRecreation(_ connected: ConnectionResult) {
+    for shell in connected.shells where shell.replacedID != nil || shell.file != nil {
+      if let file = shell.file { try? FileManager.default.removeItem(at: file) }
+      if shell.replacedID != nil { discardScrollback(keys: [shell.pane.terminal_id]) }
+    }
   }
 }
 
@@ -188,6 +214,8 @@ extension HerdrClient {
     let file: URL?
     /// The terminal's size when it was prepared; it changes once a window attaches and sizes it.
     let rows: Int?
+    /// The terminal whose saved text was copied for this one; removed once the workspace refers to the new one.
+    let replacedID: String?
   }
 
   /// Gives the terminals a new server lost or renumbered their shells back. The snapshot is taken
@@ -206,8 +234,13 @@ extension HerdrClient {
     }
     let created = recreate(lost, environment: environment, scrollback: scrollback)
     shells += created.shells
-    return ConnectionResult(snapshot: created.panes.isEmpty ? snapshot : try self.snapshot(),
-      replacements: rebound.merging(created.panes) { first, _ in first }, shells: shells)
+    do {
+      return ConnectionResult(snapshot: created.panes.isEmpty ? snapshot : try self.snapshot(),
+        replacements: rebound.merging(created.panes) { first, _ in first }, shells: shells)
+    } catch {
+      Self.abandon(shells, scrollback: scrollback)
+      throw error
+    }
   }
 
   /// Creates a terminal for each lost one, at its working directory, with its namespace's panes in
@@ -228,24 +261,32 @@ extension HerdrClient {
     return (created, shells)
   }
 
+  /// Removes what prepareShell wrote, when the shells will never be shown.
+  static func abandon(_ shells: [ShellRestore], scrollback: ScrollbackStore) {
+    for shell in shells {
+      if let file = shell.file { try? FileManager.default.removeItem(at: file) }
+      if shell.replacedID != nil { scrollback.remove([shell.pane.terminal_id]) }
+    }
+  }
+
   private static func existingDirectory(_ path: String?) -> String? {
     var isDirectory: ObjCBool = false
     return path.flatMap { FileManager.default.fileExists(atPath: $0, isDirectory: &isDirectory) && isDirectory.boolValue ? $0 : nil }
   }
 
-  /// Moves the old terminal's saved output to the new terminal and writes what its shell will print.
+  /// Copies the old terminal's saved output to the new terminal and writes what its shell will print.
   /// Nothing is typed yet: the shell is only worth talking to once a window has attached and sized it.
   private func prepareShell(of oldID: String, in pane: Pane, directory: String?, scrollback: ScrollbackStore) -> ShellRestore {
-    var file: URL?
+    var file: URL?, replaced: String?
     if pane.agent == nil, let saved = scrollback.load(oldID) {
       do {
         try scrollback.save(saved.text, key: pane.terminal_id)
-        scrollback.remove([oldID])
+        if oldID != pane.terminal_id { replaced = oldID }
         file = try scrollback.writeTemporary(SessionScrollback.display(saved.text, savedAt: saved.savedAt), name: pane.terminal_id)
       } catch { NSLog("Could not prepare the saved output of %@: %@", oldID, error.localizedDescription) }
     }
     let target = Self.existingDirectory(directory).flatMap { $0 == pane.cwd ? nil : $0 }
-    return ShellRestore(pane: pane, directory: pane.agent == nil ? target : nil, file: file, rows: presentation(paneID: pane.pane_id)?.rows)
+    return ShellRestore(pane: pane, directory: pane.agent == nil ? target : nil, file: file, rows: presentation(paneID: pane.pane_id)?.rows, replacedID: replaced)
   }
 
   /// A terminal's size and how much has been drawn in it, which change as it is attached and as its
@@ -260,9 +301,19 @@ extension HerdrClient {
     return Presentation(rows: (pane["scroll"] as? [String: Any])?["viewport_rows"] as? Int, revision: pane["revision"] as? Int)
   }
 
+  /// Each restoration can wait seconds for its terminal to settle, so only a few run at once; after a
+  /// reboot there can be many.
+  private static let shellRestoration: OperationQueue = {
+    let queue = OperationQueue()
+    queue.name = "velocitty.shell-restoration"
+    queue.qualityOfService = .utility
+    queue.maxConcurrentOperationCount = 4
+    return queue
+  }()
+
   func restoreShells(_ shells: [ShellRestore]) {
     for shell in shells where shell.directory != nil || shell.file != nil {
-      DispatchQueue.global(qos: .utility).async { self.restoreShell(shell) }
+      Self.shellRestoration.addOperation { self.restoreShell(shell) }
     }
   }
 

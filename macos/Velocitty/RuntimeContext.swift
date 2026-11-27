@@ -149,10 +149,10 @@ final class RuntimeContext: NSObject {
     switch action.tag {
     case GHOSTTY_ACTION_START_SEARCH:
       let needle = action.action.start_search.needle.map { String(cString: $0) }
-      perform { view, controller in view?.session?.chrome?.startSearch(needle) }
+      perform { view, _ in view?.session?.chrome?.startSearch(needle) }
 
     case GHOSTTY_ACTION_END_SEARCH:
-      perform { view, controller in view?.session?.chrome?.hideSearch() }
+      perform { view, _ in view?.session?.chrome?.hideSearch() }
 
     case GHOSTTY_ACTION_SEARCH_TOTAL:
       let total = action.action.search_total.total
@@ -175,12 +175,12 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_SCROLLBAR:
       let state = action.action.scrollbar
-      perform { view, controller in view?.session?.chrome?.updateScrollbar(state) }
+      perform { view, _ in view?.session?.chrome?.updateScrollbar(state) }
 
     case GHOSTTY_ACTION_OPEN_URL:
       let link = action.action.open_url
       guard let value = Self.validLinkText(link) else { return true }
-      perform { view, controller in view?.session?.links.open(value, kind: link.kind, from: view) }
+      perform { view, _ in view?.session?.links.open(value, kind: link.kind, from: view) }
 
     case GHOSTTY_ACTION_MOUSE_OVER_LINK:
       let link = action.action.mouse_over_link
@@ -192,7 +192,7 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_MOUSE_SHAPE:
       let shape = action.action.mouse_shape
-      perform { view, controller in Self.applyCursor(shape, view: view) }
+      perform { view, _ in Self.applyCursor(shape, view: view) }
 
     case GHOSTTY_ACTION_MOUSE_VISIBILITY:
       let hidden = action.action.mouse_visibility == GHOSTTY_MOUSE_HIDDEN
@@ -263,18 +263,13 @@ final class RuntimeContext: NSObject {
     case GHOSTTY_ACTION_GOTO_SPLIT:
       guard let pane = view?.session, let controller = pane.windowController,
         controller.visiblePanes.count > 1 else { return false }
-      let directions = ["previous", "next", "up", "left", "down", "right"]
-      let index = Int(action.action.goto_split.rawValue)
-      guard directions.indices.contains(index) else { return false }
-      let direction = directions[index]
+      guard let direction = Self.direction(Int(action.action.goto_split.rawValue), in: Self.splitFocusDirections) else { return false }
       perform { view, controller in controller?.focusPane(direction, from: view?.session) }
 
     case GHOSTTY_ACTION_RESIZE_SPLIT:
       let value = action.action.resize_split
-      let directions = ["up", "down", "left", "right"]
-      let index = Int(value.direction.rawValue)
-      guard directions.indices.contains(index) else { return false }
-      perform { view, controller in controller?.resizePane(directions[index], amount: Double(value.amount) / 100, from: view?.session) }
+      guard let direction = Self.direction(Int(value.direction.rawValue), in: Self.splitResizeDirections) else { return false }
+      perform { view, controller in controller?.resizePane(direction, amount: Double(value.amount) / 100, from: view?.session) }
 
     case GHOSTTY_ACTION_NEW_TAB:
       perform { [weak self] _, controller in
@@ -331,13 +326,13 @@ final class RuntimeContext: NSObject {
 
     case GHOSTTY_ACTION_CELL_SIZE:
       let cell = action.action.cell_size
-      perform { view, controller in Self.applyCellSize(cell, view: view) }
+      perform { view, _ in Self.applyCellSize(cell, view: view) }
 
     case GHOSTTY_ACTION_RESET_WINDOW_SIZE:
-      perform { view, controller in controller?.resetWindowSize() }
+      perform { _, controller in controller?.resetWindowSize() }
 
     case GHOSTTY_ACTION_CLOSE_ALL_WINDOWS:
-      perform { view, controller in (NSApp.delegate as? AppDelegate)?.closeAllWindows() }
+      perform { _, _ in (NSApp.delegate as? AppDelegate)?.closeAllWindows() }
 
     case GHOSTTY_ACTION_TOGGLE_BACKGROUND_OPACITY:
       perform { view, controller in Self.toggleOpacity(view: view, controller: controller) }
@@ -349,7 +344,7 @@ final class RuntimeContext: NSObject {
       perform { view, controller in controller?.showCommands() }
 
     case GHOSTTY_ACTION_NEW_WINDOW:
-      perform { view, controller in (NSApp.delegate as? AppDelegate)?.newWindow() }
+      perform { _, _ in (NSApp.delegate as? AppDelegate)?.newWindow() }
 
     case GHOSTTY_ACTION_PRESENT_TERMINAL:
       perform { view, controller in
@@ -358,7 +353,7 @@ final class RuntimeContext: NSObject {
       }
 
     case GHOSTTY_ACTION_TOGGLE_MAXIMIZE:
-      perform { view, controller in view?.window?.zoom(nil) }
+      perform { view, _ in view?.window?.zoom(nil) }
 
     case GHOSTTY_ACTION_TOGGLE_FULLSCREEN:
       perform { view, controller in controller?.toggleFullscreen() }
@@ -390,7 +385,7 @@ final class RuntimeContext: NSObject {
       perform { _, controller in controller?.owner?.redoClose() }
 
     case GHOSTTY_ACTION_QUIT:
-      perform { view, controller in
+      perform { _, _ in
         NSApp.terminate(nil)
       }
 
@@ -412,6 +407,12 @@ final class RuntimeContext: NSObject {
     perform { [weak self] _, _ in self?.owner?.configurationDidChange() }
     return accepted
   }
+
+  /// Indexed by the engine's goto_split and resize_split enums.
+  private static let splitFocusDirections = ["previous", "next", "up", "left", "down", "right"]
+  private static let splitResizeDirections = ["up", "down", "left", "right"]
+
+  private static func direction(_ index: Int, in table: [String]) -> String? { table.indices.contains(index) ? table[index] : nil }
 
   private static func applyBackground(_ color: ghostty_action_color_change_s, view: TerminalView?, controller: TerminalWindowController?) {
     view?.session?.backgroundColor = NSColor(srgbRed: Double(color.r) / 255,
