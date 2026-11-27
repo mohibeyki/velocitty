@@ -1510,9 +1510,10 @@ extension TerminalWindowController {
     let directory = native.tabInheritsDirectory && session.herdrTerminal?.client === client ? currentDirectory ?? fallback : fallback
     let existing = owner?.attachedTerminalIDs ?? Set(allPanes.compactMap { $0.herdrTerminal?.pane.terminal_id })
     let shellEnvironment = client.shellEnvironment(settings: session.settings)
+    let workingDirectory = session.settings.workingDirectory
     muxBusy = true
     client.perform({ client -> (HerdrClient.Snapshot, String) in
-      _ = try client.connect(directory: session.settings.workingDirectory)
+      _ = try client.connect(directory: workingDirectory)
       let pane = try client.createPane(workspace: workspace, name: name, directory: directory, environment: shellEnvironment)
       return (try client.snapshot(), pane.tab_id)
     }) { [weak self] result in

@@ -375,11 +375,15 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
       status.stringValue = "Draft updated. Save & Reload to apply."
     } catch { showError(error) }
   }
+  private var savingDocument = false
   @objc private func saveDocument() {
     do {
       configDocument.text = editor.string
       try configDocument.save()
       window?.isDocumentEdited = false
+      // The reload hook would re-read the file this window just wrote, resetting the cursor and scroll.
+      savingDocument = true
+      defer { savingDocument = false }
       appOwner?.reloadConfiguration(nil)
       if let config = appOwner?.runtime?.settings {
         let edited = configDocument.url
@@ -423,7 +427,7 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
   /// Called after the configuration was reloaded elsewhere. A clean document is re-read so the next save
   /// compares against the current file; unsaved drafts are kept.
   func configurationReloaded() {
-    guard !configDocument.hasChanges, let config = appOwner?.runtime?.settings else { return }
+    guard !savingDocument, !configDocument.hasChanges, let config = appOwner?.runtime?.settings else { return }
     let edited = configDocument.url
     files = [config.source] + config.sourceFiles.filter { $0 != config.source }
     if !files.contains(edited) { files.append(edited) }

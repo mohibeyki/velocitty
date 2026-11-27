@@ -18,4 +18,11 @@ final class SettingsNumberTests: XCTestCase {
       XCTAssertFalse(SettingsNumber.format(value).contains("e"))
     }
   }
+
+  func testAccumulatedStepperValuesAreClean() {
+    XCTAssertEqual(SettingsNumber.format(0.1 + 0.1 + 0.1), "0.3")
+    XCTAssertEqual(SettingsNumber.format(0.7 + 0.1), "0.8")
+    XCTAssertEqual(SettingsNumber.format(0.00001), "0.00001")
+    XCTAssertFalse(SettingsNumber.format(0.00001234).contains("e"))
+  }
 }
