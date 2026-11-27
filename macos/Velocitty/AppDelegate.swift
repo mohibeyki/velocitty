@@ -371,8 +371,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     case #selector(undoClose): return NSApp.keyWindow?.firstResponder?.undoManager?.canUndo == true || closeHistory.closed.contains { $0.applied }
     case #selector(redoClose): return NSApp.keyWindow?.firstResponder?.undoManager?.canRedo == true || !closeHistory.redo.isEmpty
     case #selector(zoomPane), #selector(equalizePanes): return (activeWindow?.activeTab.panes.count ?? 0) > 1 && activeWindow?.muxBusy != true
-    case #selector(closePane), #selector(newNamespace), #selector(editNamespace), #selector(closeNamespace),  #selector(closeTab), #selector(nextTab), #selector(previousTab), #selector(renameTab),
-      #selector(moveTabLeft), #selector(moveTabRight), #selector(closeWindow), #selector(showCommands), #selector(findTerminal),
+    case #selector(closePane), #selector(closeTab), #selector(newNamespace), #selector(closeWindow), #selector(showCommands), #selector(findTerminal),
       #selector(findNext), #selector(findPrevious):
       return activeWindow?.session?.view?.surface != nil
     default:
@@ -1733,7 +1732,7 @@ extension TerminalWindowController {
 extension TerminalWindowController {
   func addHerdrTerminals(_ snapshot: HerdrClient.Snapshot, excluding excluded: Set<String>, restoring: Bool = false, client explicitClient: HerdrClient? = nil) throws {
     guard let client = explicitClient ?? session?.herdrTerminal?.client, let runtime = session?.runtime else { return }
-    let attached = (owner?.attachedTerminalIDs ?? Set(allPanes.compactMap { $0.herdrTerminal?.pane.terminal_id })).union(owner?.retainedTerminalIDs ?? [])
+    let attached = (owner?.attachedTerminalIDs ?? Set(allPanes.compactMap { $0.herdrTerminal?.pane.terminal_id })).union(owner?.hiddenTerminalIDs ?? []).union(owner?.retainedTerminalIDs ?? [])
     let excluded = excluded.union(attached)
     var prepared: [String: TerminalSession] = [:]
     do {
