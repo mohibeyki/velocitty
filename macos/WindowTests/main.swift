@@ -1005,7 +1005,7 @@ func checkClipboardQueue() {
   firstAlert.buttons[0].performClick(nil)
   waitUntil("The first clipboard reply was not sent") { replies.count == 1 }
   precondition(replies.count == 1 && replies[0].0 == 1 && replies[0].1 && replies[0].2)
-  precondition(queue.confirmation!.messageText == "Clipboard test 2")
+  waitUntil("The second clipboard confirmation did not appear") { queue.confirmation?.messageText == "Clipboard test 2" }
   queue.confirmation!.suppressionButton!.state = .on
   queue.confirmation!.buttons[1].performClick(nil)
   waitUntil("The second clipboard reply was not sent") { replies.count == 2 }
