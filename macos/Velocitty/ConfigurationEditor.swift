@@ -131,7 +131,7 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
     search.action = #selector(filterSettings)
     category.addItems(withTitles: ["All Settings"] + SettingsCatalog.categories)
     category.target = self; category.action = #selector(filterSettings)
-    number.target = self; number.action = #selector(stepValue); number.minValue = -1_000_000; number.maxValue = 1_000_000
+    number.target = self; number.action = #selector(stepValue); number.minValue = -SettingsNumber.limit; number.maxValue = SettingsNumber.limit
     color.target = self; color.action = #selector(colorValue)
     browseThemes.target = appOwner; browseThemes.action = #selector(AppDelegate.showThemePicker)
     addEntry.target = self; addEntry.action = #selector(appendEntry)
@@ -298,7 +298,7 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
     configDocument.text = editor.string
     window?.isDocumentEdited = configDocument.hasChanges
   }
-  @objc private func stepValue() { value.stringValue = String(format: "%g", number.doubleValue); applyValue() }
+  @objc private func stepValue() { value.stringValue = SettingsNumber.format(number.doubleValue); applyValue() }
   @objc private func colorValue() {
     guard let rgb = color.color.usingColorSpace(.sRGB) else { return }
     value.stringValue = String(format: "\"#%02X%02X%02X\"", Int((rgb.redComponent * 255).rounded()), Int((rgb.greenComponent * 255).rounded()), Int((rgb.blueComponent * 255).rounded()))
@@ -419,6 +419,16 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
       refreshControls()
       status.stringValue = ""
     } catch { showError(error) }
+  }
+  /// Called after the configuration was reloaded elsewhere. A clean document is re-read so the next save
+  /// compares against the current file; unsaved drafts are kept.
+  func configurationReloaded() {
+    guard !configDocument.hasChanges, let config = appOwner?.runtime?.settings else { return }
+    let edited = configDocument.url
+    files = [config.source] + config.sourceFiles.filter { $0 != config.source }
+    if !files.contains(edited) { files.append(edited) }
+    filePicker.removeAllItems(); filePicker.addItems(withTitles: files.map(\.path))
+    loadFile(files.firstIndex(of: edited) ?? 0)
   }
   @objc private func revertDocument() { confirmDiscard { [weak self] in guard let self else { return }; self.loadFile(self.currentFile) } }
   @objc private func openExternal() { ConfigurationEditor().open(configDocument.url) { [weak self] error in if let error { self?.status.stringValue = error.localizedDescription } } }
