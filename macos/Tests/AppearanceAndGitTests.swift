@@ -27,15 +27,19 @@ final class AppearanceAndGitTests: XCTestCase {
   func testGitBranchReader() throws {
     let root = try makeTemporaryDirectory().resolvingSymlinksInPath().path
     XCTAssertNil(GitBranchReader.branch(at: root))
-    guard GitBranchReader.run(["init", "-q", "-b", "trunk"], in: root) == nil else { return XCTFail("git init prints nothing") }
+    // Isolate from the developer's global/system git config (signing, hooks, templates).
+    let isolated = ["HOME": root, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"]
+    func git(_ arguments: [String]) -> String? { GitBranchReader.run(arguments, in: root, extraEnvironment: isolated) }
+    guard git(["init", "-q", "-b", "trunk"]) == nil else { return XCTFail("git init prints nothing") }
     let gitDirectory = try XCTUnwrap(GitBranchReader.gitDirectory(at: root))
     XCTAssertEqual(URL(fileURLWithPath: gitDirectory).resolvingSymlinksInPath().path, root + "/.git")
     // An unborn branch has a name but no commit.
     XCTAssertEqual(GitBranchReader.branch(at: root), "trunk")
-    let commit = ["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "x"]
-    _ = GitBranchReader.run(commit, in: root)
+    let commit = ["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", "commit", "-q", "--no-verify", "--allow-empty", "-m", "x"]
+    XCTAssertNil(git(commit), "git commit prints nothing")
+    let head = try XCTUnwrap(git(["rev-parse", "--short", "HEAD"]), "the commit must have succeeded")
     XCTAssertEqual(GitBranchReader.branch(at: root), "trunk")
-    _ = GitBranchReader.run(["checkout", "-q", "--detach"], in: root)
-    XCTAssertTrue(GitBranchReader.branch(at: root)?.hasPrefix("Detached · ") == true)
+    XCTAssertNil(git(["checkout", "-q", "--detach"]))
+    XCTAssertEqual(GitBranchReader.branch(at: root), GitBranchReader.detachedLabel(head))
   }
 }

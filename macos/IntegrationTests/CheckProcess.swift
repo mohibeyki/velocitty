@@ -31,7 +31,14 @@ extension XCTestCase {
     process.terminationHandler = { _ in finished.fulfill() }
     try process.run()
     let result = XCTWaiter.wait(for: [finished], timeout: timeout)
-    if result != .completed { process.terminate() }
+    if result != .completed {
+      // Make sure the child is gone before the log directory is removed.
+      process.terminate()
+      if XCTWaiter.wait(for: [finished], timeout: 2) != .completed, process.isRunning {
+        kill(process.processIdentifier, SIGKILL)
+        process.waitUntilExit()
+      }
+    }
     let output = (try? String(contentsOf: logURL, encoding: .utf8)) ?? ""
     let attachment = XCTAttachment(string: output)
     attachment.name = "\(name) \(arguments.joined(separator: " ")) output"
