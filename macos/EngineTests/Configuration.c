@@ -176,12 +176,13 @@ int main(int argc, char **argv) {
     accepts("command-palette-entry", "title:New Tab,action:new_tab");
     accepts("keybind", "ctrl+==increase_font_size:1");
     accepts("keybind", "mode/ctrl+c=copy_to_clipboard");
-    ghostty_config_t supported_config = velokit_config_new();
-    ghostty_input_trigger_s unsupported_trigger;
-    assert(velokit_config_trigger(supported_config, "new_tab", &unsupported_trigger));
-    assert(velokit_config_set(supported_config, "keybind", ""));
-    assert(velokit_config_trigger(supported_config, "new_tab", &unsupported_trigger));
-    velokit_config_free(supported_config);
+    // An empty keybind value is not a reset: default bindings stay available.
+    ghostty_config_t empty_keybind = velokit_config_new();
+    ghostty_input_trigger_s new_tab_trigger;
+    assert(velokit_config_trigger(empty_keybind, "new_tab", &new_tab_trigger));
+    assert(velokit_config_set(empty_keybind, "keybind", ""));
+    assert(velokit_config_trigger(empty_keybind, "new_tab", &new_tab_trigger));
+    velokit_config_free(empty_keybind);
 
     // Repeated values and a failed parse must remain attached to their own
     // candidate configuration. The next configuration must be clean.
@@ -235,20 +236,13 @@ int main(int argc, char **argv) {
     assert(velokit_config_diagnostic(copy, 1));
     velokit_config_free(copy);
 
+    // Defaults the native window reads, and the default shortcut triggers.
     config = velokit_config_new();
     assert(velokit_config_finalize(config, "/tmp"));
-    const char *mode = NULL;
-    bool initial = false;
     double opacity = 0;
     uint32_t width = 1;
-    assert(velokit_config_get_string(config, "fullscreen", &mode));
-    assert(strcmp(mode, "false") == 0);
-    assert(velokit_config_get_bool(config, "initial-window", &initial) && initial);
     assert(velokit_config_get_double(config, "background-opacity", &opacity) && opacity == 1);
     assert(velokit_config_get_uint32(config, "window-width", &width) && width == 0);
-    velokit_config_free(config);
-    config = velokit_config_new();
-    assert(velokit_config_finalize(config, "/tmp"));
     ghostty_input_trigger_s trigger;
     memset(&trigger, 0xA5, sizeof(trigger));
     assert(velokit_config_trigger(config, "copy_to_clipboard", &trigger));

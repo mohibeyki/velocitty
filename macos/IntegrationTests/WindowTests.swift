@@ -11,12 +11,8 @@ final class WindowTests: XCTestCase {
   func testWorkspacePersistence() throws {
     try runCheck("WindowChecks", arguments: ["--workspace-persistence"], success: "Workspace persistence tests passed.")
   }
-  func testPersistenceCoordination() throws {
-    try runCheck("WindowChecks", arguments: ["--persistence-coordination"], success: "Persistence coordination checks passed.")
-  }
   func testRelaunchRestoration() throws {
     let files = FileManager.default
-    let products = Bundle(for: EngineTests.self).bundleURL.deletingLastPathComponent()
     let root = files.temporaryDirectory.appendingPathComponent("velocitty-restoration-" + UUID().uuidString)
     let bundleID = "app.velocitty.restoration." + UUID().uuidString
     let bundle = root.appendingPathComponent("Restoration.app")
@@ -27,10 +23,10 @@ final class WindowTests: XCTestCase {
         .appendingPathComponent("Library/Saved Application State/" + bundleID + ".savedState"))
       UserDefaults.standard.removePersistentDomain(forName: bundleID)
     }
-    try files.copyItem(at: products.appendingPathComponent("Velocitty.app"), to: bundle)
+    try files.copyItem(at: productsDirectory.appendingPathComponent("Velocitty.app"), to: bundle)
     let executable = bundle.appendingPathComponent("Contents/MacOS/Velocitty")
     try files.removeItem(at: executable)
-    try files.copyItem(at: products.appendingPathComponent("WindowChecks"), to: executable)
+    try files.copyItem(at: productsDirectory.appendingPathComponent("WindowChecks"), to: executable)
     let infoURL = bundle.appendingPathComponent("Contents/Info.plist")
     var info = try PropertyListSerialization.propertyList(from: Data(contentsOf: infoURL), format: nil) as! [String: Any]
     info["CFBundleIdentifier"] = bundleID
@@ -44,36 +40,13 @@ final class WindowTests: XCTestCase {
     let config = root.appendingPathComponent("velocitty/config.toml")
     try files.createDirectory(at: config.deletingLastPathComponent(), withIntermediateDirectories: true)
     try Data("[terminal]\nwindow_save_state='always'\nconfirm_close_surface=false\nshell_integration='none'\ntheme=''\n".utf8).write(to: config)
-    for phase in ["write", "read"] {
-      let process = Process()
-      process.executableURL = executable
-      process.arguments = ["-ApplePersistenceIgnoreState", "NO"]
-      var environment = ProcessInfo.processInfo.environment
-      environment["VELOKIT_TEST_RESTORATION"] = phase
-      environment["XDG_CONFIG_HOME"] = root.path
-      environment["VELOKIT_RESOURCES_DIR"] = bundle.appendingPathComponent("Contents/Resources").path
-      process.environment = environment
-      let logURL = root.appendingPathComponent(phase + ".log")
-      files.createFile(atPath: logURL.path, contents: nil)
-      let log = try FileHandle(forWritingTo: logURL)
-      defer { try? log.close() }
-      process.standardOutput = log
-      process.standardError = log
-      let finished = expectation(description: "Restoration " + phase)
-      process.terminationHandler = { _ in finished.fulfill() }
-      try process.run()
-      guard XCTWaiter.wait(for: [finished], timeout: 25) == .completed else {
-        process.terminate()
-        XCTFail("Restoration process timed out")
-        return
-      }
-      let attachment = XCTAttachment(string: (try? String(contentsOf: logURL, encoding: .utf8)) ?? "")
-      attachment.name = "Restoration " + phase
-      attachment.lifetime = .keepAlways
-      add(attachment)
-      XCTAssertEqual(process.terminationReason, .exit)
-      XCTAssertEqual(process.terminationStatus, 0)
-      if process.terminationStatus != 0 { return }
+    for (phase, success) in [("write", "AppKit restoration state written."), ("read", "AppKit relaunch restoration passed.")] {
+      let failures = testRun?.failureCount ?? 0
+      try runCheck("Restoration " + phase, arguments: ["-ApplePersistenceIgnoreState", "NO"], executable: executable,
+        environment: ["VELOKIT_TEST_RESTORATION": phase, "XDG_CONFIG_HOME": root.path,
+          "VELOKIT_RESOURCES_DIR": bundle.appendingPathComponent("Contents/Resources").path],
+        timeout: 25, success: success)
+      if (testRun?.failureCount ?? 0) > failures { return }
     }
   }
 

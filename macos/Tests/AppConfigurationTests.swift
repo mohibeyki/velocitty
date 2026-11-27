@@ -75,9 +75,7 @@ final class AppConfigurationTests: XCTestCase {
   }
 
   func testDefaultsAndMissingFile() throws {
-    let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: home) }
+    let home = try makeTemporaryDirectory()
     XCTAssertEqual(AppConfiguration.defaults(home: home).workingDirectory, home)
     let workspace = home.appendingPathComponent("workspace", isDirectory: true)
     try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
@@ -89,9 +87,7 @@ final class AppConfigurationTests: XCTestCase {
   }
 
   func testIncludesNativeOrderAndCycles() throws {
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: root) }
+    let root = try makeTemporaryDirectory()
     let parent = root.appendingPathComponent("config.toml")
     let child = root.appendingPathComponent("colors.toml")
     try Data("[terminal]\nfont_size = 18\nforeground = '#ffffff'".utf8).write(to: child)
@@ -111,9 +107,7 @@ final class AppConfigurationTests: XCTestCase {
   }
 
   func testIncludeQueueAndRepeatableValues() throws {
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: root) }
+    let root = try makeTemporaryDirectory()
     let file = root.appendingPathComponent("config.toml")
     try Data("[terminal]\nconfig_file=['a.toml','b.toml']\nfont_family=['Menlo']".utf8).write(to: file)
     try Data("[terminal]\nconfig_file='c.toml'\nfont_family=['Monaco']".utf8).write(to: root.appendingPathComponent("a.toml"))
@@ -125,9 +119,7 @@ final class AppConfigurationTests: XCTestCase {
   }
 
   func testInterfaceIncludesAndOptionalRequiredFile() throws {
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: root) }
+    let root = try makeTemporaryDirectory()
     let file = root.appendingPathComponent("config.toml")
     try Data("[interface]\nagent-icon-size=20\n[terminal]\nconfig_file=['?missing.toml','missing.toml','child.toml']".utf8).write(to: file)
     try Data("[interface]\nagent_icon_size=24\n".utf8).write(to: root.appendingPathComponent("child.toml"))
@@ -141,9 +133,7 @@ final class AppConfigurationTests: XCTestCase {
   }
 
   func testIncludeResets() throws {
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: root) }
+    let root = try makeTemporaryDirectory()
     func write(_ name: String, _ body: String) throws {
       try Data(("[terminal]\n" + body).utf8).write(to: root.appendingPathComponent(name))
     }
@@ -167,9 +157,7 @@ final class AppConfigurationTests: XCTestCase {
   }
 
   func testPortableDefaultsAndInjectedThemeHome() throws {
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: root) }
+    let root = try makeTemporaryDirectory()
     let color: [String: Any] = ["Red Component": 0.0, "Green Component": 0.0,
       "Blue Component": 0.0, "Color Space": "sRGB"]
     try PropertyListSerialization.data(fromPropertyList: ["Background Color": color,
@@ -230,10 +218,9 @@ final class AppConfigurationTests: XCTestCase {
   }
 
   func testInvalidThemesUseBundledDefaultsAndKeepOverrides() throws {
-    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let directory = try makeTemporaryDirectory()
     let themes = directory.appendingPathComponent("themes")
     try FileManager.default.createDirectory(at: themes, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: directory) }
     // A broken custom theme shadowing the default must not break fallback too.
     try Data("broken plist".utf8).write(to: themes.appendingPathComponent("Rose Pine.itermcolors"))
     for selection in ["Rose Pine", "light:Rose Pine Dawn", "dark:,light:Rose Pine Dawn"] {
@@ -337,9 +324,7 @@ final class AppConfigurationTests: XCTestCase {
   }
 
   func testMalformedDocumentsFallBackWhenLoaded() throws {
-    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: directory) }
+    let directory = try makeTemporaryDirectory()
     let file = directory.appendingPathComponent("config.toml")
     for source in ["[terminal]\nfont_size = 12\nfont_size = 14", "[terminal", "terminal = 1"] {
       XCTAssertThrowsError(try parse(source), source)
@@ -398,10 +383,8 @@ final class AppConfigurationTests: XCTestCase {
   }
 
   func testErrorsIdentifyKeyAndFile() throws {
-    let file = FileManager.default.temporaryDirectory.appendingPathComponent(
-      UUID().uuidString + ".toml")
+    let file = try makeTemporaryDirectory().appendingPathComponent("config.toml")
     try Data("[terminal]\nfont_siz = 12".utf8).write(to: file)
-    defer { try? FileManager.default.removeItem(at: file) }
     let config = AppConfiguration.load(from: file)
     XCTAssertTrue(config.diagnostics.first?.contains(file.path) == true)
     XCTAssertTrue(config.diagnostics.first?.contains("terminal.font_siz") == true)
@@ -438,9 +421,7 @@ extension AppConfigurationTests {
   }
 
   func testIncludedConnectionsReplaceWholeList() throws {
-    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: directory) }
+    let directory = try makeTemporaryDirectory()
     let file = directory.appendingPathComponent("config.toml")
     try "[[connections]]\nid='local'\n[terminal]\nconfig_file='included.toml'".write(to: file, atomically: true, encoding: .utf8)
     try "connections=[]".write(to: directory.appendingPathComponent("included.toml"), atomically: true, encoding: .utf8)

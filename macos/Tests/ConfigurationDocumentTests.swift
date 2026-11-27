@@ -5,9 +5,7 @@ import XCTest
 
 final class ConfigurationDocumentTests: XCTestCase {
   func testLosslessEditsAndExternalChangeProtection() throws {
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: root) }
+    let root = try makeTemporaryDirectory()
     let file = root.appendingPathComponent("config.toml")
     let original = """
       # Keep 日本 and comments
@@ -45,7 +43,7 @@ final class ConfigurationDocumentTests: XCTestCase {
 
 extension ConfigurationDocumentTests {
   func testResetPreservesOtherValuesAndComments() throws {
-    let document = try ConfigurationDocument(url: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+    let document = try ConfigurationDocument(url: makeTemporaryDirectory().appendingPathComponent("config.toml"))
     document.text = "[terminal]\nfont-size = 13 # keep this comment\nfont_family = [\n  \"Menlo\",\n]\ncursor_style = 'bar'\n"
     try document.removeValue(table: "terminal", key: "font_size")
     try document.removeValue(table: "terminal", key: "font_family")
@@ -59,7 +57,7 @@ extension ConfigurationDocumentTests {
 
 extension ConfigurationDocumentTests {
   func testConnectionEditsPreserveCommentsAndOtherSettings() throws {
-    let document = try ConfigurationDocument(url: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+    let document = try ConfigurationDocument(url: makeTemporaryDirectory().appendingPathComponent("config.toml"))
     document.text = """
     # My servers
     [[connections]]
@@ -96,7 +94,7 @@ extension ConfigurationDocumentTests {
 
   func testConnectionAddAndRemoveAtFileBoundaries() throws {
     for input in ["", "# Hello", "[terminal]\nfont_size=14", "connections = [] # explicit\n[terminal]\n"] {
-      let document = try ConfigurationDocument(url: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+      let document = try ConfigurationDocument(url: makeTemporaryDirectory().appendingPathComponent("config.toml"))
       document.text = input
       try document.setConnections([])
       XCTAssertEqual(try AppConfiguration.parse(Data(document.text.utf8)).connections, [])

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0
-// AppKit regression executable, built by WindowChecks and launched by the GUI test plan.
+// AppKit regression executable, built by WindowChecks and launched by the test plans.
 import AppKit
 import VeloKit
 import VelocittyConfiguration
@@ -8,8 +8,12 @@ precondition(velokit_init(UInt(CommandLine.argc), CommandLine.unsafeArgv) == GHO
 if ProcessInfo.processInfo.environment["VELOKIT_TEST_RESTORATION"] != nil {
   runRestorationCheck()
 }
-if CommandLine.arguments.contains("--herdr-control-only") {
+// Runs without NSApplication or a real herdr server, including in Core CI.
+if CommandLine.arguments.contains("--headless") {
   try runHerdrControlCheck()
+  try runLogicChecks()
+  try runPersistenceCoordinationCheck()
+  print("Headless checks passed.")
   exit(0)
 }
 let previouslyActiveApplication = NSWorkspace.shared.frontmostApplication
@@ -17,52 +21,272 @@ let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 app.finishLaunching()
 pumpEvents(until: Date(timeIntervalSinceNow: 0.2))
-if CommandLine.arguments.contains("--remote-check") {
-  try runRemoteCheck()
+let standaloneChecks: [(flag: String, run: () throws -> Void)] = [
+  ("--remote-check", runRemoteCheck), ("--management-ui", runManagementUICheck), ("--scale", runScaleCheck),
+  ("--mixed-connections", runMixedConnectionsCheck), ("--workspace-persistence", runWorkspacePersistenceCheck),
+]
+if let check = standaloneChecks.first(where: { CommandLine.arguments.contains($0.flag) }) {
+  try check.run()
   exit(0)
 }
-if CommandLine.arguments.contains("--management-ui") { try runManagementUICheck(); exit(0) }
-if CommandLine.arguments.contains("--scale") { try runScaleCheck(); exit(0) }
-if CommandLine.arguments.contains("--mixed-connections") {
-  try runMixedConnectionsCheck(); exit(0)
-}
-if CommandLine.arguments.contains("--workspace-persistence") {
-  try runWorkspacePersistenceCheck()
-  exit(0)
-}
-if CommandLine.arguments.contains("--persistence-coordination") {
-  try runPersistenceCoordinationCheck()
-  exit(0)
-}
+
+// The remaining modes share one app delegate with two terminal windows.
 let delegate = AppDelegate()
 app.delegate = delegate
 let testAutomaticQuit = CommandLine.arguments.contains("--quit-on-close")
-// URL classification must not rely on Foundation repairing malformed input.
-for kind in [GHOSTTY_ACTION_OPEN_URL_KIND_OSC8, GHOSTTY_ACTION_OPEN_URL_KIND_UNKNOWN] {
-  for value in ["https://example.com/a?x=1", "HTTP://example.com", "mailto:hello@example.com"] {
-    guard case .direct = TerminalLinks.destination(value, kind: kind) else {
-      fatalError("Expected a direct link: \(value)")
-    }
-  }
-  for value in ["file:///tmp/a%20b", "vscode://file/tmp/test", "ssh://user@example.com", "custom:payload"] {
-    guard case .confirm = TerminalLinks.destination(value, kind: kind) else {
-      fatalError("Expected confirmation: \(value)")
-    }
-  }
-  for value in ["javascript:alert(1)", "JaVaScRiPt:alert(1)", "DATA:text/html,test", "",
-    "relative/path", "//example.com", "https://", "https:example.com", "https://example.com:99999", "https://a/%GG",
-    "https://a/%", "https://a/%0", " https://example.com", "https://example.com/a b",
-    "https://example.com/\n", "https://example.com/\0", "https:\\example.com"] {
-    precondition(TerminalLinks.destination(value, kind: kind) == .reject, value)
-  }
+let settings = try testSettings("undo_timeout = \"0s\"" + (testAutomaticQuit ? "\nquit_after_last_window_closed = true" : ""))
+delegate.runtime = try TerminalRuntime(settings: settings)
+delegate.installMainMenu()
+delegate.updateMenuShortcuts()
+let new = menuItem("New Window")
+precondition(new.keyEquivalent == "n")
+let closeMenuItem = menuItem("Close Window")
+precondition(closeMenuItem.menu === new.menu)
+precondition(!delegate.validateMenuItem(closeMenuItem))
+for title in ["Find…", "Command Palette…"] {
+  precondition(!delegate.validateMenuItem(menuItem(title)))
 }
-for kind in [GHOSTTY_ACTION_OPEN_URL_KIND_TEXT, GHOSTTY_ACTION_OPEN_URL_KIND_HTML] {
-  let path = "/tmp/terminal export.html"
-  precondition(TerminalLinks.destination(path, kind: kind) == .direct(URL(fileURLWithPath: path)))
+precondition(app.sendAction(new.action!, to: new.target, from: new))
+drain()
+let first = delegate.windows[0]
+let terminal = first.session!.view!
+let originalEngine = delegate.runtime!.app
+precondition(app.sendAction(new.action!, to: new.target, from: new))
+drain()
+precondition(delegate.windows.count == 2)
+precondition(delegate.validateMenuItem(closeMenuItem))
+let second = delegate.windows[1]
+precondition(first.session?.view?.surface != second.session?.view?.surface)
+precondition(first.session?.windowController === first)
+precondition(second.session?.windowController === second)
+precondition(second.window!.frame.minX > first.window!.frame.minX)
+precondition(second.window!.frame.maxY < first.window!.frame.maxY)
+
+if testAutomaticQuit { checkQuitAfterLastWindowCloses() }
+if CommandLine.arguments.contains("--configuration-only") {
+  try checkNativeSettings()
+  try checkTitlebarStyles()
+  try checkSharedEngine()
+  try checkConfigurationReload()
+  try checkVisualPolicies()
+  closeAllWindows()
+  print("Configuration reload tests passed.")
+  exit(0)
+}
+checkCommittedText()
+try checkQueuedWakeup()
+try checkRestorationMetadata()
+try checkAccessibility()
+checkQuitPreservesWindows()
+checkMissingHerdr()
+checkWindowNavigation()
+checkIndependentSheets()
+try checkRetainedSession()
+try checkFocusReporting()
+checkLinkRouting()
+checkClipboardQueue()
+checkClipboardCancellation()
+try checkUnattachedClipboard()
+try checkClipboardAtPTY()
+checkCloseAndQuit()
+print("Window lifecycle tests passed.")
+
+// MARK: - Shared helpers
+
+/// Delivers AppKit events when an application is running, and main-queue work in any case.
+func pumpEvents(until deadline: Date) {
+  repeat {
+    if let app = NSApp, let event = app.nextEvent(matching: .any, until: Date(timeIntervalSinceNow: 0.01),
+      inMode: .default, dequeue: true) {
+      app.sendEvent(event)
+    }
+    NSApp?.updateWindows()
+    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.005))
+  } while Date() < deadline
+}
+func drain() { pumpEvents(until: Date(timeIntervalSinceNow: 0.15)) }
+
+/// Pumps events until the condition holds or the timeout passes, and returns the condition.
+func pollUntil(timeout: TimeInterval = 3, _ condition: () -> Bool) -> Bool {
+  let deadline = Date(timeIntervalSinceNow: timeout)
+  while !condition() && Date() < deadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.02)) }
+  return condition()
 }
 
-// Verify the Swift accessors against finalized native values, including C conversions.
-do {
+/// Pumps events until the condition holds, failing with the message after the timeout.
+func waitUntil(_ message: @autoclosure () -> String, timeout: TimeInterval = 3, _ condition: () -> Bool) {
+  let satisfied = pollUntil(timeout: timeout, condition)
+  precondition(satisfied, message())
+}
+
+/// Waits until no connection is opening and the window has no mux action running or queued.
+/// The first pump lets work scheduled by the caller start before the flags are read.
+func waitForMux(_ owner: AppDelegate, _ controller: TerminalWindowController? = nil, timeout: TimeInterval = 10) {
+  pumpEvents(until: Date(timeIntervalSinceNow: 0.02))
+  waitUntil("Mux work did not finish: opening=\(owner.muxOpening), busy=\(controller?.muxBusy == true), "
+    + "queued=\(controller?.hasPendingMuxActions == true)", timeout: timeout) {
+    !owner.muxOpening && controller?.muxBusy != true && controller?.hasPendingMuxActions != true
+  }
+}
+
+func withTemporaryDirectory<T>(_ prefix: String, _ body: (URL) throws -> T) throws -> T {
+  let directory = FileManager.default.temporaryDirectory
+    .appendingPathComponent(prefix + "-" + UUID().uuidString, isDirectory: true)
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  return try body(directory)
+}
+
+/// Settings for a plain, fast-starting test terminal, followed by extra TOML lines.
+func testSettings(_ extra: String = "", command: String = "/bin/sh", saveState: String = "never") throws -> AppConfiguration {
+  try AppConfiguration.parse(Data("""
+  [terminal]
+  command = \(ConfigurationDocument.quote(command))
+  shell_integration = "none"
+  theme = ""
+  confirm_close_surface = false
+  window_save_state = "\(saveState)"
+  \(extra)
+  """.utf8))
+}
+
+func menuItem(_ title: String, in menu: NSMenu = NSApp.mainMenu!) -> NSMenuItem {
+  for item in menu.items {
+    if item.title == title { return item }
+    if let submenu = item.submenu,
+      let found = submenu.items.first(where: { $0.title == title }) { return found }
+  }
+  fatalError("Missing menu: \(title)")
+}
+
+func closeAllWindows() {
+  delegate.terminating = true
+  for controller in delegate.windows {
+    controller.closing = true
+    controller.window?.close()
+  }
+}
+
+func enterCommand(_ command: String, in pane: TerminalSession) {
+  command.withCString { velokit_surface_text(pane.surface!, $0, UInt(command.utf8.count)) }
+  var enter = ghostty_input_key_s()
+  enter.action = GHOSTTY_ACTION_PRESS
+  enter.keycode = 36
+  _ = velokit_surface_key(pane.surface!, enter)
+}
+
+/// A window whose terminal runs a shell script that records its raw input, as seen at the PTY.
+struct RecordingTerminal {
+  let controller: TerminalWindowController
+  let session: TerminalSession
+  let view: TerminalView
+  let input: URL
+  func received() -> Data { (try? Data(contentsOf: input)) ?? Data() }
+}
+
+/// Opens a recording terminal with the given settings applied to the shared runtime;
+/// the caller restores `settings`. `prelude` runs in raw mode before recording starts.
+func openRecordingTerminal(in directory: URL, prelude: String = "", extra: String = "") throws -> RecordingTerminal {
+  let script = directory.appendingPathComponent("record.sh")
+  let input = directory.appendingPathComponent("input")
+  let ready = directory.appendingPathComponent("ready")
+  try Data("stty raw -echo\n\(prelude): > \"$2\"\nexec cat > \"$1\"\n".utf8).write(to: script)
+  let command = "/bin/sh " + ShellInput.paths([script.path, input.path, ready.path])
+  try delegate.runtime!.updateConfiguration(testSettings(extra, command: command))
+  let session = delegate.runtime!.makeSession()
+  let controller = TerminalWindowController(session: session, owner: delegate)
+  delegate.windows.append(controller)
+  controller.openWindow(cascadingFrom: second.window)
+  waitUntil("Recording terminal did not start") { FileManager.default.fileExists(atPath: ready.path) }
+  return RecordingTerminal(controller: controller, session: session, view: session.view!, input: input)
+}
+
+/// Runs body with isolated herdr sessions whose servers use zsh and a private configuration.
+/// The sessions are stopped and deleted afterwards, or by a watchdog if this process dies first.
+func withIsolatedHerdr<T>(_ prefix: String, sessions count: Int = 1, executable: URL? = nil, root: URL? = nil,
+  _ body: (URL, [HerdrClient]) throws -> T) throws -> T {
+  guard let executable = executable ?? HerdrClient.discover() else { fatalError("herdr is required for this check") }
+  let directory = root ?? FileManager.default.temporaryDirectory.appendingPathComponent(prefix + "-" + UUID().uuidString)
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let config = directory.appendingPathComponent("herdr.toml")
+  try Data("[terminal]\ndefault_shell='/bin/zsh'\n".utf8).write(to: config)
+  let previousConfig = ProcessInfo.processInfo.environment["HERDR_CONFIG_PATH"]
+  defer {
+    if let previousConfig { setenv("HERDR_CONFIG_PATH", previousConfig, 1) } else { unsetenv("HERDR_CONFIG_PATH") }
+  }
+  setenv("HERDR_CONFIG_PATH", config.path, 1)
+  let clients = (0..<count).map { _ in HerdrClient(executable: executable, sessionName: prefix + "-" + UUID().uuidString.lowercased()) }
+  let watchdog = startHerdrWatchdog(executable, sessions: clients.map(\.sessionName), directory: directory)
+  defer {
+    kill(watchdog, SIGKILL)
+    waitpid(watchdog, nil, 0)
+    for client in clients {
+      _ = try? client.run(["server", "stop"])
+      _ = try? client.run(["session", "delete", client.sessionName])
+    }
+  }
+  return try body(directory, clients)
+}
+
+/// A detached shell that stops and deletes the sessions, and removes the directory, once this process
+/// has exited, so a failed precondition or a timeout does not leave servers holding PTYs. Its own
+/// session survives a signal sent to this process group.
+private func startHerdrWatchdog(_ executable: URL, sessions: [String], directory: URL) -> pid_t {
+  let herdr = "/usr/bin/env -u HERDR_SESSION -u HERDR_SOCKET_PATH " + ShellInput.quote(executable.path)
+  let cleanup = sessions.map { name in
+    "\(herdr) --session \(ShellInput.quote(name)) server stop; \(herdr) session delete \(ShellInput.quote(name))"
+  }
+  let script = "while kill -0 \(getpid()) 2>/dev/null; do sleep 0.5; done; " + cleanup.joined(separator: "; ")
+    + "; rm -rf " + ShellInput.quote(directory.path)
+  var attributes: posix_spawnattr_t?
+  var actions: posix_spawn_file_actions_t?
+  posix_spawnattr_init(&attributes)
+  posix_spawn_file_actions_init(&actions)
+  defer { posix_spawnattr_destroy(&attributes); posix_spawn_file_actions_destroy(&actions) }
+  posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETSID))
+  for descriptor in [STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO] {
+    posix_spawn_file_actions_addopen(&actions, descriptor, "/dev/null", descriptor == STDIN_FILENO ? O_RDONLY : O_WRONLY, 0)
+  }
+  let argv = ["/bin/sh", "-c", script].map { strdup($0) } + [nil]
+  defer { argv.forEach { free($0) } }
+  var pid: pid_t = 0
+  let code = argv.withUnsafeBufferPointer { posix_spawn(&pid, "/bin/sh", &actions, &attributes, UnsafeMutablePointer(mutating: $0.baseAddress!), environ) }
+  precondition(code == 0, "Could not start the herdr cleanup watchdog")
+  return pid
+}
+
+// MARK: - Configuration reload (--configuration-only)
+
+// AppKit may already have removed our tracked accessory during a style change.
+func checkTitlebarStyles() throws {
+  let unrelatedAccessory = NSTitlebarAccessoryViewController()
+  unrelatedAccessory.view = NSView(frame: NSRect(x: 0, y: 0, width: 20, height: 20))
+  first.window!.addTitlebarAccessoryViewController(unrelatedAccessory)
+  first.titleAccessory = NSTitlebarAccessoryViewController()
+  first.applyWindowSettings()
+  precondition(first.window!.titlebarAccessoryViewControllers.contains(unrelatedAccessory))
+  first.window!.removeTitlebarAccessoryViewController(at: 0)
+  for (index, style) in ["hidden", "native", "transparent", "hidden", "native"].enumerated() {
+    let scrollbar = index.isMultiple(of: 2) ? "never" : "system"
+    try first.session!.runtime.updateConfiguration(testSettings("""
+    window_title_font_family = "Menlo"
+    macos_titlebar_style = "\(style)"
+    scrollbar = "\(scrollbar)"
+    """))
+    first.chrome!.scrollState = ghostty_action_scrollbar_s(total: 100, offset: 0, len: 10)
+    first.applyWindowSettings()
+    precondition(first.chrome!.showScroll == (scrollbar == "system"))
+    precondition((first.titleAccessory == nil) == (style == "hidden"))
+  }
+  try first.session!.runtime.updateConfiguration(settings)
+  first.applyWindowSettings()
+}
+
+// Native settings, read through the Swift accessors, and native diagnostics. These need
+// NSApplication for the appearance used when preparing a configuration.
+func checkNativeSettings() throws {
+  // Verify the Swift accessors against finalized native values, including C conversions.
   let typedSettings = try AppConfiguration.parse(Data("""
   [terminal]
   theme = ""
@@ -96,169 +320,20 @@ do {
   let missing = NativeSettings(config: nil)
   precondition(missing.initialWindow && missing.backgroundOpacity == 1)
   precondition(missing.windowPositionX == Int16.min && missing.commands.isEmpty)
-}
-
-// Editor selection respects file associations, then the system text editor.
-do {
-  let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    .appendingPathComponent("config.toml")
-  defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
-  let associated = URL(fileURLWithPath: "/Applications/Associated.app")
-  let fallback = URL(fileURLWithPath: "/Applications/TextEditor.app")
-  var opened: [URL?] = []
-  var editor = ConfigurationEditor()
-  editor.applicationForType = { _ in associated }
-  editor.openFile = { url, app, completion in
-    precondition(url == file)
-    opened.append(app)
-    completion(nil)
+  try withTemporaryDirectory("velocitty-diagnostics") { directory in
+    // Native diagnostics identify the included file that produced them.
+    let root = directory.appendingPathComponent("config.toml")
+    let included = directory.appendingPathComponent("included.toml")
+    try Data("[terminal]\nconfig_file = [\"included.toml\"]\ntheme = \"\"".utf8).write(to: root)
+    try Data("[terminal]\nfont_size = \"not-a-number\"".utf8).write(to: included)
+    var diagnostics: [String] = []
+    velokit_config_free(try TerminalRuntime.makeConfig(AppConfiguration.load(from: root)) { diagnostics.append($0) })
+    precondition(diagnostics.count == 1 && diagnostics[0].hasPrefix(included.path + ":"))
   }
-  editor.open(file) { precondition($0 == nil) }
-  let original = try Data(contentsOf: file)
-  precondition(AppConfiguration.load(from: file).diagnostics.isEmpty)
-  editor.applicationForType = { $0 == "public.plain-text" ? fallback : nil }
-  editor.open(file) { precondition($0 == nil) }
-  editor.applicationForType = { _ in nil }
-  editor.open(file) { precondition($0 == nil) }
-  precondition(opened == [associated, fallback, nil])
-  let unchanged = try Data(contentsOf: file)
-  precondition(unchanged == original)
-  editor.openFile = { _, _, completion in completion(ConfigurationError("Open failed")) }
-  editor.open(file) { precondition($0?.localizedDescription == "Open failed") }
 }
-
-let settings = try AppConfiguration.parse(Data(("""
-[terminal]
-command = "/bin/sh"
-undo_timeout = "0s"
-shell_integration = "none"
-theme = ""
-confirm_close_surface = false
-window_save_state = "never"
-""" + (testAutomaticQuit ? "\nquit_after_last_window_closed = true" : "")).utf8))
-delegate.runtime = try TerminalRuntime(settings: settings)
-delegate.installMainMenu()
-delegate.updateMenuShortcuts()
-
-do {
-  let directory = FileManager.default.temporaryDirectory
-    .appendingPathComponent("velocitty-review-\(UUID().uuidString)", isDirectory: true)
-  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-  defer { try? FileManager.default.removeItem(at: directory) }
-  let root = directory.appendingPathComponent("config.toml")
-  let included = directory.appendingPathComponent("included.toml")
-  try Data("[terminal]\nconfig_file = [\"included.toml\"]\ntheme = \"\"".utf8).write(to: root)
-  try Data("[terminal]\nfont_size = \"not-a-number\"".utf8).write(to: included)
-  let invalid = AppConfiguration.load(from: root)
-  var diagnostics: [String] = []
-  let config = try TerminalRuntime.makeConfig(invalid) { diagnostics.append($0) }
-  velokit_config_free(config)
-  precondition(diagnostics.count == 1 && diagnostics[0].hasPrefix(included.path + ":"))
-}
-
-// A queued wakeup can outlive its runtime, but must not retain a native handle.
-do {
-  var runtime: TerminalRuntime? = try TerminalRuntime(settings: settings)
-  let context = runtime!.context
-  RuntimeContext.wakeup(Unmanaged.passUnretained(context).toOpaque())
-  runtime = nil
-  precondition(context.app == nil)
-  context.tick()
-  RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.15))
-}
-
-func menuItem(_ title: String, in menu: NSMenu = NSApp.mainMenu!) -> NSMenuItem {
-  for item in menu.items {
-    if item.title == title { return item }
-    if let submenu = item.submenu,
-      let found = submenu.items.first(where: { $0.title == title }) { return found }
-  }
-  fatalError("Missing menu: \(title)")
-}
-func pumpEvents(until deadline: Date) {
-  repeat {
-    if let event = app.nextEvent(matching: .any, until: Date(timeIntervalSinceNow: 0.01),
-      inMode: .default, dequeue: true) {
-      app.sendEvent(event)
-    }
-    app.updateWindows()
-    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.005))
-  } while Date() < deadline
-}
-func drain() { pumpEvents(until: Date(timeIntervalSinceNow: 0.15)) }
-let new = menuItem("New Window")
-precondition(new.keyEquivalent == "n")
-let closeMenuItem = menuItem("Close Window")
-precondition(closeMenuItem.menu === new.menu)
-precondition(!delegate.validateMenuItem(closeMenuItem))
-for title in ["Find…", "Command Palette…"] {
-  precondition(!delegate.validateMenuItem(menuItem(title)))
-}
-precondition(app.sendAction(new.action!, to: new.target, from: new))
-drain()
-let first = delegate.windows[0]
-
-// Exercise the keyboard-event/committed-text bridge, not the paste path.
-let terminal = first.session!.view!
-let originalEngine = delegate.runtime!.app
-let event = NSEvent.keyEvent(
-  with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
-  windowNumber: first.window!.windowNumber, context: nil,
-  characters: "a", charactersIgnoringModifiers: "a", isARepeat: false, keyCode: 0)!
-for text in ["a", "Ａ！", "🙂", "𠮷", "e\u{301}"] {
-  precondition(terminal.withKey(event, action: GHOSTTY_ACTION_PRESS, overrideText: text) {
-    $0.text.map { String(cString: $0) } == text
-  })
-}
-for text in ["\u{1b}", "\u{F700}", "\u{F8FF}"] {
-  precondition(terminal.withKey(event, action: GHOSTTY_ACTION_PRESS, overrideText: text) {
-    $0.text == nil
-  })
-}
-
-// AppKit may already have removed our tracked accessory during a style change.
-let unrelatedAccessory = NSTitlebarAccessoryViewController()
-unrelatedAccessory.view = NSView(frame: NSRect(x: 0, y: 0, width: 20, height: 20))
-first.window!.addTitlebarAccessoryViewController(unrelatedAccessory)
-first.titleAccessory = NSTitlebarAccessoryViewController()
-first.applyWindowSettings()
-precondition(first.window!.titlebarAccessoryViewControllers.contains(unrelatedAccessory))
-first.window!.removeTitlebarAccessoryViewController(at: 0)
-for (index, style) in ["hidden", "native", "transparent", "hidden", "native"].enumerated() {
-  let scrollbar = index.isMultiple(of: 2) ? "never" : "system"
-  let updated = try AppConfiguration.parse(Data(("""
-  [terminal]
-  command = "/bin/sh"
-  shell_integration = "none"
-  theme = ""
-  confirm_close_surface = false
-  window_save_state = "never"
-  window_title_font_family = "Menlo"
-  macos_titlebar_style = "\(style)"
-  scrollbar = "\(scrollbar)"
-  """).utf8))
-  try first.session!.runtime.updateConfiguration(updated)
-  first.chrome!.scrollState = ghostty_action_scrollbar_s(total: 100, offset: 0, len: 10)
-  first.applyWindowSettings()
-  precondition(first.chrome!.showScroll == (scrollbar == "system"))
-  precondition((first.titleAccessory == nil) == (style == "hidden"))
-}
-try first.session!.runtime.updateConfiguration(settings)
-first.applyWindowSettings()
-
-precondition(app.sendAction(new.action!, to: new.target, from: new))
-drain()
-precondition(delegate.windows.count == 2)
-precondition(delegate.validateMenuItem(closeMenuItem))
-let second = delegate.windows[1]
-precondition(first.session?.view?.surface != second.session?.view?.surface)
-precondition(first.session?.windowController === first)
-precondition(second.session?.windowController === second)
-precondition(second.window!.frame.minX > first.window!.frame.minX)
-precondition(second.window!.frame.maxY < first.window!.frame.maxY)
 
 // One engine serves every session, including native all/global surface actions.
-do {
+func checkSharedEngine() throws {
   let runtime = delegate.runtime!
   precondition(first.session!.runtime === runtime && second.session!.runtime === runtime)
   precondition(runtime.context.owner === delegate)
@@ -266,17 +341,11 @@ do {
   let secondSurface = second.session!.surface!
   let originalCell = velokit_surface_size(firstSurface).cell_height_px
   func configured(_ opacity: Double) throws -> AppConfiguration {
-    try AppConfiguration.parse(Data("""
-    [terminal]
-    command = "/bin/sh"
-    shell_integration = "none"
-    theme = ""
-    confirm_close_surface = false
-    window_save_state = "never"
+    try testSettings("""
     font_size = 24
     background_opacity = \(opacity)
     keybind = ["all:ctrl+shift+a=set_surface_title:Broadcast", "global:ctrl+shift+b=set_surface_title:Global"]
-    """.utf8))
+    """)
   }
   try runtime.updateConfiguration(configured(0.4))
   drain()
@@ -335,76 +404,74 @@ do {
 }
 
 // Reload bad values alongside valid settings without replacing terminals or losing overrides.
-do {
+func checkConfigurationReload() throws {
   let runtime = delegate.runtime!
   let firstSurface = first.session!.surface!
   let secondSurface = second.session!.surface!
-  let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-  defer { try? FileManager.default.removeItem(at: directory) }
-  let file = directory.appendingPathComponent("config.toml")
-  try Data("""
-  [terminal]
-  command = "/bin/sh"
-  shell_integration = "none"
-  confirm_close_surface = false
-  window_save_state = "never"
-  theme = "missing-theme"
-  font_size = "nan"
-  cursor_style = "not-a-style"
-  background_opacity = 0.45
-  scrollbar = "system"
-  title = "Reloaded"
-  window_titlebar_foreground = "not-a-color"
-  window_titlebar_background = "not-a-color"
-  palette = ["0=#112233", "invalid", "1=#445566"]
-  keybind = ["super+f=unbind", "invalid-key=invalid-action", "super+shift+c=copy_to_clipboard"]
-  working_directory = "relative"
-  """.utf8).write(to: file)
-  try first.session!.toggleOpacity()
-  try runtime.updateConfiguration(AppConfiguration.load(from: file))
-  drain()
-  precondition(runtime.diagnostics.count == 8, runtime.diagnostics.joined(separator: "\n"))
-  precondition(first.session!.surface == firstSurface && second.session!.surface == secondSurface)
-  precondition(first.native.backgroundOpacity == 1 && second.native.backgroundOpacity == 0.45)
-  precondition(second.window!.backgroundColor == .windowBackgroundColor,
-    "Native window chrome stays independent of terminal opacity")
-  precondition(first.window!.title == "Reloaded" && second.window!.title == "Reloaded")
-  precondition(first.titleAccessory == nil && second.titleAccessory == nil,
-    "Rejected titlebar colors must not enable custom titlebars")
-  precondition(!menuItem("Find…").isEnabled || menuItem("Find…").keyEquivalent.isEmpty)
-  let defaults = try TerminalRuntime.makeConfig(.defaults())
-  defer { velokit_config_free(defaults) }
-  let defaultFontSize = String(cString: velokit_config_format(defaults, "font-size")!)
-  precondition(String(cString: velokit_config_format(runtime.config!, "font-size")!) == defaultFontSize)
-  let palette = String(cString: velokit_config_format(runtime.config!, "palette")!)
-  precondition(palette.contains("0=#112233") && palette.contains("1=#445566"), palette)
-  precondition(runtime.settings.workingDirectory == AppConfiguration.defaults().workingDirectory)
+  try withTemporaryDirectory("velocitty-reload") { directory in
+    let file = directory.appendingPathComponent("config.toml")
+    try Data("""
+    [terminal]
+    command = "/bin/sh"
+    shell_integration = "none"
+    confirm_close_surface = false
+    window_save_state = "never"
+    theme = "missing-theme"
+    font_size = "nan"
+    cursor_style = "not-a-style"
+    background_opacity = 0.45
+    scrollbar = "system"
+    title = "Reloaded"
+    window_titlebar_foreground = "not-a-color"
+    window_titlebar_background = "not-a-color"
+    palette = ["0=#112233", "invalid", "1=#445566"]
+    keybind = ["super+f=unbind", "invalid-key=invalid-action", "super+shift+c=copy_to_clipboard"]
+    working_directory = "relative"
+    """.utf8).write(to: file)
+    try first.session!.toggleOpacity()
+    try runtime.updateConfiguration(AppConfiguration.load(from: file))
+    drain()
+    precondition(runtime.diagnostics.count == 8, runtime.diagnostics.joined(separator: "\n"))
+    precondition(first.session!.surface == firstSurface && second.session!.surface == secondSurface)
+    precondition(first.native.backgroundOpacity == 1 && second.native.backgroundOpacity == 0.45)
+    precondition(second.window!.backgroundColor == .windowBackgroundColor,
+      "Native window chrome stays independent of terminal opacity")
+    precondition(first.window!.title == "Reloaded" && second.window!.title == "Reloaded")
+    precondition(first.titleAccessory == nil && second.titleAccessory == nil,
+      "Rejected titlebar colors must not enable custom titlebars")
+    precondition(!menuItem("Find…").isEnabled || menuItem("Find…").keyEquivalent.isEmpty)
+    let defaults = try TerminalRuntime.makeConfig(.defaults())
+    defer { velokit_config_free(defaults) }
+    let defaultFontSize = String(cString: velokit_config_format(defaults, "font-size")!)
+    precondition(String(cString: velokit_config_format(runtime.config!, "font-size")!) == defaultFontSize)
+    let palette = String(cString: velokit_config_format(runtime.config!, "palette")!)
+    precondition(palette.contains("0=#112233") && palette.contains("1=#445566"), palette)
+    precondition(runtime.settings.workingDirectory == AppConfiguration.defaults().workingDirectory)
 
-  delegate.showConfigurationDiagnostics()
-  drain()
-  let diagnosticWindow = delegate.activeWindow!.window!
-  precondition(diagnosticWindow.attachedSheet != nil, "Reload diagnostics must be visible")
-  diagnosticWindow.endSheet(diagnosticWindow.attachedSheet!)
-  drain()
+    delegate.showConfigurationDiagnostics()
+    drain()
+    let diagnosticWindow = delegate.activeWindow!.window!
+    precondition(diagnosticWindow.attachedSheet != nil, "Reload diagnostics must be visible")
+    diagnosticWindow.endSheet(diagnosticWindow.attachedSheet!)
+    drain()
 
-  // Overrides use already prepared theme colors, even if the theme disappears.
-  let themeFile = directory.appendingPathComponent("custom.itermcolors")
-  let color: [String: Any] = ["Red Component": 0.25, "Green Component": 0.5,
-    "Blue Component": 0.75, "Color Space": "sRGB"]
-  try PropertyListSerialization.data(fromPropertyList:
-    ["Background Color": color, "Foreground Color": color], format: .xml, options: 0)
-    .write(to: themeFile)
-  let custom = try AppConfiguration.parse(Data("[terminal]\ntheme = '\(themeFile.path)'".utf8))
-  let prepared = try TerminalRuntime.makeConfig(custom)
-  defer { velokit_config_free(prepared) }
-  try FileManager.default.removeItem(at: themeFile)
-  let override = try first.session!.prepareOverride(from: prepared)!
-  precondition(first.session!.applyPreparedConfiguration(override))
-  velokit_config_free(override)
-  precondition(first.native.backgroundOpacity == 1)
-  precondition(first.native.background == NativeSettings(config: prepared).background)
-
+    // Overrides use already prepared theme colors, even if the theme disappears.
+    let themeFile = directory.appendingPathComponent("custom.itermcolors")
+    let color: [String: Any] = ["Red Component": 0.25, "Green Component": 0.5,
+      "Blue Component": 0.75, "Color Space": "sRGB"]
+    try PropertyListSerialization.data(fromPropertyList:
+      ["Background Color": color, "Foreground Color": color], format: .xml, options: 0)
+      .write(to: themeFile)
+    let custom = try AppConfiguration.parse(Data("[terminal]\ntheme = '\(themeFile.path)'".utf8))
+    let prepared = try TerminalRuntime.makeConfig(custom)
+    defer { velokit_config_free(prepared) }
+    try FileManager.default.removeItem(at: themeFile)
+    let override = try first.session!.prepareOverride(from: prepared)!
+    precondition(first.session!.applyPreparedConfiguration(override))
+    velokit_config_free(override)
+    precondition(first.native.backgroundOpacity == 1)
+    precondition(first.native.background == NativeSettings(config: prepared).background)
+  }
   // A subsequent clean reload clears diagnostics and the opacity toggle still works.
   try runtime.updateConfiguration(settings)
   try first.session!.toggleOpacity()
@@ -414,21 +481,14 @@ do {
 }
 
 // Native visual policies retain their distinct meanings.
-do {
+func checkVisualPolicies() throws {
   let runtime = delegate.runtime!
   for blur in ["12", "macos-glass-regular", "macos-glass-clear", "false"] {
-    let config = try AppConfiguration.parse(Data(("""
-    [terminal]
-    command = "/bin/sh"
-    shell_integration = "none"
-    theme = ""
-    confirm_close_surface = false
-    window_save_state = "never"
+    try runtime.updateConfiguration(testSettings("""
     background_opacity = 0.5
     bell_features = "no-attention,no-title,border"
     background_blur = "\(blur)"
-    """).utf8))
-    try runtime.updateConfiguration(config)
+    """))
     drain()
     if #available(macOS 26, *), blur.hasPrefix("macos-glass") {
       let effect = first.window!.contentView as! NSGlassEffectView
@@ -467,73 +527,60 @@ do {
   drain()
 }
 
-// Secure Input balances only successful calls, including failed release retries.
-do {
-  let input = SecureInputOwner()
-  var acquisitions = 0
-  var releases = 0
-  var failAcquire = true
-  var failRelease = true
-  input.acquire = { acquisitions += 1; return failAcquire ? -1 : 0 }
-  input.release = { releases += 1; return failRelease ? -1 : 0 }
-  input.update(wanted: true)
-  precondition(!input.enabled)
-  input.update(wanted: false)
-  precondition(releases == 0)
-  failAcquire = false
-  input.update(wanted: true)
-  input.update(wanted: true)
-  precondition(input.enabled && acquisitions == 2)
-  input.update(wanted: false)
-  precondition(input.enabled)
-  failRelease = false
-  input.update(wanted: false)
-  precondition(!input.enabled && releases == 2)
+// MARK: - Last-window quit (--quit-on-close)
 
-  let firstProgress = TerminalProgress()
-  let secondProgress = TerminalProgress()
-  var report = ghostty_action_progress_report_s()
-  report.state = GHOSTTY_PROGRESS_STATE_SET
-  report.progress = 42
-  firstProgress.update(report)
-  report.state = GHOSTTY_PROGRESS_STATE_PAUSE
-  report.progress = -1
-  secondProgress.update(report)
-  firstProgress.clear()
-  precondition(firstProgress.isHidden && !secondProgress.isHidden)
-  precondition(secondProgress.report?.state == GHOSTTY_PROGRESS_STATE_PAUSE)
-  secondProgress.clear()
+func checkQuitAfterLastWindowCloses() -> Never {
+  precondition(delegate.native.quitAfterLastWindowClosed)
+  first.window?.performClose(nil)
+  drain()
+  precondition(delegate.windows.count == 1)
+  precondition(delegate.quitTimer == nil || delegate.quitTimer?.isValid == false)
+  let observer = NotificationCenter.default.addObserver(
+    forName: NSApplication.willTerminateNotification, object: app, queue: .main
+  ) { _ in
+    precondition(delegate.windows.isEmpty)
+    try! FileHandle.standardOutput.write(contentsOf: Data("Last-window quit test passed.\n".utf8))
+  }
+  second.window?.performClose(nil)
+  RunLoop.main.run(until: Date(timeIntervalSinceNow: 2))
+  withExtendedLifetime(observer) { fatalError("Closing the last window did not quit") }
 }
 
-do {
-  let pasteboard = NSPasteboard.withUniqueName()
-  defer { pasteboard.releaseGlobally() }
-  let file = NSPasteboardItem()
-  file.setString(URL(fileURLWithPath: "/tmp/a'b $(echo x).txt").absoluteString, forType: .fileURL)
-  file.setString("ignored file label", forType: .string)
-  let text = NSPasteboardItem()
-  text.setString("plain text", forType: .string)
-  pasteboard.writeObjects([file, text])
-  precondition(TerminalView.droppedText(from: pasteboard)
-    == String(ShellInput.paths(["/tmp/a'b $(echo x).txt"]).dropLast()) + " plain text")
-  pasteboard.clearContents()
-  precondition(TerminalView.droppedText(from: pasteboard) == nil)
+// MARK: - Window lifecycle (default)
+
+// Exercise the keyboard-event/committed-text bridge, not the paste path.
+func checkCommittedText() {
+  let event = NSEvent.keyEvent(
+    with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+    windowNumber: first.window!.windowNumber, context: nil,
+    characters: "a", charactersIgnoringModifiers: "a", isARepeat: false, keyCode: 0)!
+  for text in ["a", "Ａ！", "🙂", "𠮷", "e\u{301}"] {
+    precondition(terminal.withKey(event, action: GHOSTTY_ACTION_PRESS, overrideText: text) {
+      $0.text.map { String(cString: $0) } == text
+    })
+  }
+  for text in ["\u{1b}", "\u{F700}", "\u{F8FF}"] {
+    precondition(terminal.withKey(event, action: GHOSTTY_ACTION_PRESS, overrideText: text) {
+      $0.text == nil
+    })
+  }
+}
+
+// A queued wakeup can outlive its runtime, but must not retain a native handle.
+func checkQueuedWakeup() throws {
+  var runtime: TerminalRuntime? = try TerminalRuntime(settings: settings)
+  let context = runtime!.context
+  RuntimeContext.wakeup(Unmanaged.passUnretained(context).toOpaque())
+  runtime = nil
+  precondition(context.app == nil)
+  context.tick()
+  RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.15))
 }
 
 // AppKit restores each window's own metadata; ordinary new windows still cascade.
-do {
+func checkRestorationMetadata() throws {
   let runtime = delegate.runtime!
-  let positioned = try AppConfiguration.parse(Data("""
-  [terminal]
-  theme = ""
-  command = "/bin/sh"
-  shell_integration = "none"
-  confirm_close_surface = false
-  window_save_state = "always"
-  window_position_x = 80
-  window_position_y = 70
-  """.utf8))
-  try runtime.updateConfiguration(positioned)
+  try runtime.updateConfiguration(testSettings("window_position_x = 80\nwindow_position_y = 70", saveState: "always"))
   delegate.newWindow()
   let placed = delegate.windows.last!
   drain()
@@ -576,33 +623,22 @@ do {
 }
 
 // Read actual rendered Unicode, then map its selection to AppKit UTF-16 indices.
-do {
+func checkAccessibility() throws {
   let runtime = delegate.runtime!
-  let textSettings = try AppConfiguration.parse(Data(#"""
-  [terminal]
-  command = "/bin/sh -c 'printf \"AX 😀 café\\nsecond line\\n\"; exec cat'"
-  shell_integration = "none"
-  theme = ""
-  confirm_close_surface = false
-  window_save_state = "never"
-  """#.utf8))
-  try runtime.updateConfiguration(textSettings)
+  try runtime.updateConfiguration(testSettings(command: #"/bin/sh -c 'printf "AX 😀 café\nsecond line\n"; exec cat'"#))
   delegate.newWindow()
   let controller = delegate.windows.last!
   let view = controller.session!.view!
-  let deadline = Date(timeIntervalSinceNow: 5)
   var snapshot = TerminalTextSnapshot()
-  repeat {
-    drain()
+  waitUntil("Rendered text did not appear", timeout: 5) {
     snapshot = TerminalTextSnapshot.read(view.surface!)
-  } while !snapshot.text.contains("AX 😀 café") && Date() < deadline
-  precondition(snapshot.text.contains("AX 😀 café"))
+    return snapshot.text.contains("AX 😀 café")
+  }
   var accessibilityNotifications: [NSAccessibility.Notification] = []
   view.postAccessibility = { _, notification in accessibilityNotifications.append(notification) }
   _ = view.accessibilityValue() // Start observing only after an AX client asks for text.
   view.performSurfaceAction("select_all")
-  pumpEvents(until: Date(timeIntervalSinceNow: 0.3))
-  precondition(accessibilityNotifications.contains(.selectedTextChanged))
+  waitUntil("Selection did not notify") { accessibilityNotifications.contains(.selectedTextChanged) }
   let content = view.accessibilityValue() as! String
   precondition(view.accessibilityNumberOfCharacters() == content.utf16.count)
   let selected = view.accessibilitySelectedTextRange()
@@ -619,9 +655,7 @@ do {
   accessibilityNotifications.removeAll()
   let input = "AX changed output\n"
   input.withCString { velokit_surface_text(view.surface!, $0, UInt(input.utf8.count)) }
-  let notificationDeadline = Date(timeIntervalSinceNow: 3)
-  while !accessibilityNotifications.contains(.valueChanged) && Date() < notificationDeadline { drain() }
-  precondition(accessibilityNotifications.contains(.valueChanged))
+  waitUntil("New output did not notify") { accessibilityNotifications.contains(.valueChanged) }
   let dropped = NSPasteboard.withUniqueName()
   defer { dropped.releaseGlobally() }
   let droppedFile = URL(fileURLWithPath: "/tmp/AX-drop-'quoted'.txt")
@@ -630,9 +664,7 @@ do {
   precondition(!view.insertDrop(from: dropped))
   controller.readonly = false
   precondition(view.insertDrop(from: dropped))
-  let dropDeadline = Date(timeIntervalSinceNow: 3)
-  while !TerminalTextSnapshot.read(view.surface!).text.contains("AX-drop-") && Date() < dropDeadline { drain() }
-  precondition(TerminalTextSnapshot.read(view.surface!).text.contains("AX-drop-"))
+  waitUntil("Dropped path did not reach the terminal") { TerminalTextSnapshot.read(view.surface!).text.contains("AX-drop-") }
   precondition(view.accessibilityLine(for: (content as NSString).range(of: "second").location)
     == view.accessibilityLine(for: (content as NSString).range(of: "AX 😀 café").location) + 1, "Unexpected AX lines: \(content.debugDescription)")
   precondition(view.accessibilityString(for: NSRange(location: Int.max, length: 1)) == nil)
@@ -646,7 +678,7 @@ do {
 }
 
 // Quit preserves windows for AppKit state capture, then closes native sessions.
-do {
+func checkQuitPreservesWindows() {
   let runtime = delegate.runtime!
   let quitter = AppDelegate()
   quitter.runtime = runtime
@@ -666,7 +698,7 @@ do {
 }
 
 // Missing herdr leaves a plain terminal and rejects local multiplexing.
-do {
+func checkMissingHerdr() {
   delegate.newLocalWindow()
   let controller = delegate.windows.last!
   precondition(controller.workspaceView.muxEnabled == false)
@@ -680,132 +712,8 @@ do {
   controller.window?.close()
 }
 
-// A real isolated server verifies streaming, namespace ownership, and detach/reattach.
-if let executable = HerdrClient.discover() {
-  let stateDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("velo-check-" + UUID().uuidString)
-  delegate.workspaceStateURL = stateDirectory.appendingPathComponent("workspace.json")
-  defer { try? FileManager.default.removeItem(at: stateDirectory); delegate.workspaceStateURL = nil }
-  let client = HerdrClient(executable: executable, sessionName: "velocitty-test-" + UUID().uuidString.lowercased())
-  defer {
-    _ = try? client.run(["server", "stop"])
-    _ = try? client.run(["session", "delete", client.sessionName])
-    delegate.herdr = nil
-  }
-  let muxSettings = try AppConfiguration.parse(Data("""
-  [terminal]
-  undo_timeout = "0s"
-  confirm_close_surface = false
-  theme = ""
-  """.utf8))
-  try delegate.runtime!.updateConfiguration(muxSettings)
-  defer { try? delegate.runtime?.updateConfiguration(settings) }
-  delegate.herdr = client
-  func waitMux(_ controller: TerminalWindowController? = nil) {
-    let deadline = Date(timeIntervalSinceNow: 10)
-    while (delegate.muxOpening || (controller?.muxBusy == true || controller?.hasPendingMuxActions == true)) && Date() < deadline { drain() }
-    precondition(!delegate.muxOpening && controller?.muxBusy != true)
-  }
-  delegate.newWindow()
-  waitMux()
-  let controller = delegate.windows.last!
-  let a = controller.session!
-  precondition(a.herdrTerminal != nil && controller.workspaceView.muxEnabled)
-  precondition("new_split:right".withCString { velokit_surface_binding_action(a.surface!, $0, 15) })
-  drain()
-  waitMux(controller)
-  let right = controller.session!
-  controller.splitPane("down")
-  waitMux(controller)
-  let bottom = controller.session!
-  controller.workspaceView.layoutSubtreeIfNeeded()
-  precondition(controller.tabs.count == 1 && controller.activeTab.panes.count == 3)
-  precondition(right.chrome!.frame.minX > a.chrome!.frame.minX)
-  precondition(bottom.chrome!.frame.minY < right.chrome!.frame.minY)
-  precondition(a.view!.window === controller.window && right.view!.window === controller.window)
-  controller.focusPane("up")
-  precondition(controller.session === right)
-  let height = right.chrome!.frame.height
-  controller.resizePane("down")
-  waitMux(controller)
-  controller.workspaceView.layoutSubtreeIfNeeded()
-  precondition(right.chrome!.frame.height != height)
-  controller.newTab()
-  waitMux(controller)
-  let b = controller.session!
-  precondition(a !== b && controller.tabs.count == 2)
-  controller.newNamespace()
-  waitMux(controller)
-  let c = controller.session!
-  precondition(controller.namespaces.count == 2 && controller.tabs.count == 1)
-  controller.selectNamespace(at: 0)
-  precondition(controller.session === b)
-  controller.selectTab(a)
-  let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-  defer { try? FileManager.default.removeItem(at: directory) }
-  let marker = directory.appendingPathComponent("streamed")
-  drain(); drain()
-  let command = "printf VELOCITTY_HERDR_STREAM; printf ok > " + ShellInput.quote(marker.path)
-  command.withCString { velokit_surface_text(a.surface!, $0, UInt(command.utf8.count)) }
-  var enter = ghostty_input_key_s(); enter.action = GHOSTTY_ACTION_PRESS; enter.keycode = 36
-  _ = velokit_surface_key(a.surface!, enter)
-  let deadline = Date(timeIntervalSinceNow: 8)
-  while !FileManager.default.fileExists(atPath: marker.path) && Date() < deadline { drain() }
-  precondition(FileManager.default.fileExists(atPath: marker.path), "Input must reach the herdr shell")
-  drain()
-  precondition((a.view!.accessibilityValue() as? String)?.contains("VELOCITTY_HERDR_STREAM") == true)
-  let ids = Set(controller.allPanes.compactMap { $0.herdrTerminal?.pane.terminal_id })
-  let localName = controller.activeNamespace.name
-  let workspace = controller.session!.herdrTerminal!.pane.workspace_id
-  try client.rename(workspace: workspace, name: "Agents", subtitle: "Local tasks")
-  controller.window?.performClose(nil)
-  drain()
-  precondition(a.surface == nil && b.surface == nil && c.surface == nil)
-  let detached = try client.snapshot()
-  precondition(Set(detached.panes.map(\.terminal_id)) == ids)
-  delegate.newWindow()
-  waitMux()
-  let restored = delegate.windows.last!
-  precondition(Set(restored.allPanes.compactMap { $0.herdrTerminal?.pane.terminal_id }) == ids)
-  precondition(restored.namespaces.contains { $0.name == localName }, "Backend names must not overwrite local space names")
-  precondition(restored.namespaces.flatMap(\.tabs).contains { $0.panes.count == 3 })
-  restored.selectNamespace(at: 1)
-  let exiting = restored.session!
-  drain(); drain()
-  "exit".withCString { velokit_surface_text(exiting.surface!, $0, 4) }
-  _ = velokit_surface_key(exiting.surface!, enter)
-  let exitDeadline = Date(timeIntervalSinceNow: 8)
-  while exiting.surface != nil && Date() < exitDeadline { drain() }
-  precondition(exiting.surface == nil && restored.namespaces.count == 1,
-    "A herdr shell exit must close its tab without another keypress")
-  let remaining = try client.snapshot()
-  precondition(remaining.workspaces.count == 1 && remaining.panes.count == 4)
-  let splitTab = restored.tabs.first { $0.panes.count == 3 }!
-  restored.selectTab(splitTab)
-  let closedPane = restored.session!
-  restored.closePane(confirm: false)
-  waitMux(restored)
-  precondition(closedPane.surface == nil && splitTab.panes.count == 2)
-  precondition(splitTab.panes.allSatisfy { $0.surface != nil })
-  restored.closeTab(confirm: false)
-  waitMux(restored)
-  precondition(restored.tabs.count == 1 && restored.allPanes.count == 1)
-  restored.window?.performClose(nil)
-  drain()
-}
-
-if CommandLine.arguments.contains("--configuration-only") {
-  delegate.terminating = true
-  for controller in delegate.windows {
-    controller.closing = true
-    controller.window?.close()
-  }
-  print("Configuration reload tests passed.")
-  exit(0)
-}
-
 // Native window navigation uses creation order, not the current stacking order.
-do {
+func checkWindowNavigation() {
   let empty = AppDelegate()
   empty.gotoWindow(GHOSTTY_GOTO_WINDOW_NEXT, from: nil)
   empty.gotoWindow(GHOSTTY_GOTO_WINDOW_PREVIOUS, from: nil)
@@ -814,13 +722,6 @@ do {
   delegate.newWindow()
   drain()
   let third = delegate.windows.last!
-  func waitFor(_ message: String, _ condition: () -> Bool) {
-    let deadline = Date(timeIntervalSinceNow: 3)
-    while !condition() && Date() < deadline {
-      pumpEvents(until: Date(timeIntervalSinceNow: 0.02))
-    }
-    precondition(condition(), message)
-  }
   func cycle(_ source: TerminalWindowController, _ direction: String,
     to destination: TerminalWindowController)
   {
@@ -828,7 +729,7 @@ do {
     precondition(action.withCString {
       velokit_surface_binding_action(source.session!.surface!, $0, UInt(action.utf8.count))
     })
-    waitFor("Window cycling did not focus the expected destination") {
+    waitUntil("Window cycling did not focus the expected destination") {
       app.isActive && destination.window!.isKeyWindow && !destination.window!.isMiniaturized
     }
     precondition(delegate.windows.count == 3)
@@ -841,7 +742,7 @@ do {
   cycle(third, "previous", to: second)
 
   second.window!.miniaturize(nil)
-  waitFor("Destination did not minimize") { second.window!.isMiniaturized }
+  waitUntil("Destination did not minimize") { second.window!.isMiniaturized }
   first.window!.makeKeyAndOrderFront(nil)
   cycle(first, "next", to: second)
 
@@ -857,12 +758,12 @@ do {
   action.tag = GHOSTTY_ACTION_GOTO_WINDOW
   action.action.goto_window = GHOSTTY_GOTO_WINDOW_PREVIOUS
   precondition(delegate.runtime!.context.handleAction(target: target, action: action))
-  waitFor("App navigation did not wrap past the closed window") { second.window!.isKeyWindow }
+  waitUntil("App navigation did not wrap past the closed window") { second.window!.isKeyWindow }
   precondition(delegate.windows[0] === first && delegate.windows[1] === second)
 }
 
 // Independent sessions retain independent sheets, and queued callbacks cannot reach replacements.
-do {
+func checkIndependentSheets() {
   let runtime = delegate.runtime!
   delegate.newWindow()
   let closing = delegate.windows.last!
@@ -898,7 +799,7 @@ do {
 }
 
 // A retained session keeps the engine alive; a retained view does not own either resource.
-do {
+func checkRetainedSession() throws {
   var runtime: TerminalRuntime? = try TerminalRuntime(settings: settings)
   weak var weakRuntime: TerminalRuntime?
   weakRuntime = runtime
@@ -917,130 +818,96 @@ do {
 }
 
 // Observe focus reports and committed text at the PTY, not a mirrored Swift flag.
-do {
-  let directory = FileManager.default.temporaryDirectory
-    .appendingPathComponent("velocitty-focus-\(UUID().uuidString)", isDirectory: true)
-  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-  defer { try? FileManager.default.removeItem(at: directory) }
-  let script = directory.appendingPathComponent("record.sh")
-  let input = directory.appendingPathComponent("input")
-  let ready = directory.appendingPathComponent("ready")
-  try Data("""
-  stty raw -echo
-  printf '\\033[?1004h'
-  : > "$2"
-  exec cat > "$1"
-  """.utf8).write(to: script)
-  let command = "/bin/sh " + ShellInput.paths([script.path, input.path, ready.path])
-  let escapedCommand = command.replacingOccurrences(of: "\\", with: "\\\\")
-    .replacingOccurrences(of: "\"", with: "\\\"")
-  let recordingSettings = try AppConfiguration.parse(Data("""
-  [terminal]
-  command = "\(escapedCommand)"
-  shell_integration = "none"
-  theme = ""
-  confirm_close_surface = false
-  window_save_state = "never"
-  """.utf8))
-  let runtime = delegate.runtime!
-  try runtime.updateConfiguration(recordingSettings)
-  defer { try! runtime.updateConfiguration(settings) }
-  let session = runtime.makeSession()
-  let controller = TerminalWindowController(session: session, owner: delegate)
-  delegate.windows.append(controller)
-  controller.openWindow(cascadingFrom: second.window)
-  let window = controller.window!
-  let terminal = session.view!
-  func waitUntil(_ message: @autoclosure () -> String, _ condition: () -> Bool) {
-    let deadline = Date(timeIntervalSinceNow: 3)
-    while !condition() && Date() < deadline {
-      pumpEvents(until: Date(timeIntervalSinceNow: 0.02))
+func checkFocusReporting() throws {
+  try withTemporaryDirectory("velocitty-focus") { directory in
+    let runtime = delegate.runtime!
+    defer { try! runtime.updateConfiguration(settings) }
+    let recorder = try openRecordingTerminal(in: directory, prelude: "printf '\\033[?1004h'\n")
+    let controller = recorder.controller
+    let window = controller.window!
+    let terminal = recorder.view
+    app.activate(ignoringOtherApps: true)
+    window.makeKeyAndOrderFront(nil)
+    window.makeFirstResponder(terminal)
+    waitUntil("Test application did not activate: active=\(app.isActive), key=\(window.isKeyWindow), visible=\(window.isVisible), keyWindow=\(String(describing: app.keyWindow)), target=\(window)") { app.isActive && window.isKeyWindow }
+    drain()
+    var expected = recorder.received()
+    func expect(_ delta: String, _ message: String) {
+      expected.append(Data(delta.utf8))
+      waitUntil("\(message); expected \(Array(expected)), received \(Array(recorder.received())); "
+        + "active=\(app.isActive) key=\(window.isKeyWindow) "
+        + "responder=\(window.firstResponder === terminal) sheet=\(window.attachedSheet != nil)") {
+        recorder.received() == expected
+      }
     }
-    precondition(condition(), message())
-  }
-  app.activate(ignoringOtherApps: true)
-  window.makeKeyAndOrderFront(nil)
-  window.makeFirstResponder(terminal)
-  waitUntil("Test application did not activate: active=\(app.isActive), key=\(window.isKeyWindow), visible=\(window.isVisible), keyWindow=\(String(describing: app.keyWindow)), target=\(window)") { app.isActive && window.isKeyWindow }
-  waitUntil("Focus recorder did not start") { FileManager.default.fileExists(atPath: ready.path) }
-  drain()
-  func received() -> Data { (try? Data(contentsOf: input)) ?? Data() }
-  var expected = received()
-  func expect(_ delta: String, _ message: String) {
-    expected.append(Data(delta.utf8))
-    waitUntil("\(message); expected \(Array(expected)), received \(Array(received())); "
-      + "active=\(app.isActive) key=\(window.isKeyWindow) "
-      + "responder=\(window.firstResponder === terminal) sheet=\(window.attachedSheet != nil)") {
-      received() == expected
+    first.window!.makeKeyAndOrderFront(nil)
+    expect("\u{1b}[O", "Background terminal did not report focus loss")
+    precondition(window.firstResponder === terminal)
+    window.makeFirstResponder(terminal) // A background first responder is still unfocused.
+    runtime.updateFocus()
+    drain()
+    precondition(recorder.received() == expected)
+    window.makeKeyAndOrderFront(nil)
+    expect("\u{1b}[I", "Returning to a terminal did not report focus gain")
+    controller.chrome!.startSearch(nil)
+    expect("\u{1b}[O", "Search retained terminal focus")
+    controller.chrome!.hideSearch()
+    expect("\u{1b}[I", "Leaving search did not restore focus")
+    controller.showCommands()
+    expect("\u{1b}[O", "Command palette retained terminal focus")
+    controller.palette!.close()
+    window.makeKeyAndOrderFront(nil)
+    expect("\u{1b}[I", "Closing the palette did not restore focus")
+    guard let previous = previouslyActiveApplication,
+      previous.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
+      fatalError("Focus tests require another foreground application")
     }
+    precondition(previous.activate(options: []))
+    waitUntil("Test application did not deactivate") { !app.isActive }
+    expect("\u{1b}[O", "App deactivation retained terminal focus")
+    app.activate(ignoringOtherApps: true)
+    window.makeKeyAndOrderFront(nil)
+    waitUntil("Test application did not reactivate") { app.isActive && window.isKeyWindow }
+    expect("\u{1b}[I", "App reactivation did not restore terminal focus")
+    recorder.session.links = TerminalLinks { _ in fatalError("Unexpected link opening") }
+    recorder.session.links.open("custom:focus-test", kind: GHOSTTY_ACTION_OPEN_URL_KIND_OSC8, from: terminal)
+    expect("\u{1b}[O", "Confirmation sheet retained terminal focus")
+    recorder.session.links.cancel()
+    // AppKit may choose a different key window after programmatic cancellation.
+    window.makeKeyAndOrderFront(nil)
+    expect("\u{1b}[I", "Refocusing after the sheet did not restore terminal focus")
+    // Simulate NSTextInputClient composition, leaving native commit/discard callbacks intact.
+    terminal.setMarkedText("にほん" as NSString, selectedRange: NSRange(location: 3, length: 0),
+      replacementRange: NSRange(location: NSNotFound, length: 0))
+    first.window!.makeKeyAndOrderFront(nil)
+    expect("\u{1b}[O", "Composition focus loss was not forwarded")
+    runtime.updateFocus()
+    precondition(terminal.markedText.string == "にほん")
+    window.makeKeyAndOrderFront(nil)
+    expect("\u{1b}[I", "Composition focus gain was not forwarded")
+    precondition(terminal.markedText.string == "にほん")
+    terminal.keyInProgress = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+      windowNumber: window.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)
+    terminal.insertText("日本" as NSString, replacementRange: NSRange(location: NSNotFound, length: 0))
+    terminal.insertText("" as NSString, replacementRange: NSRange(location: NSNotFound, length: 0))
+    terminal.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+    terminal.keyInProgress = nil
+    expect("日本", "Committed composition must not leak Return or duplicate input")
+    precondition(!terminal.hasMarkedText())
+    terminal.removeFromSuperview()
+    expect("\u{1b}[O", "Detached view retained focus")
+    controller.chrome!.addSubview(terminal)
+    window.makeFirstResponder(terminal)
+    expect("\u{1b}[I", "Reattached view did not restore focus")
+    controller.closing = true
+    window.close()
+    drain()
+    precondition(delegate.windows.count == 2)
   }
-  first.window!.makeKeyAndOrderFront(nil)
-  expect("\u{1b}[O", "Background terminal did not report focus loss")
-  precondition(window.firstResponder === terminal)
-  window.makeFirstResponder(terminal) // A background first responder is still unfocused.
-  runtime.updateFocus()
-  drain()
-  precondition(received() == expected)
-  window.makeKeyAndOrderFront(nil)
-  expect("\u{1b}[I", "Returning to a terminal did not report focus gain")
-  controller.chrome!.startSearch(nil)
-  expect("\u{1b}[O", "Search retained terminal focus")
-  controller.chrome!.hideSearch()
-  expect("\u{1b}[I", "Leaving search did not restore focus")
-  controller.showCommands()
-  expect("\u{1b}[O", "Command palette retained terminal focus")
-  controller.palette!.close()
-  window.makeKeyAndOrderFront(nil)
-  expect("\u{1b}[I", "Closing the palette did not restore focus")
-  guard let previous = previouslyActiveApplication,
-    previous.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
-    fatalError("Focus tests require another foreground application")
-  }
-  precondition(previous.activate(options: []))
-  waitUntil("Test application did not deactivate") { !app.isActive }
-  expect("\u{1b}[O", "App deactivation retained terminal focus")
-  app.activate(ignoringOtherApps: true)
-  window.makeKeyAndOrderFront(nil)
-  waitUntil("Test application did not reactivate") { app.isActive && window.isKeyWindow }
-  expect("\u{1b}[I", "App reactivation did not restore terminal focus")
-  session.links = TerminalLinks { _ in fatalError("Unexpected link opening") }
-  session.links.open("custom:focus-test", kind: GHOSTTY_ACTION_OPEN_URL_KIND_OSC8, from: terminal)
-  expect("\u{1b}[O", "Confirmation sheet retained terminal focus")
-  session.links.cancel()
-  // AppKit may choose a different key window after programmatic cancellation.
-  window.makeKeyAndOrderFront(nil)
-  expect("\u{1b}[I", "Refocusing after the sheet did not restore terminal focus")
-  // Simulate NSTextInputClient composition, leaving native commit/discard callbacks intact.
-  terminal.setMarkedText("にほん" as NSString, selectedRange: NSRange(location: 3, length: 0),
-    replacementRange: NSRange(location: NSNotFound, length: 0))
-  first.window!.makeKeyAndOrderFront(nil)
-  expect("\u{1b}[O", "Composition focus loss was not forwarded")
-  runtime.updateFocus()
-  precondition(terminal.markedText.string == "にほん")
-  window.makeKeyAndOrderFront(nil)
-  expect("\u{1b}[I", "Composition focus gain was not forwarded")
-  precondition(terminal.markedText.string == "にほん")
-  terminal.keyInProgress = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
-    windowNumber: window.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)
-  terminal.insertText("日本" as NSString, replacementRange: NSRange(location: NSNotFound, length: 0))
-  terminal.insertText("" as NSString, replacementRange: NSRange(location: NSNotFound, length: 0))
-  terminal.doCommand(by: #selector(NSResponder.insertNewline(_:)))
-  terminal.keyInProgress = nil
-  expect("日本", "Committed composition must not leak Return or duplicate input")
-  precondition(!terminal.hasMarkedText())
-  terminal.removeFromSuperview()
-  expect("\u{1b}[O", "Detached view retained focus")
-  controller.chrome!.addSubview(terminal)
-  window.makeFirstResponder(terminal)
-  expect("\u{1b}[I", "Reattached view did not restore focus")
-  controller.closing = true
-  window.close()
-  drain()
-  precondition(delegate.windows.count == 2)
 }
 
 // Exercise the actual native action routing with a fake OS opener.
-do {
+func checkLinkRouting() {
   delegate.newWindow()
   drain()
   let controller = delegate.windows.last!
@@ -1117,14 +984,17 @@ do {
   precondition(delegate.windows.count == 2)
 }
 
-// Clipboard ownership: queue order, other sheets, and exactly-once teardown replies.
-do {
-  let runtime = delegate.runtime!
-  let session = runtime.makeSession()
+func openPlainWindow() -> (TerminalWindowController, TerminalSession, TerminalView) {
+  let session = delegate.runtime!.makeSession()
   let controller = TerminalWindowController(session: session, owner: delegate)
   delegate.windows.append(controller)
   controller.openWindow(cascadingFrom: second.window)
-  let view = session.view!
+  return (controller, session, session.view!)
+}
+
+// Clipboard ownership: queue order, other sheets, and exactly-once teardown replies.
+func checkClipboardQueue() {
+  let (controller, session, view) = openPlainWindow()
   let queue = view.clipboard
   var replies: [(Int, Bool, Bool)] = []
   func enqueue(_ id: Int) {
@@ -1171,13 +1041,8 @@ do {
 }
 
 // Cancellation before presentation, including the no-request-state write callback.
-do {
-  let runtime = delegate.runtime!
-  let session = runtime.makeSession()
-  let controller = TerminalWindowController(session: session, owner: delegate)
-  delegate.windows.append(controller)
-  controller.openWindow(cascadingFrom: second.window)
-  let view = session.view!
+func checkClipboardCancellation() {
+  let (controller, _, view) = openPlainWindow()
   var denied = 0
   view.clipboard.enqueue(title: "Pending", message: "Test") { allow, _ in
     precondition(!allow && view.surface != nil)
@@ -1201,10 +1066,11 @@ do {
   precondition(board.string(forType: .string) == "unchanged")
 }
 
-do {
+// A view that was never attached to a window denies requests instead of queueing them.
+func checkUnattachedClipboard() throws {
   let runtime = try TerminalRuntime(settings: settings)
   let session = runtime.makeSession()
-  let view = session.createView()! // Never attached to a window.
+  let view = session.createView()!
   var denied = 0
   view.clipboard.enqueue(title: "Unattached", message: "Test") { allow, _ in
     precondition(!allow && view.surface != nil)
@@ -1217,136 +1083,95 @@ do {
 }
 
 // Exercise native request allocation, copied clipboard bytes, completion and denial at a PTY.
-do {
-  let directory = FileManager.default.temporaryDirectory
-    .appendingPathComponent("velocitty-clipboard-\(UUID().uuidString)", isDirectory: true)
-  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-  defer { try? FileManager.default.removeItem(at: directory) }
-  let script = directory.appendingPathComponent("record.sh")
-  let input = directory.appendingPathComponent("input")
-  let ready = directory.appendingPathComponent("ready")
-  try Data("stty raw -echo\n: > \"$2\"\nexec cat > \"$1\"\n".utf8).write(to: script)
-  let command = "/bin/sh " + ShellInput.paths([script.path, input.path, ready.path])
-  let escapedCommand = command.replacingOccurrences(of: "\\", with: "\\\\")
-    .replacingOccurrences(of: "\"", with: "\\\"")
-  let recordingSettings = try AppConfiguration.parse(Data("""
-  [terminal]
-  command = "\(escapedCommand)"
-  shell_integration = "none"
-  theme = ""
-  confirm_close_surface = false
-  window_save_state = "never"
-  clipboard_paste_protection = true
-  clipboard_paste_bracketed_safe = false
-  """.utf8))
-  let runtime = delegate.runtime!
-  try runtime.updateConfiguration(recordingSettings)
-  defer { try! runtime.updateConfiguration(settings) }
-  let session = runtime.makeSession()
-  let controller = TerminalWindowController(session: session, owner: delegate)
-  delegate.windows.append(controller)
-  controller.openWindow(cascadingFrom: second.window)
-  let view = session.view!
-  func waitFor(_ condition: () -> Bool) {
-    let deadline = Date(timeIntervalSinceNow: 3)
-    while !condition() && Date() < deadline { drain() }
-    precondition(condition(), "Clipboard PTY check timed out")
-  }
-  waitFor { FileManager.default.fileExists(atPath: ready.path) }
-  let board = RuntimeContext.pasteboard(GHOSTTY_CLIPBOARD_SELECTION)
-  func paste(_ value: String) {
+func checkClipboardAtPTY() throws {
+  try withTemporaryDirectory("velocitty-clipboard") { directory in
+    defer { try! delegate.runtime!.updateConfiguration(settings) }
+    let recorder = try openRecordingTerminal(in: directory,
+      extra: "clipboard_paste_protection = true\nclipboard_paste_bracketed_safe = false")
+    let view = recorder.view
+    let board = RuntimeContext.pasteboard(GHOSTTY_CLIPBOARD_SELECTION)
+    func paste(_ value: String) {
+      board.clearContents()
+      board.setString(value, forType: .string)
+      view.performSurfaceAction("paste_from_selection")
+    }
+    paste("first\nsecond")
+    paste("denied\ntext")
     board.clearContents()
-    board.setString(value, forType: .string)
-    view.performSurfaceAction("paste_from_selection")
+    board.setString("changed after request", forType: .string)
+    waitUntil("The first paste did not ask for confirmation") { view.clipboard.confirmation != nil }
+    precondition(view.clipboard.confirmation!.informativeText.contains("first\nsecond"))
+    view.clipboard.confirmation!.buttons[0].performClick(nil)
+    waitUntil("The second paste did not ask for confirmation") {
+      view.clipboard.confirmation?.informativeText.contains("denied\ntext") == true
+    }
+    view.clipboard.confirmation!.buttons[1].performClick(nil)
+    let expected = Data("first\rsecond".utf8)
+    waitUntil("The allowed paste did not reach the PTY") { recorder.received() == expected }
+    drain()
+    precondition(recorder.received() == expected)
+    paste("pending\none")
+    paste("pending\ntwo")
+    waitUntil("The pending paste did not ask for confirmation") { view.clipboard.confirmation != nil }
+    recorder.controller.closing = true
+    recorder.controller.window!.close()
+    drain()
+    precondition(view.surface == nil && view.clipboard.confirmation == nil)
+    precondition(recorder.received() == expected)
+    precondition(delegate.windows.count == 2)
   }
-  paste("first\nsecond")
-  paste("denied\ntext")
-  board.clearContents()
-  board.setString("changed after request", forType: .string)
-  waitFor { view.clipboard.confirmation != nil }
-  precondition(view.clipboard.confirmation!.informativeText.contains("first\nsecond"))
-  view.clipboard.confirmation!.buttons[0].performClick(nil)
-  waitFor { view.clipboard.confirmation?.informativeText.contains("denied\ntext") == true }
-  view.clipboard.confirmation!.buttons[1].performClick(nil)
-  let expected = Data("first\rsecond".utf8)
-  waitFor { (try? Data(contentsOf: input)) == expected }
-  drain()
-  precondition((try? Data(contentsOf: input)) == expected)
-  paste("pending\none")
-  paste("pending\ntwo")
-  waitFor { view.clipboard.confirmation != nil }
-  controller.closing = true
-  controller.window!.close()
-  drain()
-  precondition(view.surface == nil && view.clipboard.confirmation == nil)
-  precondition((try? Data(contentsOf: input)) == expected)
-  precondition(delegate.windows.count == 2)
 }
 
-if testAutomaticQuit {
-  precondition(delegate.native.quitAfterLastWindowClosed)
-  first.window?.performClose(nil)
+// Background titles, menu close, reopening on the same engine, and quit.
+func checkCloseAndQuit() {
+  // A background terminal's title callback must not change the foreground window.
+  var target = ghostty_target_s()
+  target.tag = GHOSTTY_TARGET_SURFACE
+  target.target.surface = first.session!.view!.surface
+  var action = ghostty_action_s()
+  action.tag = GHOSTTY_ACTION_SET_TITLE
+  "Background terminal".withCString {
+    action.action.set_title.title = $0
+    precondition(first.session!.runtime.context.handleAction(target: target, action: action))
+  }
+  drain()
+  precondition(first.window?.title == "Background terminal")
+  precondition(second.window?.title != "Background terminal")
+  second.window?.makeKeyAndOrderFront(nil)
+  drain()
+  precondition(closeMenuItem.keyEquivalent == "w")
+  precondition(app.sendAction(closeMenuItem.action!, to: closeMenuItem.target, from: closeMenuItem))
   drain()
   precondition(delegate.windows.count == 1)
-  precondition(delegate.quitTimer == nil || delegate.quitTimer?.isValid == false)
-  let observer = NotificationCenter.default.addObserver(
-    forName: NSApplication.willTerminateNotification, object: app, queue: .main
-  ) { _ in
-    precondition(delegate.windows.isEmpty)
-    try! FileHandle.standardOutput.write(contentsOf: Data("Last-window quit test passed.\n".utf8))
-  }
-  second.window?.performClose(nil)
-  RunLoop.main.run(until: Date(timeIntervalSinceNow: 2))
-  withExtendedLifetime(observer) { fatalError("Closing the last window did not quit") }
+  precondition(first.session?.view?.surface != nil)
+  precondition(second.session?.view == nil)
+  delegate.gotoWindow(GHOSTTY_GOTO_WINDOW_NEXT, from: first)
+  delegate.gotoWindow(GHOSTTY_GOTO_WINDOW_PREVIOUS, from: first)
+  drain()
+  precondition(first.window!.isKeyWindow && delegate.windows.count == 1)
+  first.window?.performClose(nil)
+  drain()
+  precondition(delegate.windows.isEmpty)
+  precondition(terminal.surface == nil && terminal.config == nil)
+  precondition(!delegate.validateMenuItem(closeMenuItem))
+  precondition(delegate.runtime?.app == originalEngine)
+  precondition(app.sendAction(new.action!, to: new.target, from: new))
+  precondition(app.sendAction(new.action!, to: new.target, from: new))
+  drain()
+  precondition(delegate.windows.count == 2)
+  precondition(delegate.windows.allSatisfy { $0.session?.runtime.app == originalEngine })
+  let quit = menuItem("Quit Velocitty")
+  precondition(quit.keyEquivalent == "q")
+  precondition(quit.action == #selector(NSApplication.terminate(_:)))
+  precondition(delegate.applicationShouldTerminate(app) == .terminateNow)
+  precondition(delegate.windows.count == 2, "Quit must preserve windows for AppKit state capture")
+  delegate.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+  precondition(delegate.windows.allSatisfy { $0.session?.surface == nil })
+  for controller in delegate.windows { controller.closing = true; controller.window?.close() }
+  precondition(delegate.windows.isEmpty)
 }
 
-// A background terminal's title callback must not change the foreground window.
-var target = ghostty_target_s()
-target.tag = GHOSTTY_TARGET_SURFACE
-target.target.surface = first.session!.view!.surface
-var action = ghostty_action_s()
-action.tag = GHOSTTY_ACTION_SET_TITLE
-"Background terminal".withCString {
-  action.action.set_title.title = $0
-  precondition(first.session!.runtime.context.handleAction(target: target, action: action))
-}
-drain()
-precondition(first.window?.title == "Background terminal")
-precondition(second.window?.title != "Background terminal")
-second.window?.makeKeyAndOrderFront(nil)
-drain()
-let close = menuItem("Close Window")
-precondition(close.keyEquivalent == "w")
-precondition(app.sendAction(close.action!, to: close.target, from: close))
-drain()
-precondition(delegate.windows.count == 1)
-precondition(first.session?.view?.surface != nil)
-precondition(second.session?.view == nil)
-delegate.gotoWindow(GHOSTTY_GOTO_WINDOW_NEXT, from: first)
-delegate.gotoWindow(GHOSTTY_GOTO_WINDOW_PREVIOUS, from: first)
-drain()
-precondition(first.window!.isKeyWindow && delegate.windows.count == 1)
-first.window?.performClose(nil)
-drain()
-precondition(delegate.windows.isEmpty)
-precondition(terminal.surface == nil && terminal.config == nil)
-precondition(!delegate.validateMenuItem(closeMenuItem))
-precondition(delegate.runtime?.app == originalEngine)
-precondition(app.sendAction(new.action!, to: new.target, from: new))
-precondition(app.sendAction(new.action!, to: new.target, from: new))
-drain()
-precondition(delegate.windows.count == 2)
-precondition(delegate.windows.allSatisfy { $0.session?.runtime.app == originalEngine })
-let quit = menuItem("Quit Velocitty")
-precondition(quit.keyEquivalent == "q")
-precondition(quit.action == #selector(NSApplication.terminate(_:)))
-precondition(delegate.applicationShouldTerminate(app) == .terminateNow)
-precondition(delegate.windows.count == 2, "Quit must preserve windows for AppKit state capture")
-delegate.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
-precondition(delegate.windows.allSatisfy { $0.session?.surface == nil })
-for controller in delegate.windows { controller.closing = true; controller.window?.close() }
-precondition(delegate.windows.isEmpty)
-print("Window lifecycle tests passed.")
+// MARK: - Standalone checks
 
 // Runs inside an isolated app bundle so AppKit, rather than a hand-made coder,
 // saves and restores windows across two processes.
@@ -1374,7 +1199,10 @@ func runRestorationCheck() -> Never {
         controller.window!.invalidateRestorableState()
       }
       owner.windows[1].toggleFullscreen(modeOverride: "true")
-      DispatchQueue.main.asyncAfter(deadline: .now() + 2) { application.terminate(nil) }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+        print("AppKit restoration state written.")
+        application.terminate(nil)
+      }
     } else {
       precondition(owner.windows.count == 2, "AppKit did not restore both windows: \(owner.windows.count)")
       for index in 0..<2 {
@@ -1397,147 +1225,129 @@ func runRestorationCheck() -> Never {
   exit(0)
 }
 
-
 func runWorkspacePersistenceCheck() throws {
-  guard let executable = HerdrClient.discover() else { fatalError("herdr is required for this check") }
-  let directory = FileManager.default.temporaryDirectory.appendingPathComponent("velocitty-state-" + UUID().uuidString)
+  try withIsolatedHerdr("velocitty-test") { directory, clients in
+    try checkWorkspacePersistence(directory: directory, client: clients[0])
+  }
+  print("Workspace persistence tests passed.")
+}
+
+private func checkWorkspacePersistence(directory: URL, client initialClient: HerdrClient) throws {
+  var client = initialClient
   let file = directory.appendingPathComponent("workspace.json")
-  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-  let herdrConfig = directory.appendingPathComponent("herdr.toml")
-  try Data("[terminal]\ndefault_shell='/bin/zsh'\n".utf8).write(to: herdrConfig)
-  let previousConfig = ProcessInfo.processInfo.environment["HERDR_CONFIG_PATH"]
-  setenv("HERDR_CONFIG_PATH", herdrConfig.path, 1)
-  defer {
-    if let previousConfig { setenv("HERDR_CONFIG_PATH", previousConfig, 1) }
-    else { unsetenv("HERDR_CONFIG_PATH") }
-  }
-  let client = HerdrClient(executable: executable, sessionName: "velocitty-test-" + UUID().uuidString.lowercased())
-  defer {
-    _ = try? client.run(["server", "stop"])
-    _ = try? client.run(["session", "delete", client.sessionName])
-    try? FileManager.default.removeItem(at: directory)
-  }
   let settings = try AppConfiguration.parse(Data("[terminal]\nconfirm_close_surface=false\ntheme=''\n".utf8))
+  var ownerCount = 0
+  // Each relaunch has its own client, as a real one would: a client has a single event callback, which an
+  // earlier owner's late refresh would otherwise take back from the later one.
   func makeOwner() throws -> AppDelegate {
+    if ownerCount > 0 { client = HerdrClient(executable: initialClient.executable, sessionName: initialClient.sessionName) }
+    ownerCount += 1
     let owner = AppDelegate()
     owner.workspaceStateURL = file
     owner.runtime = try TerminalRuntime(settings: settings)
     owner.herdr = client
     return owner
   }
-  func wait(_ owner: AppDelegate, _ controller: TerminalWindowController? = nil) {
-    let deadline = Date(timeIntervalSinceNow: 10)
-    while (owner.muxOpening || (controller?.muxBusy == true || controller?.hasPendingMuxActions == true)) && Date() < deadline {
-      pumpEvents(until: Date(timeIntervalSinceNow: 0.02))
-    }
-    precondition(!owner.muxOpening && controller?.muxBusy != true)
-  }
+  func markerExists(_ marker: URL) -> Bool { FileManager.default.fileExists(atPath: marker.path) }
   let first = try makeOwner()
-  first.newWindow(); wait(first)
+  first.newWindow(); waitForMux(first)
   let window = first.windows.last!
   let integrationMarker = directory.appendingPathComponent("integration")
   pumpEvents(until: Date(timeIntervalSinceNow: 0.5))
-  func enterCommand(_ command: String, in pane: TerminalSession) {
-    command.withCString { velokit_surface_text(pane.surface!, $0, UInt(command.utf8.count)) }
-    var enter = ghostty_input_key_s()
-    enter.action = GHOSTTY_ACTION_PRESS; enter.keycode = 36
-    _ = velokit_surface_key(pane.surface!, enter)
-  }
   let integrationCommand = "(( $+_ghostty_state )) && printf ok > " + ShellInput.quote(integrationMarker.path)
   enterCommand(integrationCommand, in: window.session!)
-  let shellDeadline = Date(timeIntervalSinceNow: 5)
-  while !FileManager.default.fileExists(atPath: integrationMarker.path) && Date() < shellDeadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.02)) }
-  if !FileManager.default.fileExists(atPath: integrationMarker.path), let output = window.session?.view?.accessibilityValue() as? String {
+  if !pollUntil(timeout: 5, { markerExists(integrationMarker) }), let output = window.session?.view?.accessibilityValue() as? String {
     FileHandle.standardError.write(Data(output.utf8))
   }
-  precondition(FileManager.default.fileExists(atPath: integrationMarker.path), "New herdr shells must load integration")
+  precondition(markerExists(integrationMarker), "New herdr shells must load integration")
   let running = try client.hasRunningTask(paneID: window.session!.herdrTerminal!.pane.pane_id)
   precondition(running == false, "An idle shell should not prompt to close")
   let recoveredPane = window.session!
   let terminalID = recoveredPane.herdrTerminal!.pane.terminal_id
   recoveredPane.attachmentExited()
   recoveredPane.attachmentExited()
-  let recoveryDeadline = Date(timeIntervalSinceNow: 8)
-  while recoveredPane.recovering && Date() < recoveryDeadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.02)) }
-  precondition(!recoveredPane.recovering && window.session === recoveredPane)
-  precondition(recoveredPane.herdrTerminal!.pane.terminal_id == terminalID)
+  waitUntil("The attachment did not recover", timeout: 8) { !recoveredPane.recovering }
+  precondition(window.session === recoveredPane && recoveredPane.herdrTerminal!.pane.terminal_id == terminalID)
   // The reconnect reuses the view, whose clipboard was cancelled with the old surface.
   var clipboardReply: Bool?
   recoveredPane.view!.clipboard.enqueue(title: "After reconnect", message: "Test") { allow, _ in clipboardReply = allow }
   precondition(clipboardReply == nil, "A reconnected terminal must not auto-deny clipboard requests")
-  let clipboardDeadline = Date(timeIntervalSinceNow: 2)
-  while clipboardReply == nil && recoveredPane.view!.clipboard.confirmation == nil && Date() < clipboardDeadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.02)) }
-  recoveredPane.view!.clipboard.confirmation?.buttons[1].performClick(nil)
-  while clipboardReply == nil && Date() < clipboardDeadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.02)) }
+  waitUntil("A reconnected terminal must present clipboard requests") { recoveredPane.view!.clipboard.confirmation != nil }
+  recoveredPane.view!.clipboard.confirmation!.buttons[1].performClick(nil)
+  waitUntil("The clipboard request was not answered") { clipboardReply != nil }
   precondition(clipboardReply == false && recoveredPane.view!.clipboard.confirmation == nil)
   let recoveryMarker = directory.appendingPathComponent("recovered")
-  let recoveredCommand = "printf ok > " + ShellInput.quote(recoveryMarker.path)
-  enterCommand(recoveredCommand, in: recoveredPane)
-  let inputDeadline = Date(timeIntervalSinceNow: 5)
-  while !FileManager.default.fileExists(atPath: recoveryMarker.path) && Date() < inputDeadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.02)) }
-  precondition(FileManager.default.fileExists(atPath: recoveryMarker.path), "Recovered attachment must accept input in the same shell")
+  enterCommand("printf ok > " + ShellInput.quote(recoveryMarker.path), in: recoveredPane)
+  waitUntil("Recovered attachment must accept input in the same shell", timeout: 5) { markerExists(recoveryMarker) }
   window.newTab()
   window.newTab()
-  wait(first, window)
+  waitForMux(first, window)
   precondition(window.tabs.count == 3, "Busy mux actions must queue instead of disappearing")
   let beforeSelection = try client.snapshot().workspaces.map(\.active_tab_id)
   window.selectTab(window.tabs[0])
   window.selectTab(window.tabs[2])
-  wait(first, window)
+  waitForMux(first, window)
   let afterSelection = try client.snapshot().workspaces.map(\.active_tab_id)
   precondition(afterSelection == beforeSelection, "Velocitty navigation must not change herdr focus")
   window.session?.view?.performSurfaceAction("increase_font_size:2")
   let inheritedFont = velokit_surface_font_size(window.session!.surface!)
-  window.splitPane("right"); wait(first, window)
+  // Split through the terminal's own binding action, as a keybinding would.
+  let splitPane = window.session!
+  precondition("new_split:right".withCString { velokit_surface_binding_action(splitPane.surface!, $0, 15) })
+  waitForMux(first, window)
+  precondition(window.session !== splitPane && window.activeTab.panes.count == 2)
   precondition(abs(velokit_surface_font_size(window.session!.surface!) - inheritedFont) < 0.01, "Split must inherit the current font size")
   let splitTabID = window.activeTab.herdrID!
-  window.setSplitRatio(tabID: splitTabID, path: [], ratio: 0.3); wait(first, window)
+  window.setSplitRatio(tabID: splitTabID, path: [], ratio: 0.3); waitForMux(first, window)
   guard case .split(_, let resizedRatio, _, _) = window.activeTab.localLayout else { fatalError("Missing local tree") }
   precondition(abs(resizedRatio - 0.3) < 0.01)
-  window.equalizePanes(); wait(first, window)
+  window.equalizePanes(); waitForMux(first, window)
   guard case .split(_, let equalRatio, _, _) = window.activeTab.localLayout else { fatalError("Missing local tree") }
   precondition(abs(equalRatio - 0.5) < 0.01)
   let originalPane = window.session!
-  window.splitPane("left"); wait(first, window)
+  window.splitPane("left"); waitForMux(first, window)
   window.workspaceView.layoutSubtreeIfNeeded()
   precondition(window.session!.chrome!.frame.midX < originalPane.chrome!.frame.midX, "Left split must appear before the original pane")
   window.selectTab(originalPane)
   let selectedPane = originalPane.herdrTerminal!.pane.pane_id
   window.togglePaneZoom()
   precondition(window.activeTab.zoomed && window.session!.herdrTerminal!.pane.pane_id == selectedPane)
-  window.newTab(); wait(first, window)
+  window.newTab(); waitForMux(first, window)
   window.moveTab(-1)
   let order = window.tabs.map { $0.herdrID! }
   window.selectTab(window.tabs.first { $0.herdrID == splitTabID }!)
-  window.newNamespace(); wait(first, window)
+  // A backend rename must not replace the local space name.
+  let localName = window.activeNamespace.name
+  try client.rename(workspace: window.session!.herdrTerminal!.pane.workspace_id, name: "Agents", subtitle: "Local tasks")
+  window.newNamespace(); waitForMux(first, window)
   let selectedNamespace = window.activeNamespace.id!
+  precondition(window.namespaces.count == 2 && window.namespaces[0].tabs.map { $0.herdrID! } == order,
+    "Window structure changed without a local action: \(window.namespaces.map { $0.tabs.map(\.herdrID) }), expected \(order)")
   window.workspaceView.restoreSidebarState(.init(width: 276, compact: true))
   window.workspaceView.layoutSubtreeIfNeeded()
   first.scheduleWorkspaceSave(window)
   first.flushWorkspaceSaveSynchronously()
   let saved = try WorkspaceStateStore(url: file).load()
   precondition(saved.selectedNamespaceID == selectedNamespace)
+  precondition(saved.namespaces.first?.tabs.map(\.id) == order, "The saved tab order must match the window")
   window.window?.performClose(nil)
   pumpEvents(until: Date(timeIntervalSinceNow: 0.05))
   // A fresh owner loads the file, rather than reusing the in-memory state.
   let second = try makeOwner()
-  second.newWindow(); wait(second)
+  second.newWindow(); waitForMux(second)
   let restored = second.windows.last!
   restored.workspaceView.layoutSubtreeIfNeeded()
   precondition(restored.activeNamespace.id == selectedNamespace)
   precondition(restored.namespaces[0].tabs.map { $0.herdrID! } == order)
+  precondition(restored.namespaces[0].name == localName, "Backend names must not overwrite local space names")
   let split = restored.namespaces[0].tabs.first { $0.herdrID == splitTabID }!
   precondition(split.selected.herdrTerminal!.pane.pane_id == selectedPane)
   precondition(split.zoomed, "Local pane zoom must survive relaunch")
   precondition(restored.workspaceView.savedSidebarState == .init(width: 276, compact: true))
-  // External changes must attach exactly once without importing backend focus.
+  // External changes attach exactly once, through the event stream, without importing backend focus.
   let localSelection = restored.session!
-  let subscriptionDeadline = Date(timeIntervalSinceNow: 3)
-  while !client.eventsConnected && Date() < subscriptionDeadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.02)) }
-  precondition(client.eventsConnected, "Event subscription must be acknowledged before changing the workspace")
-  var eventReceived = false
-  let eventHandler = client.onWorkspaceEvent
-  client.onWorkspaceEvent = { eventReceived = true; eventHandler?() }
+  waitUntil("Event subscription must be acknowledged before changing the workspace") { client.eventsConnected }
+  let eventsBefore = client.workspaceEventCount
   let external = try client.create(workspace: selectedNamespace, name: "External", directory: directory.path)
   let oldTerminalIDs = Set(restored.allPanes.compactMap { $0.herdrTerminal?.pane.terminal_id })
   let added = external.panes.first { !oldTerminalIDs.contains($0.terminal_id) }!
@@ -1545,19 +1355,22 @@ func runWorkspacePersistenceCheck() throws {
   let invalid = HerdrClient.Snapshot(workspaces: external.workspaces, tabs: external.tabs, panes: [added, added])
   do { try restored.addHerdrTerminals(invalid, excluding: []); preconditionFailure("Expected duplicate rejection") }
   catch { precondition(restored.allPanes.count == beforeRollback, "A failed attachment must roll back prepared views") }
-  let eventDeadline = Date(timeIntervalSinceNow: 3)
-  while !eventReceived && Date() < eventDeadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.02)) }
-  precondition(client.eventsConnected && eventReceived, "Structural events must arrive over the read-only API")
-  second.synchronizeHerdr(external, client: client)
+  waitUntil("Structural events must arrive over the read-only API and attach the new terminal", timeout: 5) {
+    client.workspaceEventCount > eventsBefore && restored.allPanes.contains { $0.herdrTerminal?.pane.terminal_id == added.terminal_id }
+  }
+  // Attaching the pane changes the subscription set, so the stream is replaced; wait for the new one.
+  waitUntil("The event subscription must be re-established after attaching") { client.eventsConnected }
+  precondition(restored.session === localSelection)
   let count = restored.allPanes.count
   second.synchronizeHerdr(external, client: client)
+  second.synchronizeHerdr(try client.snapshot(), client: client)
   precondition(restored.allPanes.count == count && restored.session === localSelection)
   let externalTab = external.tabs.first { $0.tab_id == added.tab_id }!
   _ = try client.request(["tab", "close", externalTab.tab_id])
   second.synchronizeHerdr(try client.snapshot(), client: client)
   precondition(restored.allPanes.count == count - 1 && restored.session === localSelection)
   // A second window has independent ownership and geometry across relaunch.
-  second.newWindow(); wait(second)
+  second.newWindow(); waitForMux(second)
   let extra = second.windows.first { $0 !== restored }!
   let extraID = extra.workspaceWindowID
   let extraNamespace = extra.activeNamespace.id
@@ -1568,7 +1381,7 @@ func runWorkspacePersistenceCheck() throws {
   precondition(!restored.namespaces.contains { $0.id == extraNamespace }, "Detached windows must stay detached")
   restored.window?.performClose(nil)
   let third = try makeOwner()
-  third.newWindow(); wait(third)
+  third.newWindow(); waitForMux(third)
   precondition(third.windows.count == 2, "Window assignments must survive relaunch")
   let extraRestored = third.windows.first { $0.workspaceWindowID == extraID }!
   precondition(extraRestored.activeNamespace.id == extraNamespace)
@@ -1577,12 +1390,12 @@ func runWorkspacePersistenceCheck() throws {
   let movingTab = sourceWindow.namespaces.flatMap(\.tabs).first { $0.panes.count > 1 }!
   let movedIDs = Set(movingTab.panes.compactMap { $0.herdrTerminal?.pane.terminal_id })
   sourceWindow.selectTab(movingTab)
-  sourceWindow.moveTab(movingTab, toNamespace: extraNamespace!); wait(third, sourceWindow)
+  sourceWindow.moveTab(movingTab, toNamespace: extraNamespace!); waitForMux(third, sourceWindow)
   let movedTab = extraRestored.tabs.first { Set($0.panes.compactMap { $0.herdrTerminal?.pane.terminal_id }) == movedIDs }
   precondition(movedTab != nil, "Moving a tab must preserve its existing terminals")
   extraRestored.selectTab(movedTab!)
   let detachedID = extraRestored.session!.herdrTerminal!.pane.terminal_id
-  extraRestored.movePaneToNewTab(); wait(third, extraRestored)
+  extraRestored.movePaneToNewTab(); waitForMux(third, extraRestored)
   precondition(extraRestored.activeTab.panes.count == 1 && extraRestored.session!.herdrTerminal!.pane.terminal_id == detachedID)
   let settingsUI = try SettingsWindow(appOwner: third)
   settingsUI.showWindow(nil)
@@ -1600,206 +1413,142 @@ func runWorkspacePersistenceCheck() throws {
   precondition(sourceWindow.session === searchTarget && !searchPanel.isVisible)
   let countBeforeDrop = third.windows.flatMap(\.allPanes).count
   third.application(app, openFiles: [directory.path])
-  let dropDeadline = Date(timeIntervalSinceNow: 8)
-  while third.windows.flatMap(\.allPanes).count == countBeforeDrop && Date() < dropDeadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.05)) }
-  precondition(third.windows.flatMap(\.allPanes).count == countBeforeDrop + 1, "A directory drop creates a terminal")
+  waitUntil("A directory drop creates a terminal", timeout: 8) { third.windows.flatMap(\.allPanes).count == countBeforeDrop + 1 }
   let movingWindow = third.activeWindow!
   let movingPane = movingWindow.session!
   let surfaceBeforeMove = movingPane.surface
-  movingWindow.moveTabToNewWindow(); wait(third, movingWindow)
+  movingWindow.moveTabToNewWindow(); waitForMux(third, movingWindow)
   let movedWindow = third.windows.first { $0.allPanes.contains { $0 === movingPane } }!
   precondition(movedWindow !== movingWindow && movingPane.surface == surfaceBeforeMove)
   let titled = movedWindow.window!.styleMask.contains(.titled)
   movedWindow.toggleDecorations()
   precondition(movedWindow.window!.styleMask.contains(.titled) != titled)
   movedWindow.toggleDecorations()
+  // A shell exit closes its tab (here with its window) without another keypress.
+  enterCommand("exit", in: movingPane)
+  // The pane's recovery check abandons itself once its window is closing, so `recovering` is not a signal here.
+  waitUntil("A herdr shell exit must close its tab without another keypress", timeout: 8) {
+    movingPane.surface == nil && (movedWindow.closing || !movedWindow.allPanes.contains { $0 === movingPane })
+  }
   extraRestored.window?.performClose(nil)
   third.synchronizeHerdr(try client.snapshot(), client: client)
   precondition(!third.windows.flatMap(\.allPanes).contains { $0.herdrTerminal?.pane.terminal_id == detachedID }, "Locally detached tabs must not leak into another window during reconciliation")
   for controller in Array(third.windows) { controller.closing = true; controller.window?.close() }
-  print("Workspace persistence tests passed.")
-}
-
-// Runs without creating NSApplication or a real herdr server, including in Core CI.
-func runHerdrControlCheck() throws {
-  let root = FileManager.default.temporaryDirectory.appendingPathComponent("velocitty-control-" + UUID().uuidString)
-  try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-  defer { try? FileManager.default.removeItem(at: root) }
-  let executable = root.appendingPathComponent("herdr")
-  func script(_ body: String) throws {
-    try Data(("#!/bin/sh\n" + body + "\n").utf8).write(to: executable)
-    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
-  }
-  let client = HerdrClient(executable: executable, sessionName: "isolated-test")
-  try script("echo 'diagnostic on stderr' >&2\nprintf '%s' '{\"result\":{\"value\":42}}'")
-  let response = try client.request(["read"])
-  precondition(response["value"] as? Int == 42)
-  try script("printf '%s' '{\"error\":{\"code\":\"server_not_running\",\"message\":\"absent\"}}'\nexit 1")
-  do { _ = try client.run(["read"]); preconditionFailure("Expected structured error") }
-  catch let error as HerdrClient.RequestError { precondition(error.code == "server_not_running") }
-  let descendant = root.appendingPathComponent("descendant")
-  try script("(sleep 0.3; touch " + ShellInput.quote(descendant.path) + ") &\nwait")
-  let started = ProcessInfo.processInfo.systemUptime
-  do { _ = try client.run(["read"], timeout: 0.1); preconditionFailure("Expected timeout") }
-  catch let error as HerdrClient.RequestError { precondition(error.code == "timeout") }
-  precondition(ProcessInfo.processInfo.systemUptime - started < 1)
-  // A malformed response must not start a server or be treated as an empty workspace.
-  try script("if [ \"$3\" = '--version' ]; then echo 'herdr 0.8.2'; else echo invalid; fi")
-  do { _ = try client.connect(directory: root); preconditionFailure("Expected invalid snapshot") }
-  catch { precondition(!(error is HerdrClient.RequestError)) }
-  try script("printf '%s' '{\"result\":{\"snapshot\":{\"workspaces\":[],\"tabs\":[],\"panes\":[],\"layouts\":[]}}}'")
-  let empty = try client.snapshot()
-  precondition(empty.panes.isEmpty)
-  Thread.sleep(forTimeInterval: 0.4)
-  precondition(!FileManager.default.fileExists(atPath: descendant.path), "Timeout must also terminate request descendants")
-  print("Herdr control tests passed.")
 }
 
 // Opt-in integration check: an isolated herdr 0.9 server reached through SSH.
 func runRemoteCheck() throws {
   let env = ProcessInfo.processInfo.environment
   guard let executablePath = env["VELO_TEST_HERDR"], let host = env["VELO_TEST_SSH_HOST"], let knownHosts = env["VELO_TEST_KNOWN_HOSTS"] else { fatalError("Remote check requires explicit executable, host, and known-hosts file") }
-  let root = URL(fileURLWithPath: "/tmp/velo-remote-" + String(UUID().uuidString.prefix(8)))
-  try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-  let config = root.appendingPathComponent("herdr.toml")
-  try Data("[terminal]\ndefault_shell='/bin/zsh'\n".utf8).write(to: config)
-  let previous = env["HERDR_CONFIG_PATH"]
-  setenv("HERDR_CONFIG_PATH", config.path, 1)
-  defer { if let previous { setenv("HERDR_CONFIG_PATH", previous, 1) } else { unsetenv("HERDR_CONFIG_PATH") }; try? FileManager.default.removeItem(at: root) }
   let executable = URL(fileURLWithPath: executablePath)
-  let server = HerdrClient(executable: executable, sessionName: "vt-" + UUID().uuidString.lowercased())
-  defer { _ = try? server.run(["server", "stop"]); _ = try? server.run(["session", "delete", server.sessionName]) }
-  _ = try server.connect(directory: root)
-  let raw = try server.create(workspace: nil, name: "SSH test", directory: root.path, environment: [:])
-  let machine = HerdrClient.Machine(id: UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(), label: "Laptop test", target: host, session: server.sessionName)
-  let remote = HerdrClient(executable: executable, machine: machine,
-    sshOptions: ["-o", "UserKnownHostsFile=" + knownHosts, "-o", "StrictHostKeyChecking=yes"], remoteExecutable: executablePath,
-    remoteEnvironment: ["HERDR_CONFIG_PATH": config.path])
-  defer { remote.disconnectTransport() }
-  let scoped = try remote.snapshot()
-  precondition(Set(scoped.panes.map(\.terminal_id)) == Set(raw.panes.map { remote.qualify($0.terminal_id.components(separatedBy: "::").last!) }))
-  let settings = try AppConfiguration.parse(Data("[terminal]\nconfirm_close_surface=false\nundo_timeout='2s'\ntheme=''\n".utf8))
-  let owner = AppDelegate()
-  owner.workspaceStateURL = root.appendingPathComponent("workspace.json")
-  owner.runtime = try TerminalRuntime(settings: settings)
-  let local = HerdrClient(executable: executable, sessionName: "vt-" + UUID().uuidString.lowercased())
-  defer { _ = try? local.run(["server", "stop"]); _ = try? local.run(["session", "delete", local.sessionName]) }
-  owner.herdr = local
-  owner.openHerdrWindow(using: local)
-  func wait() {
-    let deadline = Date(timeIntervalSinceNow: 15)
-    while owner.muxOpening && Date() < deadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.02)) }
-    precondition(!owner.muxOpening)
-  }
-  wait()
-  let window = owner.windows[0]
-  let localPane = window.session!
-  owner.connectEndpoint(remote); wait()
-  let remotePane = window.allPanes.first { $0.herdrTerminal?.client === remote }!
-  precondition(window.allPanes.contains { $0 === localPane })
-  owner.synchronizeHerdr(try remote.snapshot(), client: remote)
-  owner.synchronizeHerdr(try local.snapshot(), client: local)
-  precondition(window.allPanes.contains { $0 === localPane } && window.allPanes.contains { $0 === remotePane })
-  window.selectTab(localPane)
-  window.showAlongside(window.tab(for: remotePane)!)
-  window.selectTab(remotePane)
-  window.workspaceView.layoutSubtreeIfNeeded()
-  precondition(window.presentedTabs.count == 2 && window.visiblePanes.contains { $0 === localPane })
-  precondition(!localPane.chrome!.frame.intersects(remotePane.chrome!.frame))
-  owner.flushWorkspaceSaveSynchronously()
-  let saved = try WorkspaceStateStore(url: owner.workspaceStateURL!).load()
-  window.stopAlongside()
-  window.restoreWorkspaceState(saved)
-  precondition(window.presentedTabs.count == 2 && window.session === remotePane)
-  pumpEvents(until: Date(timeIntervalSinceNow: 0.5))
-  let marker = root.appendingPathComponent("ssh-input")
-  let command = "printf remote-ok > " + ShellInput.quote(marker.path)
-  command.withCString { velokit_surface_text(remotePane.surface!, $0, UInt(command.utf8.count)) }
-  var enter = ghostty_input_key_s()
-  enter.action = GHOSTTY_ACTION_PRESS
-  enter.keycode = 36
-  _ = velokit_surface_key(remotePane.surface!, enter)
-  let deadline = Date(timeIntervalSinceNow: 5)
-  while !FileManager.default.fileExists(atPath: marker.path) && Date() < deadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.02)) }
-  if !FileManager.default.fileExists(atPath: marker.path) {
-    var capture = velokit_accessibility_s()
-    if velokit_surface_read_accessibility(remotePane.surface!, &capture) {
-      if let text = capture.text { FileHandle.standardError.write(Data(String(cString: text).utf8)) }
-      velokit_free_accessibility(&capture)
+  let root = URL(fileURLWithPath: "/tmp/velo-remote-" + String(UUID().uuidString.prefix(8)))
+  try withIsolatedHerdr("vt", sessions: 2, executable: executable, root: root) { root, clients in
+    let (server, local) = (clients[0], clients[1])
+    let config = root.appendingPathComponent("herdr.toml")
+    _ = try server.connect(directory: root)
+    let raw = try server.create(workspace: nil, name: "SSH test", directory: root.path, environment: [:])
+    let machine = HerdrClient.Machine(id: UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(), label: "Laptop test", target: host, session: server.sessionName)
+    let remote = HerdrClient(executable: executable, machine: machine,
+      sshOptions: ["-o", "UserKnownHostsFile=" + knownHosts, "-o", "StrictHostKeyChecking=yes"], remoteExecutable: executablePath,
+      remoteEnvironment: ["HERDR_CONFIG_PATH": config.path])
+    defer { remote.disconnectTransport() }
+    let scoped = try remote.snapshot()
+    precondition(Set(scoped.panes.map(\.terminal_id)) == Set(raw.panes.map { remote.qualify($0.terminal_id.components(separatedBy: "::").last!) }))
+    let settings = try AppConfiguration.parse(Data("[terminal]\nconfirm_close_surface=false\nundo_timeout='2s'\ntheme=''\n".utf8))
+    let owner = AppDelegate()
+    owner.workspaceStateURL = root.appendingPathComponent("workspace.json")
+    owner.runtime = try TerminalRuntime(settings: settings)
+    owner.herdr = local
+    owner.openHerdrWindow(using: local)
+    waitForMux(owner, timeout: 15)
+    let window = owner.windows[0]
+    let localPane = window.session!
+    owner.connectEndpoint(remote); waitForMux(owner, timeout: 15)
+    let remotePane = window.allPanes.first { $0.herdrTerminal?.client === remote }!
+    precondition(window.allPanes.contains { $0 === localPane })
+    owner.synchronizeHerdr(try remote.snapshot(), client: remote)
+    owner.synchronizeHerdr(try local.snapshot(), client: local)
+    precondition(window.allPanes.contains { $0 === localPane } && window.allPanes.contains { $0 === remotePane })
+    window.selectTab(localPane)
+    window.showAlongside(window.tab(for: remotePane)!)
+    window.selectTab(remotePane)
+    window.workspaceView.layoutSubtreeIfNeeded()
+    precondition(window.presentedTabs.count == 2 && window.visiblePanes.contains { $0 === localPane })
+    precondition(!localPane.chrome!.frame.intersects(remotePane.chrome!.frame))
+    owner.flushWorkspaceSaveSynchronously()
+    let saved = try WorkspaceStateStore(url: owner.workspaceStateURL!).load()
+    window.stopAlongside()
+    window.restoreWorkspaceState(saved)
+    precondition(window.presentedTabs.count == 2 && window.session === remotePane)
+    pumpEvents(until: Date(timeIntervalSinceNow: 0.5))
+    let marker = root.appendingPathComponent("ssh-input")
+    enterCommand("printf remote-ok > " + ShellInput.quote(marker.path), in: remotePane)
+    if !pollUntil(timeout: 5, { FileManager.default.fileExists(atPath: marker.path) }) {
+      var capture = velokit_accessibility_s()
+      if velokit_surface_read_accessibility(remotePane.surface!, &capture) {
+        if let text = capture.text { FileHandle.standardError.write(Data(String(cString: text).utf8)) }
+        velokit_free_accessibility(&capture)
+      }
+      throw ConfigurationError("SSH attachment did not deliver input. Command: " + remotePane.herdrTerminal!.command)
     }
-    throw ConfigurationError("SSH attachment did not deliver input. Command: " + remotePane.herdrTerminal!.command)
+    remote.disconnectTransport()
+    let reconnected = try remote.snapshot()
+    owner.synchronizeHerdr(reconnected, client: remote)
+    precondition(window.allPanes.contains { $0 === remotePane }, "Reconnect must preserve the terminal view")
+    let originalSurface = remotePane.surface
+    let remoteID = remotePane.herdrTerminal!.pane.terminal_id
+    window.closePane(remotePane, confirm: false)
+    precondition(!window.allPanes.contains { $0 === remotePane })
+    let pendingState = try WorkspaceStateStore(url: owner.workspaceStateURL!).load()
+    precondition(pendingState.pendingTerminalClosures?.contains(remoteID) == true)
+    let beforeUndo = try remote.snapshot()
+    precondition(beforeUndo.panes.contains { $0.terminal_id == remoteID })
+    owner.undoClose()
+    waitUntil("Undo must restore the closed pane and its surface") {
+      window.allPanes.contains { $0 === remotePane } && remotePane.surface == originalSurface
+    }
+    precondition(window.native.undoTimeout == 2)
+    owner.redoClose()
+    precondition(!window.allPanes.contains { $0 === remotePane }, "Redo must hide the restored pane")
+    waitUntil("The expired close must destroy the remote terminal", timeout: 7) {
+      (try? remote.snapshot())?.panes.contains { $0.terminal_id == remoteID } == false
+    }
+    let retainedSurface = localPane.surface
+    let retainedWindowID = window.workspaceWindowID
+    window.window?.performClose(nil)
+    precondition(owner.windows.isEmpty && localPane.surface == retainedSurface)
+    owner.undoClose()
+    waitUntil("Undo must reopen the closed window with its terminal") {
+      owner.windows.contains { $0.workspaceWindowID == retainedWindowID && $0.allPanes.contains { $0 === localPane } }
+    }
+    precondition(localPane.surface == retainedSurface)
+    owner.redoClose()
+    precondition(owner.windows.isEmpty)
+    owner.undoClose()
+    waitUntil("A second undo must reopen the window") { !owner.windows.isEmpty }
+    precondition(localPane.surface == retainedSurface)
+    for controller in Array(owner.windows) { controller.closing = true; controller.window?.close() }
   }
-  remote.disconnectTransport()
-  let reconnected = try remote.snapshot()
-  owner.synchronizeHerdr(reconnected, client: remote)
-  precondition(window.allPanes.contains { $0 === remotePane }, "Reconnect must preserve the terminal view")
-  let originalSurface = remotePane.surface
-  window.closePane(remotePane, confirm: false)
-  precondition(!window.allPanes.contains { $0 === remotePane })
-  let pendingState = try WorkspaceStateStore(url: owner.workspaceStateURL!).load()
-  precondition(pendingState.pendingTerminalClosures?.contains(remotePane.herdrTerminal!.pane.terminal_id) == true)
-  let beforeUndo = try remote.snapshot()
-  precondition(beforeUndo.panes.contains { $0.terminal_id == remotePane.herdrTerminal!.pane.terminal_id })
-  owner.undoClose()
-  pumpEvents(until: Date(timeIntervalSinceNow: 0.5))
-  precondition(window.allPanes.contains { $0 === remotePane } && remotePane.surface == originalSurface)
-  precondition(window.native.undoTimeout == 2)
-  owner.redoClose()
-  precondition(!window.allPanes.contains { $0 === remotePane }, "Redo must hide the restored pane")
-  let closeDeadline = Date(timeIntervalSinceNow: 7)
-  var afterClose = try remote.snapshot()
-  while afterClose.panes.contains(where: { $0.terminal_id == remotePane.herdrTerminal!.pane.terminal_id }) && Date() < closeDeadline {
-    pumpEvents(until: Date(timeIntervalSinceNow: 0.1))
-    afterClose = try remote.snapshot()
-  }
-  precondition(!afterClose.panes.contains { $0.terminal_id == remotePane.herdrTerminal!.pane.terminal_id })
-  let retainedSurface = localPane.surface
-  let retainedWindowID = window.workspaceWindowID
-  window.window?.performClose(nil)
-  precondition(owner.windows.isEmpty && localPane.surface == retainedSurface)
-  owner.undoClose()
-  pumpEvents(until: Date(timeIntervalSinceNow: 0.5))
-  precondition(owner.windows.contains { $0.workspaceWindowID == retainedWindowID && $0.allPanes.contains { $0 === localPane } })
-  precondition(localPane.surface == retainedSurface)
-  owner.redoClose()
-  precondition(owner.windows.isEmpty)
-  owner.undoClose()
-  pumpEvents(until: Date(timeIntervalSinceNow: 0.5))
-  precondition(localPane.surface == retainedSurface && !owner.windows.isEmpty)
-  for controller in Array(owner.windows) { controller.closing = true; controller.window?.close() }
   print("Remote transport, comparison and close undo tests passed.")
 }
 
 func runMixedConnectionsCheck() throws {
-  guard let executable = HerdrClient.discover() else { fatalError("herdr is required") }
-  let directory = FileManager.default.temporaryDirectory.appendingPathComponent("velo-mixed-" + UUID().uuidString)
-  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-  let config = directory.appendingPathComponent("herdr.toml")
-  try Data("[terminal]\ndefault_shell='/bin/zsh'\n".utf8).write(to: config)
-  let previous = ProcessInfo.processInfo.environment["HERDR_CONFIG_PATH"]
-  setenv("HERDR_CONFIG_PATH", config.path, 1)
-  let first = HerdrClient(executable: executable, sessionName: "vt-" + UUID().uuidString.lowercased())
-  let second = HerdrClient(executable: executable, sessionName: "vt-" + UUID().uuidString.lowercased())
-  defer {
-    for client in [first, second] { _ = try? client.run(["server", "stop"]); _ = try? client.run(["session", "delete", client.sessionName]) }
-    if let previous { setenv("HERDR_CONFIG_PATH", previous, 1) } else { unsetenv("HERDR_CONFIG_PATH") }
-    try? FileManager.default.removeItem(at: directory)
+  try withIsolatedHerdr("vt", sessions: 2) { directory, clients in
+    try checkMixedConnections(directory: directory, first: clients[0], second: clients[1])
   }
+  print("Mixed connection tests passed.")
+}
+
+private func checkMixedConnections(directory: URL, first: HerdrClient, second: HerdrClient) throws {
   var profiles = [first, second].map { HerdrConnection(id: $0.endpointID, label: $0.sessionName, session: $0.sessionName) }
   let file = directory.appendingPathComponent("workspace.json")
   let settings = try AppConfiguration.parse(Data("[terminal]\nconfirm_close_surface=false\nundo_timeout='2s'\ntheme=''\n".utf8))
   func owner() throws -> AppDelegate {
     var configuration = settings; configuration.connections = profiles
     let result = AppDelegate(); result.workspaceStateURL = file; result.runtime = try TerminalRuntime(settings: configuration)
-    result.herdr = HerdrClient(executable: executable, sessionName: first.sessionName)
+    result.herdr = HerdrClient(executable: first.executable, sessionName: first.sessionName)
     result.loadWorkspaceState(for: result.herdr!)
     result.loadConnections(); return result
-  }
-  func wait(_ app: AppDelegate, _ window: TerminalWindowController? = nil) {
-    let deadline = Date(timeIntervalSinceNow: 15)
-    repeat { pumpEvents(until: Date(timeIntervalSinceNow: 0.05)) }
-    while (app.muxOpening || window?.muxBusy == true) && Date() < deadline
-    precondition(!app.muxOpening && window?.muxBusy != true)
   }
   func enable(_ app: AppDelegate, _ id: String, _ enabled: Bool) {
     let index = profiles.firstIndex { $0.id == id }!
@@ -1808,11 +1557,14 @@ func runMixedConnectionsCheck() throws {
     try! app.runtime!.updateConfiguration(updated)
     app.loadConnections(reload: true)
   }
-  let app = try owner(); app.startInitialWorkspace(); wait(app)
+  func closeWindows(_ app: AppDelegate) {
+    for controller in Array(app.windows) { controller.closing = true; controller.window?.close() }
+  }
+  let app = try owner(); app.startInitialWorkspace(); waitForMux(app, timeout: 15)
   let window = app.windows.first!
   // A fresh second server can be empty, so explicitly create its first tab.
   let client = app.client(for: second.endpointID)!
-  window.newTab(using: client); wait(app, window)
+  window.newTab(using: client); waitForMux(app, window, timeout: 15)
   precondition(window.namespaces.count == 1 && window.tabs.count == 2)
   let remoteTab = window.activeTab, pane = remoteTab.selected
   let terminalID = pane.herdrTerminal!.pane.terminal_id
@@ -1832,46 +1584,45 @@ func runMixedConnectionsCheck() throws {
   precondition(window.allPanes.contains { $0 === pane } && pane.connectionSuspended, "Undo must restore a disabled terminal without connecting")
   app.scheduleWorkspaceSave(window)
   app.flushWorkspaceSaveSynchronously()
-  for controller in Array(app.windows) { controller.closing = true; controller.window?.close() }
-  let restored = try owner(); restored.startInitialWorkspace(); wait(restored)
+  closeWindows(app)
+  let restored = try owner(); restored.startInitialWorkspace(); waitForMux(restored, timeout: 15)
   let restoredWindow = restored.windows.first!
   precondition(restoredWindow.activeNamespace.id == spaceID && restoredWindow.tabs.count == 2)
   precondition(restoredWindow.activeNamespace.name == "Mixed Project")
   let placeholder = restoredWindow.tabs.first { $0.selected.herdrTerminal?.client.endpointID == second.endpointID }!.selected
   precondition(placeholder.connectionSuspended && placeholder.surface == nil)
   precondition(restoredWindow.session === placeholder, "Restore the selected disabled tab")
-  enable(restored, second.endpointID, true); wait(restored)
-  let deadline = Date(timeIntervalSinceNow: 8)
-  while placeholder.surface == nil && Date() < deadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.05)) }
-  precondition(placeholder.surface != nil && placeholder.herdrTerminal!.pane.terminal_id == terminalID)
+  enable(restored, second.endpointID, true); waitForMux(restored, timeout: 15)
+  waitUntil("Enabling the connection must reconnect the placeholder", timeout: 8) { placeholder.surface != nil }
+  precondition(placeholder.herdrTerminal!.pane.terminal_id == terminalID)
   restored.scheduleWorkspaceSave(restoredWindow); restored.flushWorkspaceSaveSynchronously()
   let saved = try WorkspaceStateStore(url: file).load()
   precondition(saved.namespaces[0].tabs.count == 2)
   enable(restored, second.endpointID, false)
   restoredWindow.closePane(placeholder, confirm: false)
-  pumpEvents(until: Date(timeIntervalSinceNow: 2.3))
-  restored.connectEndpoint(restored.herdr!); wait(restored)
+  // Wait for the undo period to end, so the close becomes a pending destruction.
+  waitUntil("The close did not expire", timeout: 5) { !restored.retainedTerminalIDs.contains(terminalID) }
+  restored.connectEndpoint(restored.herdr!); waitForMux(restored, timeout: 15)
   precondition(restoredWindow.tabs.count == 1, "A pending close must not reappear as an offline placeholder")
   enable(restored, first.endpointID, false)
   restored.scheduleWorkspaceSave(restoredWindow); restored.flushWorkspaceSaveSynchronously()
-  for controller in Array(restored.windows) { controller.closing = true; controller.window?.close() }
-  let disabled = try owner(); disabled.startInitialWorkspace(); wait(disabled)
+  closeWindows(restored)
+  let disabled = try owner(); disabled.startInitialWorkspace(); waitForMux(disabled, timeout: 15)
   precondition(disabled.windows.count == 1 && disabled.windows[0].tabs.count == 1, "All-disabled startup retains the saved workspace")
   precondition(disabled.windows[0].session!.connectionSuspended)
-  for controller in Array(disabled.windows) { controller.closing = true; controller.window?.close() }
+  closeWindows(disabled)
   profiles = profiles.map { var profile = $0; profile.enabled = true; return profile }
-  let mixed = try owner(); mixed.startInitialWorkspace(); wait(mixed)
+  let mixed = try owner(); mixed.startInitialWorkspace(); waitForMux(mixed, timeout: 15)
   let mixedWindow = mixed.windows[0]
-  let original = mixedWindow.session!
-  let originalID = original.herdrTerminal!.pane.terminal_id
-  mixedWindow.splitPane("right", using: mixed.client(for: second.endpointID)!); wait(mixed, mixedWindow)
+  let originalID = mixedWindow.session!.herdrTerminal!.pane.terminal_id
+  mixedWindow.splitPane("right", using: mixed.client(for: second.endpointID)!); waitForMux(mixed, mixedWindow, timeout: 15)
   let splitID = mixedWindow.session!.herdrTerminal!.pane.terminal_id
   precondition(mixedWindow.activeTab.panes.count == 2)
   precondition(Set(mixedWindow.activeTab.panes.compactMap { $0.herdrTerminal?.client.endpointID }).count == 2)
   let mixedTabID = mixedWindow.activeTab.herdrID!
   mixed.scheduleWorkspaceSave(mixedWindow); mixed.flushWorkspaceSaveSynchronously()
-  for controller in Array(mixed.windows) { controller.closing = true; controller.window?.close() }
-  let reopened = try owner(); reopened.startInitialWorkspace(); wait(reopened)
+  closeWindows(mixed)
+  let reopened = try owner(); reopened.startInitialWorkspace(); waitForMux(reopened, timeout: 15)
   let restoredMixed = reopened.windows.flatMap(\.namespaces).flatMap(\.tabs).first { $0.herdrID == mixedTabID }!
   precondition(Set(restoredMixed.panes.compactMap { $0.herdrTerminal?.pane.terminal_id }) == Set([originalID, splitID]), "Mixed panes must remain in one tab after relaunch")
   precondition(Set(restoredMixed.localLayout!.terminals) == Set([originalID, splitID]))
@@ -1879,80 +1630,66 @@ func runMixedConnectionsCheck() throws {
   enable(reopened, second.endpointID, false)
   precondition(restoredMixed.panes.count == 2 && restoredMixed.panes.contains { $0.connectionSuspended })
   reopened.scheduleWorkspaceSave(ownerWindow); reopened.flushWorkspaceSaveSynchronously()
-  for controller in Array(reopened.windows) { controller.closing = true; controller.window?.close() }
-  let offline = try owner(); offline.startInitialWorkspace(); wait(offline)
+  closeWindows(reopened)
+  let offline = try owner(); offline.startInitialWorkspace(); waitForMux(offline, timeout: 15)
   let offlineTab = offline.windows.flatMap(\.namespaces).flatMap(\.tabs).first { $0.herdrID == mixedTabID }!
   precondition(offlineTab.panes.count == 2 && offlineTab.panes.contains { $0.connectionSuspended }, "Unavailable pane must retain its position in a mixed tab")
-  for controller in Array(offline.windows) { controller.closing = true; controller.window?.close() }
+  closeWindows(offline)
   let removedProfile = profiles.removeLast()
-  let missing = try owner(); missing.startInitialWorkspace(); wait(missing)
+  let missing = try owner(); missing.startInitialWorkspace(); waitForMux(missing, timeout: 15)
   let missingTab = missing.windows.flatMap(\.namespaces).flatMap(\.tabs).first { $0.herdrID == mixedTabID }!
   precondition(missingTab.panes.count == 2, "Removing a definition must preserve its saved pane")
   let missingPane = missingTab.panes.first { $0.herdrTerminal?.pane.terminal_id == splitID }!
   precondition(missingPane.connectionSuspended)
   var returned = removedProfile; returned.enabled = true; profiles.append(returned)
   var updated = missing.runtime!.settings; updated.connections = profiles
-  try missing.runtime!.updateConfiguration(updated); missing.loadConnections(reload: true); wait(missing)
-  let reconnectDeadline = Date(timeIntervalSinceNow: 8)
-  while missingPane.surface == nil && Date() < reconnectDeadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.05)) }
-  precondition(missingPane.surface != nil && missingPane.herdrTerminal?.pane.terminal_id == splitID, "Restoring the same definition must reconnect the existing pane")
-  for controller in Array(missing.windows) { controller.closing = true; controller.window?.close() }
+  try missing.runtime!.updateConfiguration(updated); missing.loadConnections(reload: true); waitForMux(missing, timeout: 15)
+  waitUntil("Restoring the same definition must reconnect the existing pane", timeout: 8) { missingPane.surface != nil }
+  precondition(missingPane.herdrTerminal?.pane.terminal_id == splitID)
+  closeWindows(missing)
   for client in [first, second] { _ = try client.run(["server", "stop"]) }
   let restarted = try owner()
   precondition(!restarted.windows.isEmpty, "Saved tabs must be restored before connecting")
-  restarted.startInitialWorkspace(); wait(restarted)
+  restarted.startInitialWorkspace(); waitForMux(restarted, timeout: 15)
   for client in [first, second] { _ = try client.snapshot() }
-  for controller in Array(restarted.windows) { controller.closing = true; controller.window?.close() }
-  print("Mixed connection tests passed.")
+  closeWindows(restarted)
 }
 
 func runScaleCheck() throws {
-  guard let executable = HerdrClient.discover() else { fatalError("herdr is required") }
-  let directory = FileManager.default.temporaryDirectory.appendingPathComponent("velo-scale-" + UUID().uuidString)
-  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-  let config = directory.appendingPathComponent("herdr.toml")
-  try "[terminal]\ndefault_shell='/bin/zsh'\n".write(to: config, atomically: true, encoding: .utf8)
-  let previous = ProcessInfo.processInfo.environment["HERDR_CONFIG_PATH"]
-  setenv("HERDR_CONFIG_PATH", config.path, 1)
-  let clients = (0..<3).map { _ in HerdrClient(executable: executable, sessionName: "velo-scale-" + UUID().uuidString.lowercased()) }
-  defer {
-    for client in clients { _ = try? client.run(["server", "stop"]); _ = try? client.run(["session", "delete", client.sessionName]) }
-    if let previous { setenv("HERDR_CONFIG_PATH", previous, 1) } else { unsetenv("HERDR_CONFIG_PATH") }
-    try? FileManager.default.removeItem(at: directory)
-  }
-  let started = ProcessInfo.processInfo.systemUptime
-  for (index, client) in clients.enumerated() {
-    _ = try client.connect(directory: directory)
-    let existing = try client.snapshot()
-    let count = index == 2 ? 16 : 17
-    for number in existing.panes.count..<count {
-      _ = try client.createPane(workspace: existing.workspaces.first?.workspace_id, name: "Scale \(number)", directory: directory.path)
+  try withIsolatedHerdr("velo-scale", sessions: 3) { directory, clients in
+    let started = ProcessInfo.processInfo.systemUptime
+    for (index, client) in clients.enumerated() {
+      _ = try client.connect(directory: directory)
+      let existing = try client.snapshot()
+      let count = index == 2 ? 16 : 17
+      for number in existing.panes.count..<count {
+        _ = try client.createPane(workspace: existing.workspaces.first?.workspace_id, name: "Scale \(number)", directory: directory.path)
+      }
     }
+    let created = ProcessInfo.processInfo.systemUptime
+    var settings = try AppConfiguration.parse(Data("[terminal]\ntheme=''\nconfirm_close_surface=false\n".utf8))
+    settings.connections = clients.map { .init(id: $0.endpointID, label: $0.sessionName, session: $0.sessionName) }
+    let owner = AppDelegate(); owner.workspaceStateURL = directory.appendingPathComponent("workspace.json")
+    owner.runtime = try TerminalRuntime(settings: settings); owner.herdr = clients[0]; owner.loadConnections()
+    owner.newWindow()
+    waitUntil("All terminals must attach", timeout: 60) { !owner.muxOpening && owner.windows.flatMap(\.allPanes).count >= 50 }
+    precondition(owner.windows.flatMap(\.allPanes).count == 50)
+    let attached = ProcessInfo.processInfo.systemUptime
+    let controller = owner.windows[0]
+    for pane in controller.allPanes { controller.selectTab(pane) }
+    let selected = ProcessInfo.processInfo.systemUptime
+    for client in clients {
+      let endpoint = owner.client(for: client.endpointID)!
+      owner.synchronizeHerdr(try endpoint.snapshot(), client: endpoint)
+    }
+    let reconciled = ProcessInfo.processInfo.systemUptime
+    owner.windows.forEach { owner.scheduleWorkspaceSave($0) }; owner.flushWorkspaceSaveSynchronously()
+    let saved = try WorkspaceStateStore(url: owner.workspaceStateURL!).load()
+    precondition(saved.namespaces.flatMap(\.tabs).flatMap { $0.panes ?? [] }.count == 50)
+    var usage = rusage(); getrusage(RUSAGE_SELF, &usage)
+    print(String(format: "Scale: 50 terminals / 3 local connections; create %.2fs, attach %.2fs, select 50 %.3fs, reconcile 3 %.3fs, peak RSS %.1f MiB", created-started, attached-created, selected-attached, reconciled-selected, Double(usage.ru_maxrss) / 1_048_576))
+    for window in Array(owner.windows) { window.closing = true; window.window?.close() }
   }
-  let created = ProcessInfo.processInfo.systemUptime
-  var settings = try AppConfiguration.parse(Data("[terminal]\ntheme=''\nconfirm_close_surface=false\n".utf8))
-  settings.connections = clients.map { .init(id: $0.endpointID, label: $0.sessionName, session: $0.sessionName) }
-  let owner = AppDelegate(); owner.workspaceStateURL = directory.appendingPathComponent("workspace.json")
-  owner.runtime = try TerminalRuntime(settings: settings); owner.herdr = clients[0]; owner.loadConnections()
-  owner.newWindow()
-  let deadline = Date(timeIntervalSinceNow: 60)
-  while (owner.muxOpening || owner.windows.flatMap(\.allPanes).count < 50) && Date() < deadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.05)) }
-  precondition(owner.windows.flatMap(\.allPanes).count == 50)
-  let attached = ProcessInfo.processInfo.systemUptime
-  let controller = owner.windows[0]
-  for pane in controller.allPanes { controller.selectTab(pane) }
-  let selected = ProcessInfo.processInfo.systemUptime
-  for client in clients {
-    let endpoint = owner.client(for: client.endpointID)!
-    owner.synchronizeHerdr(try endpoint.snapshot(), client: endpoint)
-  }
-  let reconciled = ProcessInfo.processInfo.systemUptime
-  owner.windows.forEach { owner.scheduleWorkspaceSave($0) }; owner.flushWorkspaceSaveSynchronously()
-  let saved = try WorkspaceStateStore(url: owner.workspaceStateURL!).load()
-  precondition(saved.namespaces.flatMap(\.tabs).flatMap { $0.panes ?? [] }.count == 50)
-  var usage = rusage(); getrusage(RUSAGE_SELF, &usage)
-  print(String(format: "Scale: 50 terminals / 3 local connections; create %.2fs, attach %.2fs, select 50 %.3fs, reconcile 3 %.3fs, peak RSS %.1f MiB", created-started, attached-created, selected-attached, reconciled-selected, Double(usage.ru_maxrss) / 1_048_576))
-  for window in Array(owner.windows) { window.closing = true; window.window?.close() }
   print("Scale check passed.")
 }
 
@@ -1961,11 +1698,11 @@ func runManagementUICheck() throws {
   let file = root.appendingPathComponent("velocitty/config.toml")
   try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
   let previous = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"]
-  setenv("XDG_CONFIG_HOME", root.path, 1)
   defer {
     if let previous { setenv("XDG_CONFIG_HOME", previous, 1) } else { unsetenv("XDG_CONFIG_HOME") }
     try? FileManager.default.removeItem(at: root)
   }
+  setenv("XDG_CONFIG_HOME", root.path, 1)
   try """
     [[connections]]
     id = 'local'
@@ -2016,67 +1753,206 @@ func runManagementUICheck() throws {
   print("Management UI tests passed.")
 }
 
+// MARK: - Headless checks (--headless)
+
+func runHerdrControlCheck() throws {
+  try withTemporaryDirectory("velocitty-control") { root in
+    let executable = root.appendingPathComponent("herdr")
+    func script(_ body: String) throws {
+      try Data(("#!/bin/sh\n" + body + "\n").utf8).write(to: executable)
+      try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+    }
+    let client = HerdrClient(executable: executable, sessionName: "isolated-test")
+    try script("echo 'diagnostic on stderr' >&2\nprintf '%s' '{\"result\":{\"value\":42}}'")
+    let response = try client.request(["read"])
+    precondition(response["value"] as? Int == 42)
+    try script("printf '%s' '{\"error\":{\"code\":\"server_not_running\",\"message\":\"absent\"}}'\nexit 1")
+    do { _ = try client.run(["read"]); preconditionFailure("Expected structured error") }
+    catch let error as HerdrClient.RequestError { precondition(error.code == "server_not_running") }
+    let descendant = root.appendingPathComponent("descendant")
+    try script("(sleep 0.3; touch " + ShellInput.quote(descendant.path) + ") &\nwait")
+    let started = ProcessInfo.processInfo.systemUptime
+    do { _ = try client.run(["read"], timeout: 0.1); preconditionFailure("Expected timeout") }
+    catch let error as HerdrClient.RequestError { precondition(error.code == "timeout") }
+    precondition(ProcessInfo.processInfo.systemUptime - started < 1)
+    // A malformed response must not start a server or be treated as an empty workspace.
+    try script("if [ \"$3\" = '--version' ]; then echo 'herdr 0.8.2'; else echo invalid; fi")
+    do { _ = try client.connect(directory: root); preconditionFailure("Expected invalid snapshot") }
+    catch { precondition(!(error is HerdrClient.RequestError)) }
+    try script("printf '%s' '{\"result\":{\"snapshot\":{\"workspaces\":[],\"tabs\":[],\"panes\":[]}}}'")
+    let empty = try client.snapshot()
+    precondition(empty.panes.isEmpty)
+    // A snapshot requested before a mutation finished may lack it; one requested after may not.
+    precondition(client.isCurrent(empty))
+    _ = try? client.request(["tab", "create"])
+    precondition(!client.isCurrent(empty), "A snapshot older than a mutation must be stale")
+    let fresh = try client.snapshot()
+    precondition(client.isCurrent(fresh))
+    Thread.sleep(forTimeInterval: 0.4)
+    precondition(!FileManager.default.fileExists(atPath: descendant.path), "Timeout must also terminate request descendants")
+  }
+}
+
+// Pure logic that needs neither windows nor a running application.
+func runLogicChecks() throws {
+  // URL classification must not rely on Foundation repairing malformed input.
+  for kind in [GHOSTTY_ACTION_OPEN_URL_KIND_OSC8, GHOSTTY_ACTION_OPEN_URL_KIND_UNKNOWN] {
+    for value in ["https://example.com/a?x=1", "HTTP://example.com", "mailto:hello@example.com"] {
+      guard case .direct = TerminalLinks.destination(value, kind: kind) else {
+        fatalError("Expected a direct link: \(value)")
+      }
+    }
+    for value in ["file:///tmp/a%20b", "vscode://file/tmp/test", "ssh://user@example.com", "custom:payload"] {
+      guard case .confirm = TerminalLinks.destination(value, kind: kind) else {
+        fatalError("Expected confirmation: \(value)")
+      }
+    }
+    for value in ["javascript:alert(1)", "JaVaScRiPt:alert(1)", "DATA:text/html,test", "",
+      "relative/path", "//example.com", "https://", "https:example.com", "https://example.com:99999", "https://a/%GG",
+      "https://a/%", "https://a/%0", " https://example.com", "https://example.com/a b",
+      "https://example.com/\n", "https://example.com/\0", "https:\\example.com"] {
+      precondition(TerminalLinks.destination(value, kind: kind) == .reject, value)
+    }
+  }
+  for kind in [GHOSTTY_ACTION_OPEN_URL_KIND_TEXT, GHOSTTY_ACTION_OPEN_URL_KIND_HTML] {
+    let path = "/tmp/terminal export.html"
+    precondition(TerminalLinks.destination(path, kind: kind) == .direct(URL(fileURLWithPath: path)))
+  }
+
+  try withTemporaryDirectory("velocitty-logic") { directory in
+    // Editor selection respects file associations, then the system text editor.
+    let file = directory.appendingPathComponent("editor/config.toml")
+    let associated = URL(fileURLWithPath: "/Applications/Associated.app")
+    let fallback = URL(fileURLWithPath: "/Applications/TextEditor.app")
+    var opened: [URL?] = []
+    var editor = ConfigurationEditor()
+    editor.applicationForType = { _ in associated }
+    editor.openFile = { url, app, completion in
+      precondition(url == file)
+      opened.append(app)
+      completion(nil)
+    }
+    editor.open(file) { precondition($0 == nil) }
+    let original = try Data(contentsOf: file)
+    precondition(AppConfiguration.load(from: file).diagnostics.isEmpty)
+    editor.applicationForType = { $0 == "public.plain-text" ? fallback : nil }
+    editor.open(file) { precondition($0 == nil) }
+    editor.applicationForType = { _ in nil }
+    editor.open(file) { precondition($0 == nil) }
+    precondition(opened == [associated, fallback, nil])
+    let unchanged = try Data(contentsOf: file)
+    precondition(unchanged == original)
+    editor.openFile = { _, _, completion in completion(ConfigurationError("Open failed")) }
+    editor.open(file) { precondition($0?.localizedDescription == "Open failed") }
+  }
+
+  // Secure Input balances only successful calls, including failed release retries.
+  let input = SecureInputOwner()
+  var acquisitions = 0
+  var releases = 0
+  var failAcquire = true
+  var failRelease = true
+  input.acquire = { acquisitions += 1; return failAcquire ? -1 : 0 }
+  input.release = { releases += 1; return failRelease ? -1 : 0 }
+  input.update(wanted: true)
+  precondition(!input.enabled)
+  input.update(wanted: false)
+  precondition(releases == 0)
+  failAcquire = false
+  input.update(wanted: true)
+  input.update(wanted: true)
+  precondition(input.enabled && acquisitions == 2)
+  input.update(wanted: false)
+  precondition(input.enabled)
+  failRelease = false
+  input.update(wanted: false)
+  precondition(!input.enabled && releases == 2)
+
+  // Progress reports belong to their own terminal.
+  let firstProgress = TerminalProgress()
+  let secondProgress = TerminalProgress()
+  var report = ghostty_action_progress_report_s()
+  report.state = GHOSTTY_PROGRESS_STATE_SET
+  report.progress = 42
+  firstProgress.update(report)
+  report.state = GHOSTTY_PROGRESS_STATE_PAUSE
+  report.progress = -1
+  secondProgress.update(report)
+  firstProgress.clear()
+  precondition(firstProgress.isHidden && !secondProgress.isHidden)
+  precondition(secondProgress.report?.state == GHOSTTY_PROGRESS_STATE_PAUSE)
+  secondProgress.clear()
+
+  // Dropped files become quoted shell arguments, followed by dropped text.
+  let pasteboard = NSPasteboard.withUniqueName()
+  defer { pasteboard.releaseGlobally() }
+  let droppedFile = NSPasteboardItem()
+  droppedFile.setString(URL(fileURLWithPath: "/tmp/a'b $(echo x).txt").absoluteString, forType: .fileURL)
+  droppedFile.setString("ignored file label", forType: .string)
+  let text = NSPasteboardItem()
+  text.setString("plain text", forType: .string)
+  pasteboard.writeObjects([droppedFile, text])
+  precondition(TerminalView.droppedText(from: pasteboard)
+    == String(ShellInput.paths(["/tmp/a'b $(echo x).txt"]).dropLast()) + " plain text")
+  pasteboard.clearContents()
+  precondition(TerminalView.droppedText(from: pasteboard) == nil)
+}
+
 // The async flush path, its failure reporting and its interaction with synchronous flushes.
 func runPersistenceCoordinationCheck() throws {
-  let directory = FileManager.default.temporaryDirectory.appendingPathComponent("velo-persistence-" + UUID().uuidString)
-  defer { try? FileManager.default.removeItem(at: directory) }
-  let file = directory.appendingPathComponent("workspace.json")
-  let store = WorkspaceStateStore(url: file)
-  let persistence = WorkspacePersistence()
-  persistence.store = store
-  persistence.state = WorkspaceState()
-  persistence.revision = nil
-  func mutate(_ name: String) {
-    var state = persistence.state!
-    state.selectedNamespaceID = name
-    persistence.state = state
-    persistence.dirty = true
+  try withTemporaryDirectory("velo-persistence") { directory in
+    let file = directory.appendingPathComponent("workspace.json")
+    let store = WorkspaceStateStore(url: file)
+    let persistence = WorkspacePersistence()
+    persistence.store = store
+    persistence.state = WorkspaceState()
+    persistence.revision = nil
+    func mutate(_ name: String) {
+      var state = persistence.state!
+      state.selectedNamespaceID = name
+      persistence.state = state
+      persistence.dirty = true
+    }
+    // An asynchronous save completes, adopts the new revision and reports success once.
+    var results: [Result<Void, Error>] = []
+    mutate("a")
+    persistence.flush { results.append($0) }
+    waitUntil("The asynchronous save never completed", timeout: 5) { !results.isEmpty }
+    precondition((try? results[0].get()) != nil && !persistence.dirty)
+    precondition(persistence.revision == (try? Data(contentsOf: file)), "The revision must match the saved bytes")
+    let firstSaved = try store.load().selectedNamespaceID
+    precondition(firstSaved == "a")
+    // Changes made while a write is in flight are written by the follow-up flush.
+    results = []
+    mutate("b")
+    persistence.flush { results.append($0) }
+    mutate("c")
+    persistence.flush { results.append($0) }
+    waitUntil("The follow-up save never completed", timeout: 5) { results.count >= 2 && !persistence.dirty }
+    let secondSaved = try store.load().selectedNamespaceID
+    precondition(secondSaved == "c" && persistence.revision == (try? Data(contentsOf: file)))
+    // A synchronous flush right after an asynchronous one must not be overwritten by a stale revision.
+    results = []
+    mutate("d")
+    persistence.flush { results.append($0) }
+    mutate("e")
+    try persistence.flushSynchronously()
+    waitUntil("The asynchronous save never completed", timeout: 5) { !results.isEmpty }
+    pumpEvents(until: Date(timeIntervalSinceNow: 0.1)) // Let any late completion run before checking.
+    let thirdSaved = try store.load().selectedNamespaceID
+    precondition(thirdSaved == "e")
+    precondition(persistence.revision == (try? Data(contentsOf: file)), "A late completion must not restore an older revision")
+    // An external change is a conflict and is reported exactly once.
+    try Data("{\"version\":4,\"namespaces\":[]}".utf8).write(to: file)
+    results = []
+    mutate("f")
+    persistence.flush { results.append($0) }
+    waitUntil("The conflicting save never completed", timeout: 5) { !results.isEmpty }
+    pumpEvents(until: Date(timeIntervalSinceNow: 0.1))
+    precondition(results.count == 1, "A failed save must be reported once")
+    guard case .failure(let error) = results[0], error as? WorkspaceStateError == .conflictingUpdate else {
+      fatalError("Expected a conflicting update")
+    }
+    precondition(persistence.dirty, "A failed save must stay dirty")
   }
-  func waitForWrite(_ done: () -> Bool) {
-    let deadline = Date(timeIntervalSinceNow: 5)
-    while !done() && Date() < deadline { pumpEvents(until: Date(timeIntervalSinceNow: 0.01)) }
-    precondition(done(), "The asynchronous save never completed")
-  }
-  // An asynchronous save completes, adopts the new revision and reports success once.
-  var results: [Result<Void, Error>] = []
-  mutate("a")
-  persistence.flush { results.append($0) }
-  waitForWrite { !results.isEmpty }
-  precondition((try? results[0].get()) != nil && !persistence.dirty)
-  precondition(persistence.revision == (try? Data(contentsOf: file)), "The revision must match the saved bytes")
-  let first = try store.load().selectedNamespaceID
-  precondition(first == "a")
-  // Changes made while a write is in flight are written by the follow-up flush.
-  results = []
-  mutate("b")
-  persistence.flush { results.append($0) }
-  mutate("c")
-  persistence.flush { results.append($0) }
-  waitForWrite { results.count >= 2 && !persistence.dirty }
-  let second = try store.load().selectedNamespaceID
-  precondition(second == "c" && persistence.revision == (try? Data(contentsOf: file)))
-  // A synchronous flush right after an asynchronous one must not be overwritten by a stale revision.
-  results = []
-  mutate("d")
-  persistence.flush { results.append($0) }
-  mutate("e")
-  try persistence.flushSynchronously()
-  waitForWrite { !results.isEmpty }
-  pumpEvents(until: Date(timeIntervalSinceNow: 0.1))
-  let third = try store.load().selectedNamespaceID
-  precondition(third == "e")
-  precondition(persistence.revision == (try? Data(contentsOf: file)), "A late completion must not restore an older revision")
-  // An external change is a conflict and is reported exactly once.
-  try Data("{\"version\":4,\"namespaces\":[]}".utf8).write(to: file)
-  results = []
-  mutate("f")
-  persistence.flush { results.append($0) }
-  waitForWrite { !results.isEmpty }
-  pumpEvents(until: Date(timeIntervalSinceNow: 0.1))
-  precondition(results.count == 1, "A failed save must be reported once")
-  guard case .failure(let error) = results[0], error as? WorkspaceStateError == .conflictingUpdate else {
-    fatalError("Expected a conflicting update")
-  }
-  precondition(persistence.dirty, "A failed save must stay dirty")
-  print("Persistence coordination checks passed.")
 }

@@ -46,8 +46,7 @@ final class WorkspaceStateTests: XCTestCase {
   }
 
   func testStoreRoundTripAndFutureVersionProtection() throws {
-    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    defer { try? FileManager.default.removeItem(at: directory) }
+    let directory = try makeTemporaryDirectory()
     let store = WorkspaceStateStore(url: directory.appendingPathComponent("workspace.json"))
     XCTAssertEqual(try store.load(), WorkspaceState())
     var state = WorkspaceState()
@@ -68,10 +67,8 @@ final class WorkspaceStateTests: XCTestCase {
   }
 
   func testFutureVersionWithIncompatibleSchemaIsNotTreatedAsDamaged() throws {
-    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    defer { try? FileManager.default.removeItem(at: directory) }
+    let directory = try makeTemporaryDirectory()
     let store = WorkspaceStateStore(url: directory.appendingPathComponent("workspace.json"))
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     let future = Data("{\"version\":7,\"namespaces\":{\"changed\":true}}".utf8)
     try future.write(to: store.url)
     XCTAssertThrowsError(try store.loadWithRevision()) { error in
@@ -104,8 +101,7 @@ extension WorkspaceStateTests {
   }
 
   func testMigrationKeepsBackup() throws {
-    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    defer { try? FileManager.default.removeItem(at: directory) }
+    let directory = try makeTemporaryDirectory()
     let store = WorkspaceStateStore(url: directory.appendingPathComponent("workspace.json"))
     var old = WorkspaceState(); old.version = 2
     try store.save(old)
@@ -117,9 +113,7 @@ extension WorkspaceStateTests {
 
 extension WorkspaceStateTests {
   func testDamagedStateIsPreservedBeforeFreshSave() throws {
-    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: directory) }
+    let directory = try makeTemporaryDirectory()
     let store = WorkspaceStateStore(url: directory.appendingPathComponent("workspace.json"))
     let original = Data("broken json".utf8)
     try original.write(to: store.url)
@@ -134,8 +128,7 @@ extension WorkspaceStateTests {
 
 extension WorkspaceStateTests {
   func testStaleWriterCannotOverwriteNewerWorkspaceOrPendingCloses() throws {
-    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    defer { try? FileManager.default.removeItem(at: directory) }
+    let directory = try makeTemporaryDirectory()
     let store = WorkspaceStateStore(url: directory.appendingPathComponent("workspace.json"))
     try store.save(WorkspaceState())
     let first = try store.loadWithRevision()
