@@ -187,4 +187,43 @@ extension WorkspaceStateTests {
     XCTAssertTrue(tab.layout!.validated())
     XCTAssertFalse(PaneLayout.split(direction: "right", ratio: 0.5, first: .terminal("a"), second: .terminal("a")).validated())
   }
+
+  func testStoreRejectsMalformedState() throws {
+    let directory = try makeTemporaryDirectory()
+    let store = WorkspaceStateStore(url: directory.appendingPathComponent("workspace.json"))
+    func pane(_ id: String) -> WorkspaceState.Pane { .init(id: id, terminalID: "t-" + id, workspaceID: "w", cwd: nil) }
+    func tab(_ id: String, panes: [WorkspaceState.Pane] = [], layout: PaneLayout? = nil) -> WorkspaceState.Tab {
+      var value = WorkspaceState.Tab(id: id, selectedPaneID: nil)
+      value.panes = panes.isEmpty ? nil : panes; value.layout = layout
+      return value
+    }
+    func state(_ tabs: [WorkspaceState.Tab] = [tab("t1")], namespaces: [String] = ["n"]) -> WorkspaceState {
+      var value = WorkspaceState()
+      value.namespaces = namespaces.enumerated().map { index, id in
+        .init(id: id, tabs: index == 0 ? tabs : [], selectedTabID: nil)
+      }
+      return value
+    }
+    func rejects(_ value: WorkspaceState, _ message: String) throws {
+      try store.save(value)
+      XCTAssertThrowsError(try store.loadWithRevision(), message)
+    }
+    try store.save(state())
+    XCTAssertNoThrow(try store.loadWithRevision())
+    try rejects(state(namespaces: ["n", "n"]), "duplicate namespace ids")
+    try rejects(state([tab("t1"), tab("t1")]), "duplicate tab ids")
+    try rejects(state([tab("t1", panes: [pane("p")]), tab("t2", panes: [pane("p")])]), "duplicate terminals")
+    try rejects(state([tab("t1", panes: [pane("p")], layout: .terminal("other"))]), "layout names a terminal that is not a pane")
+    try rejects(state([tab("t1", panes: [pane("p")], layout: .split(direction: "sideways", ratio: 0.5, first: .terminal("t-p"), second: .terminal("t-q")))]), "bad layout direction")
+    var badSidebar = state(); badSidebar.sidebar = .init(width: 50, compact: false)
+    try rejects(badSidebar, "sidebar width out of range")
+    var badWindows = state()
+    badWindows.windows = [.init(id: "w", namespaceIDs: ["unknown"], selectedNamespaceID: nil, frame: nil, sidebar: nil)]
+    try rejects(badWindows, "window references an unknown namespace")
+    badWindows.windows = [.init(id: "w", namespaceIDs: ["n"], selectedNamespaceID: nil, frame: .init(x: 0, y: 0, width: 0, height: 10), sidebar: nil),]
+    try rejects(badWindows, "window frame without size")
+    badWindows.windows = [.init(id: "w", namespaceIDs: ["n"], selectedNamespaceID: nil, frame: nil, sidebar: nil),
+      .init(id: "w", namespaceIDs: [], selectedNamespaceID: nil, frame: nil, sidebar: nil)]
+    try rejects(badWindows, "duplicate window ids")
+  }
 }

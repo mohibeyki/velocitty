@@ -54,7 +54,6 @@ let terminal = first.session!.view!
 let originalEngine = delegate.runtime!.app
 precondition(app.sendAction(new.action!, to: new.target, from: new))
 waitUntil("The second window did not open") { delegate.windows.count == 2 }
-precondition(delegate.windows.count == 2)
 precondition(delegate.validateMenuItem(closeMenuItem))
 let second = delegate.windows[1]
 precondition(first.session?.view?.surface != second.session?.view?.surface)
@@ -350,7 +349,6 @@ func checkSharedEngine() throws {
   }
   try runtime.updateConfiguration(configured(0.4))
   waitUntil("The cell size did not follow the font") { velokit_surface_size(firstSurface).cell_height_px > originalCell }
-  precondition(velokit_surface_size(firstSurface).cell_height_px > originalCell)
   precondition(velokit_surface_size(firstSurface).cell_height_px == velokit_surface_size(secondSurface).cell_height_px)
   let scoped = try TerminalRuntime.makeConfig(AppConfiguration.parse(Data("""
   [terminal]
@@ -368,29 +366,25 @@ func checkSharedEngine() throws {
   drain()
   first.session!.view!.performSurfaceAction("toggle_background_opacity")
   waitUntil("The opacity toggle did not apply") { first.native.backgroundOpacity == 1 && second.native.backgroundOpacity == 0.4 }
-  precondition(first.native.backgroundOpacity == 1 && second.native.backgroundOpacity == 0.4)
   precondition(delegate.native.backgroundOpacity == 0.4)
   delegate.newWindow()
-  drain()
+  waitUntil("The third window did not open") { delegate.windows.count == 3 }
   let third = delegate.windows.last!
   precondition(third.session!.runtime === runtime && third.native.backgroundOpacity == 0.4)
   third.closing = true
   third.window!.close()
-  drain()
+  waitUntil("The third window did not close") { delegate.windows.count == 2 }
   precondition(delegate.runtime === runtime && first.session!.surface == firstSurface)
   try runtime.updateConfiguration(configured(0.6))
   waitUntil("The reloaded opacity did not apply") { first.native.backgroundOpacity == 1 && second.native.backgroundOpacity == 0.6 }
-  precondition(first.native.backgroundOpacity == 1 && second.native.backgroundOpacity == 0.6)
   first.session!.view!.performSurfaceAction("toggle_background_opacity")
   waitUntil("The opacity toggle did not revert") { first.native.backgroundOpacity == 0.6 && second.native.backgroundOpacity == 0.6 }
-  precondition(first.native.backgroundOpacity == 0.6 && second.native.backgroundOpacity == 0.6)
   let broadcast = NSEvent.keyEvent(
     with: .keyDown, location: .zero, modifierFlags: [.control, .shift],
     timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: first.window!.windowNumber,
     context: nil, characters: "A", charactersIgnoringModifiers: "a", isARepeat: false, keyCode: 0)!
   first.session!.view!.sendKey(broadcast, action: GHOSTTY_ACTION_PRESS)
   waitUntil("The broadcast binding did not apply") { first.window!.title == "Broadcast" && second.window!.title == "Broadcast" }
-  precondition(first.window!.title == "Broadcast" && second.window!.title == "Broadcast")
   var global = ghostty_input_key_s()
   global.action = GHOSTTY_ACTION_PRESS
   global.keycode = 11 // physical B
@@ -398,7 +392,6 @@ func checkSharedEngine() throws {
   global.unshifted_codepoint = 98
   precondition(velokit_app_key(runtime.app!, global))
   waitUntil("The global binding did not apply") { first.window!.title == "Global" && second.window!.title == "Global" }
-  precondition(first.window!.title == "Global" && second.window!.title == "Global")
   precondition(first.session!.surface == firstSurface && second.session!.surface == secondSurface)
   try runtime.updateConfiguration(settings)
   drain()
@@ -457,7 +450,7 @@ func checkConfigurationReload() throws {
     let diagnosticWindow = delegate.activeWindow!.window!
     precondition(diagnosticWindow.attachedSheet != nil, "Reload diagnostics must be visible")
     diagnosticWindow.endSheet(diagnosticWindow.attachedSheet!)
-    drain()
+    waitUntil("The diagnostics sheet did not close") { diagnosticWindow.attachedSheet == nil }
 
     // Overrides use already prepared theme colors, even if the theme disappears.
     let themeFile = directory.appendingPathComponent("custom.itermcolors")
@@ -526,7 +519,6 @@ func checkVisualPolicies() throws {
   action.action.size_limit.max_height = 0
   precondition(runtime.context.handleAction(target: target, action: action))
   waitUntil("The size limit did not clear") { first.window!.contentMaxSize.width > 100_000 }
-  precondition(first.window!.contentMaxSize.width > 100_000)
   try runtime.updateConfiguration(settings)
   drain()
 }
@@ -537,7 +529,6 @@ func checkQuitAfterLastWindowCloses() -> Never {
   precondition(delegate.native.quitAfterLastWindowClosed)
   first.window?.performClose(nil)
   waitUntil("The window did not close") { delegate.windows.count == 1 }
-  precondition(delegate.windows.count == 1)
   precondition(delegate.quitTimer == nil || delegate.quitTimer?.isValid == false)
   let observer = NotificationCenter.default.addObserver(
     forName: NSApplication.willTerminateNotification, object: app, queue: .main
@@ -724,7 +715,7 @@ func checkWindowNavigation() {
   precondition(empty.windows.isEmpty && empty.runtime == nil)
 
   delegate.newWindow()
-  drain()
+  waitUntil("The third window did not open") { delegate.windows.count == 3 }
   let third = delegate.windows.last!
   func cycle(_ source: TerminalWindowController, _ direction: String,
     to destination: TerminalWindowController)
@@ -755,7 +746,6 @@ func checkWindowNavigation() {
   cycle(second, "next", to: first)
   third.window!.close()
   waitUntil("The window did not close") { delegate.windows.count == 2 }
-  precondition(delegate.windows.count == 2)
   var target = ghostty_target_s()
   target.tag = GHOSTTY_TARGET_APP
   var action = ghostty_action_s()
@@ -792,14 +782,13 @@ func checkIndependentSheets() {
   closing.window!.close()
   delegate.newWindow()
   let replacement = delegate.windows.last!
-  waitUntil("The replacement window did not open") { replacement.window != nil && replacement.window!.title != "Stale title" }
+  drain() // Lets the stale title callback queued for the closed window run.
   precondition(replacement.window != nil && replacement.window!.title != "Stale title")
   precondition(first.session!.links.confirmation != nil && session.links.confirmation == nil)
   first.session!.links.cancel()
   replacement.closing = true
   replacement.window!.close()
   waitUntil("The replacement window did not close") { delegate.windows.count == 2 }
-  precondition(delegate.windows.count == 2)
 }
 
 // A retained session keeps the engine alive; a retained view does not own either resource.
@@ -906,14 +895,14 @@ func checkFocusReporting() throws {
     controller.closing = true
     window.close()
     waitUntil("The window did not close") { delegate.windows.count == 2 }
-    precondition(delegate.windows.count == 2)
   }
 }
 
 // Exercise the actual native action routing with a fake OS opener.
 func checkLinkRouting() {
+  let openWindows = delegate.windows.count
   delegate.newWindow()
-  drain()
+  waitUntil("The window did not open") { delegate.windows.count == openWindows + 1 }
   let controller = delegate.windows.last!
   let context = controller.session!.runtime.context
   var opened: [URL] = []
@@ -1031,7 +1020,6 @@ func checkClipboardQueue() {
   precondition(queue.confirmation == nil && replies.count == 2)
   session.links.cancel()
   waitUntil("The third clipboard request did not appear") { queue.confirmation?.messageText == "Clipboard test 3" }
-  precondition(queue.confirmation?.messageText == "Clipboard test 3")
   enqueue(4)
   let closingAlert = queue.confirmation!
   controller.closing = true
@@ -1041,7 +1029,6 @@ func checkClipboardQueue() {
   closingAlert.buttons[0].performClick(nil) // A late UI response cannot complete again.
   queue.cancel()
   waitUntil("The clipboard queue did not empty") { replies.count == 4 && queue.confirmation == nil }
-  precondition(replies.count == 4 && queue.confirmation == nil)
 }
 
 // Cancellation before presentation, including the no-request-state write callback.
@@ -1066,7 +1053,6 @@ func checkClipboardCancellation() {
   controller.window!.close()
   precondition(denied == 1)
   waitUntil("The clipboard confirmation did not close with its window") { view.clipboard.confirmation == nil && denied == 1 }
-  precondition(view.clipboard.confirmation == nil && denied == 1)
   precondition(board.string(forType: .string) == "unchanged")
 }
 
@@ -1120,7 +1106,6 @@ func checkClipboardAtPTY() throws {
     recorder.controller.closing = true
     recorder.controller.window!.close()
     waitUntil("The pending paste was not cancelled by closing") { view.surface == nil && view.clipboard.confirmation == nil }
-    precondition(view.surface == nil && view.clipboard.confirmation == nil)
     precondition(recorder.received() == expected)
     precondition(delegate.windows.count == 2)
   }
@@ -1139,14 +1124,12 @@ func checkCloseAndQuit() {
     precondition(first.session!.runtime.context.handleAction(target: target, action: action))
   }
   waitUntil("The background title did not apply") { first.window?.title == "Background terminal" }
-  precondition(first.window?.title == "Background terminal")
   precondition(second.window?.title != "Background terminal")
   second.window?.makeKeyAndOrderFront(nil)
   drain()
   precondition(closeMenuItem.keyEquivalent == "w")
   precondition(app.sendAction(closeMenuItem.action!, to: closeMenuItem.target, from: closeMenuItem))
   waitUntil("The window did not close") { delegate.windows.count == 1 }
-  precondition(delegate.windows.count == 1)
   precondition(first.session?.view?.surface != nil)
   precondition(second.session?.view == nil)
   delegate.gotoWindow(GHOSTTY_GOTO_WINDOW_NEXT, from: first)
@@ -1155,14 +1138,12 @@ func checkCloseAndQuit() {
   precondition(first.window!.isKeyWindow && delegate.windows.count == 1)
   first.window?.performClose(nil)
   waitUntil("The last window did not close") { delegate.windows.isEmpty }
-  precondition(delegate.windows.isEmpty)
   precondition(terminal.surface == nil && terminal.config == nil)
   precondition(!delegate.validateMenuItem(closeMenuItem))
   precondition(delegate.runtime?.app == originalEngine)
   precondition(app.sendAction(new.action!, to: new.target, from: new))
   precondition(app.sendAction(new.action!, to: new.target, from: new))
   waitUntil("The new windows did not open") { delegate.windows.count == 2 }
-  precondition(delegate.windows.count == 2)
   precondition(delegate.windows.allSatisfy { $0.session?.runtime.app == originalEngine })
   let quit = menuItem("Quit Velocitty")
   precondition(quit.keyEquivalent == "q")

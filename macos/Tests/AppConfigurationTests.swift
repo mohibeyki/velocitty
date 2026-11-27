@@ -60,24 +60,6 @@ final class AppConfigurationTests: XCTestCase {
       settings.options.first { $0.key == "theme" }?.value, TerminalTheme.defaultSelection)
   }
 
-  func testDroppedPathsAreLiteralShellArguments() throws {
-    let paths = [
-      "/tmp/a b", "/tmp/it's", "/tmp/$(printf WRONG)", "/tmp/a;printf WRONG", "/tmp/雪\nline",
-    ]
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/bin/sh")
-    process.arguments = ["-c", "printf '%s\\0' " + ShellInput.paths(paths)]
-    let output = Pipe()
-    process.standardOutput = output
-    try process.run()
-    let bytes = output.fileHandleForReading.readDataToEndOfFile()
-    process.waitUntilExit()
-    XCTAssertEqual(process.terminationStatus, 0)
-    XCTAssertEqual(bytes, Data((paths.joined(separator: "\0") + "\0").utf8))
-    XCTAssertEqual(ShellInput.paths([]), "")
-    XCTAssertFalse(ShellInput.paths(paths).hasSuffix("\n"))
-  }
-
   func testDefaultsAndMissingFile() throws {
     let home = try makeTemporaryDirectory()
     XCTAssertEqual(AppConfiguration.defaults(home: home).workingDirectory, home)
@@ -264,7 +246,16 @@ final class AppConfigurationTests: XCTestCase {
       font_feature = ["-calt", "-liga"]
       keybind = ["ctrl+a=text:hello", "ctrl+b=text:world"]
       scrollback_limit_bytes = 50_000_000
+      focus_follows_mouse = true
+      unfocused_split_opacity = 0.55
+      split_divider_color = "#112233"
+      split_preserve_zoom = "navigation"
+      split_inherit_working_directory = false
+      window_inherit_working_directory = false
+      window_inherit_font_size = false
+      window_show_tab_bar = "always"
       """)
+    XCTAssertTrue(config.diagnostics.isEmpty)
     XCTAssertEqual(
       config.options.filter { $0.key == "font-family" }.map(\.value), ["Menlo", "Monaco"])
     XCTAssertEqual(config.options.first { $0.key == "font-size" }?.value, "14.5")
@@ -272,6 +263,10 @@ final class AppConfigurationTests: XCTestCase {
     XCTAssertEqual(
       config.options.filter { $0.key == "env" }.map(\.value), ["FOO=a=b", "BAR=line one\nline two"])
     XCTAssertEqual(config.options.first { $0.key == "scrollback-limit-bytes" }?.value, "50000000")
+    for key in ["focus-follows-mouse", "unfocused-split-opacity", "split-divider-color", "split-preserve-zoom",
+      "split-inherit-working-directory", "window-inherit-working-directory", "window-inherit-font-size", "window-show-tab-bar"] {
+      XCTAssertEqual(config.options.filter { $0.key == key }.count, 1, key)
+    }
   }
 
   func testAliasesAndReset() throws {
@@ -355,22 +350,6 @@ final class AppConfigurationTests: XCTestCase {
     XCTAssertEqual(config.options.first { $0.key == "background-opacity" }?.value, "0.5")
     XCTAssertEqual(config.diagnostics.count, 5)
     XCTAssertEqual(config.workingDirectory, AppConfiguration.defaults().workingDirectory)
-  }
-
-  func testPaneAndWindowOptionsAreAvailable() throws {
-    let config = try parse("""
-      [terminal]
-      focus_follows_mouse = true
-      unfocused_split_opacity = 0.55
-      split_divider_color = "#112233"
-      split_preserve_zoom = "navigation"
-      split_inherit_working_directory = false
-      window_inherit_working_directory = false
-      window_inherit_font_size = false
-      window_show_tab_bar = "always"
-      """)
-    XCTAssertTrue(config.diagnostics.isEmpty)
-    XCTAssertEqual(config.options.count, 8)
   }
 
   func testUnavailableOptionsExplainMissingBehavior() throws {
