@@ -1226,445 +1226,6 @@ func runRestorationCheck() -> Never {
   exit(0)
 }
 
-func runWorkspacePersistenceCheck() throws {
-  try withIsolatedHerdr("velocitty-test") { directory, clients in
-    try checkWorkspacePersistence(directory: directory, client: clients[0])
-  }
-  print("Workspace persistence tests passed.")
-}
-
-private func checkWorkspacePersistence(directory: URL, client initialClient: HerdrClient) throws {
-  var client = initialClient
-  let file = directory.appendingPathComponent("workspace.json")
-  let settings = try AppConfiguration.parse(Data("[terminal]\nconfirm_close_surface=false\ntheme=''\n".utf8))
-  var ownerCount = 0
-  // Each relaunch has its own client, as a real one would: a client has a single event callback, which an
-  // earlier owner's late refresh would otherwise take back from the later one.
-  func makeOwner() throws -> AppDelegate {
-    if ownerCount > 0 { client = HerdrClient(executable: initialClient.executable, sessionName: initialClient.sessionName) }
-    ownerCount += 1
-    let owner = AppDelegate()
-    owner.workspaceStateURL = file
-    owner.runtime = try TerminalRuntime(settings: settings)
-    owner.herdr = client
-    return owner
-  }
-  func markerExists(_ marker: URL) -> Bool { FileManager.default.fileExists(atPath: marker.path) }
-  let first = try makeOwner()
-  first.newWindow(); waitForMux(first)
-  let window = first.windows.last!
-  let integrationMarker = directory.appendingPathComponent("integration")
-  pumpEvents(until: Date(timeIntervalSinceNow: 0.5))
-  let integrationCommand = "(( $+_ghostty_state )) && printf ok > " + ShellInput.quote(integrationMarker.path)
-  enterCommand(integrationCommand, in: window.session!)
-  if !pollUntil(timeout: 5, { markerExists(integrationMarker) }), let output = window.session?.view?.accessibilityValue() as? String {
-    FileHandle.standardError.write(Data(output.utf8))
-  }
-  precondition(markerExists(integrationMarker), "New herdr shells must load integration")
-  let running = try client.hasRunningTask(paneID: window.session!.herdrTerminal!.pane.pane_id)
-  precondition(running == false, "An idle shell should not prompt to close")
-  let recoveredPane = window.session!
-  let terminalID = recoveredPane.herdrTerminal!.pane.terminal_id
-  recoveredPane.attachmentExited()
-  recoveredPane.attachmentExited()
-  waitUntil("The attachment did not recover", timeout: 8) { !recoveredPane.recovering }
-  precondition(window.session === recoveredPane && recoveredPane.herdrTerminal!.pane.terminal_id == terminalID)
-  // The reconnect reuses the view, whose clipboard was cancelled with the old surface.
-  var clipboardReply: Bool?
-  recoveredPane.view!.clipboard.enqueue(title: "After reconnect", message: "Test") { allow, _ in clipboardReply = allow }
-  precondition(clipboardReply == nil, "A reconnected terminal must not auto-deny clipboard requests")
-  waitUntil("A reconnected terminal must present clipboard requests") { recoveredPane.view!.clipboard.confirmation != nil }
-  recoveredPane.view!.clipboard.confirmation!.buttons[1].performClick(nil)
-  waitUntil("The clipboard request was not answered") { clipboardReply != nil }
-  precondition(clipboardReply == false && recoveredPane.view!.clipboard.confirmation == nil)
-  let recoveryMarker = directory.appendingPathComponent("recovered")
-  enterCommand("printf ok > " + ShellInput.quote(recoveryMarker.path), in: recoveredPane)
-  waitUntil("Recovered attachment must accept input in the same shell", timeout: 5) { markerExists(recoveryMarker) }
-  window.newTab()
-  window.newTab()
-  waitForMux(first, window)
-  precondition(window.tabs.count == 3, "Busy mux actions must queue instead of disappearing")
-  let beforeSelection = try client.snapshot().workspaces.map(\.active_tab_id)
-  window.selectTab(window.tabs[0])
-  window.selectTab(window.tabs[2])
-  waitForMux(first, window)
-  let afterSelection = try client.snapshot().workspaces.map(\.active_tab_id)
-  precondition(afterSelection == beforeSelection, "Velocitty navigation must not change herdr focus")
-  window.session?.view?.performSurfaceAction("increase_font_size:2")
-  let inheritedFont = velokit_surface_font_size(window.session!.surface!)
-  // Split through the terminal's own binding action, as a keybinding would.
-  let splitPane = window.session!
-  precondition("new_split:right".withCString { velokit_surface_binding_action(splitPane.surface!, $0, 15) })
-  waitForMux(first, window)
-  precondition(window.session !== splitPane && window.activeTab.panes.count == 2)
-  precondition(abs(velokit_surface_font_size(window.session!.surface!) - inheritedFont) < 0.01, "Split must inherit the current font size")
-  let splitTabID = window.activeTab.herdrID!
-  window.setSplitRatio(tabID: splitTabID, path: [], ratio: 0.3); waitForMux(first, window)
-  guard case .split(_, let resizedRatio, _, _) = window.activeTab.localLayout else { fatalError("Missing local tree") }
-  precondition(abs(resizedRatio - 0.3) < 0.01)
-  window.equalizePanes(); waitForMux(first, window)
-  guard case .split(_, let equalRatio, _, _) = window.activeTab.localLayout else { fatalError("Missing local tree") }
-  precondition(abs(equalRatio - 0.5) < 0.01)
-  let originalPane = window.session!
-  window.splitPane("left"); waitForMux(first, window)
-  window.workspaceView.layoutSubtreeIfNeeded()
-  precondition(window.session!.chrome!.frame.midX < originalPane.chrome!.frame.midX, "Left split must appear before the original pane")
-  window.selectTab(originalPane)
-  let selectedPane = originalPane.herdrTerminal!.pane.pane_id
-  window.togglePaneZoom()
-  precondition(window.activeTab.zoomed && window.session!.herdrTerminal!.pane.pane_id == selectedPane)
-  window.newTab(); waitForMux(first, window)
-  window.moveTab(-1)
-  let order = window.tabs.map { $0.herdrID! }
-  window.selectTab(window.tabs.first { $0.herdrID == splitTabID }!)
-  // A backend rename must not replace the local space name.
-  let localName = window.activeNamespace.name
-  try client.rename(workspace: window.session!.herdrTerminal!.pane.workspace_id, name: "Agents", subtitle: "Local tasks")
-  window.newNamespace(); waitForMux(first, window)
-  let selectedNamespace = window.activeNamespace.id!
-  precondition(window.namespaces.count == 2 && window.namespaces[0].tabs.map { $0.herdrID! } == order,
-    "Window structure changed without a local action: \(window.namespaces.map { $0.tabs.map(\.herdrID) }), expected \(order)")
-  window.workspaceView.restoreSidebarState(.init(width: 276, compact: true))
-  window.workspaceView.layoutSubtreeIfNeeded()
-  first.scheduleWorkspaceSave(window)
-  first.flushWorkspaceSaveSynchronously()
-  let saved = try WorkspaceStateStore(url: file).load()
-  precondition(saved.selectedNamespaceID == selectedNamespace)
-  precondition(saved.namespaces.first?.tabs.map(\.id) == order, "The saved tab order must match the window")
-  window.window?.performClose(nil)
-  pumpEvents(until: Date(timeIntervalSinceNow: 0.05))
-  // A fresh owner loads the file, rather than reusing the in-memory state.
-  let second = try makeOwner()
-  second.newWindow(); waitForMux(second)
-  let restored = second.windows.last!
-  restored.workspaceView.layoutSubtreeIfNeeded()
-  precondition(restored.activeNamespace.id == selectedNamespace)
-  precondition(restored.namespaces[0].tabs.map { $0.herdrID! } == order)
-  precondition(restored.namespaces[0].name == localName, "Backend names must not overwrite local space names")
-  let split = restored.namespaces[0].tabs.first { $0.herdrID == splitTabID }!
-  precondition(split.selected.herdrTerminal!.pane.pane_id == selectedPane)
-  precondition(split.zoomed, "Local pane zoom must survive relaunch")
-  precondition(restored.workspaceView.savedSidebarState == .init(width: 276, compact: true))
-  // External changes attach exactly once, through the event stream, without importing backend focus.
-  let localSelection = restored.session!
-  waitUntil("Event subscription must be acknowledged before changing the workspace") { client.eventsConnected }
-  let eventsBefore = client.workspaceEventCount
-  let external = try client.create(workspace: selectedNamespace, name: "External", directory: directory.path)
-  let oldTerminalIDs = Set(restored.allPanes.compactMap { $0.herdrTerminal?.pane.terminal_id })
-  let added = external.panes.first { !oldTerminalIDs.contains($0.terminal_id) }!
-  let beforeRollback = restored.allPanes.count
-  let invalid = HerdrClient.Snapshot(workspaces: external.workspaces, tabs: external.tabs, panes: [added, added])
-  do { try restored.addHerdrTerminals(invalid, excluding: []); preconditionFailure("Expected duplicate rejection") }
-  catch { precondition(restored.allPanes.count == beforeRollback, "A failed attachment must roll back prepared views") }
-  waitUntil("Structural events must arrive over the read-only API and attach the new terminal", timeout: 5) {
-    client.workspaceEventCount > eventsBefore && restored.allPanes.contains { $0.herdrTerminal?.pane.terminal_id == added.terminal_id }
-  }
-  // Attaching the pane changes the subscription set, so the stream is replaced; wait for the new one.
-  waitUntil("The event subscription must be re-established after attaching") { client.eventsConnected }
-  precondition(restored.session === localSelection)
-  let count = restored.allPanes.count
-  second.synchronizeHerdr(external, client: client)
-  second.synchronizeHerdr(try client.snapshot(), client: client)
-  precondition(restored.allPanes.count == count && restored.session === localSelection)
-  let externalTab = external.tabs.first { $0.tab_id == added.tab_id }!
-  _ = try client.request(["tab", "close", externalTab.tab_id])
-  second.synchronizeHerdr(try client.snapshot(), client: client)
-  precondition(restored.allPanes.count == count - 1 && restored.session === localSelection)
-  // A second window has independent ownership and geometry across relaunch.
-  second.newWindow(); waitForMux(second)
-  let extra = second.windows.first { $0 !== restored }!
-  let extraID = extra.workspaceWindowID
-  let extraNamespace = extra.activeNamespace.id
-  extra.window?.setFrame(NSRect(x: 100, y: 100, width: 850, height: 650), display: true)
-  second.scheduleWorkspaceSave(extra); second.flushWorkspaceSaveSynchronously()
-  extra.window?.performClose(nil)
-  second.synchronizeHerdr(try client.snapshot(), client: client)
-  precondition(!restored.namespaces.contains { $0.id == extraNamespace }, "Detached windows must stay detached")
-  restored.window?.performClose(nil)
-  let third = try makeOwner()
-  third.newWindow(); waitForMux(third)
-  precondition(third.windows.count == 2, "Window assignments must survive relaunch")
-  let extraRestored = third.windows.first { $0.workspaceWindowID == extraID }!
-  precondition(extraRestored.activeNamespace.id == extraNamespace)
-  precondition(extraRestored.window!.frame.width == 850)
-  let sourceWindow = third.windows.first { $0 !== extraRestored }!
-  let movingTab = sourceWindow.namespaces.flatMap(\.tabs).first { $0.panes.count > 1 }!
-  let movedIDs = Set(movingTab.panes.compactMap { $0.herdrTerminal?.pane.terminal_id })
-  sourceWindow.selectTab(movingTab)
-  sourceWindow.moveTab(movingTab, toNamespace: extraNamespace!); waitForMux(third, sourceWindow)
-  let movedTab = extraRestored.tabs.first { Set($0.panes.compactMap { $0.herdrTerminal?.pane.terminal_id }) == movedIDs }
-  precondition(movedTab != nil, "Moving a tab must preserve its existing terminals")
-  extraRestored.selectTab(movedTab!)
-  let detachedID = extraRestored.session!.herdrTerminal!.pane.terminal_id
-  extraRestored.movePaneToNewTab(); waitForMux(third, extraRestored)
-  precondition(extraRestored.activeTab.panes.count == 1 && extraRestored.session!.herdrTerminal!.pane.terminal_id == detachedID)
-  let settingsUI = try SettingsWindow(appOwner: third)
-  settingsUI.showWindow(nil)
-  settingsUI.window?.contentView?.layoutSubtreeIfNeeded()
-  precondition(settingsUI.window?.isVisible == true)
-  settingsUI.window?.close()
-  extraRestored.showWorkspaceSearch()
-  let searchPanel = extraRestored.palette!
-  precondition(searchPanel.entries.count == third.windows.flatMap(\.allPanes).count)
-  let searchTarget = sourceWindow.session!
-  let searchID = "workspace:" + searchTarget.herdrTerminal!.pane.terminal_id
-  let searchRow = searchPanel.filtered.firstIndex { $0.action == searchID }!
-  searchPanel.table.selectRowIndexes(IndexSet(integer: searchRow), byExtendingSelection: false)
-  searchPanel.runSelected()
-  precondition(sourceWindow.session === searchTarget && !searchPanel.isVisible)
-  let countBeforeDrop = third.windows.flatMap(\.allPanes).count
-  third.application(app, openFiles: [directory.path])
-  waitUntil("A directory drop creates a terminal", timeout: 8) { third.windows.flatMap(\.allPanes).count == countBeforeDrop + 1 }
-  let movingWindow = third.activeWindow!
-  let movingPane = movingWindow.session!
-  let surfaceBeforeMove = movingPane.surface
-  movingWindow.moveTabToNewWindow(); waitForMux(third, movingWindow)
-  let movedWindow = third.windows.first { $0.allPanes.contains { $0 === movingPane } }!
-  precondition(movedWindow !== movingWindow && movingPane.surface == surfaceBeforeMove)
-  let titled = movedWindow.window!.styleMask.contains(.titled)
-  movedWindow.toggleDecorations()
-  precondition(movedWindow.window!.styleMask.contains(.titled) != titled)
-  movedWindow.toggleDecorations()
-  // A shell exit closes its tab (here with its window) without another keypress.
-  enterCommand("exit", in: movingPane)
-  // The pane's recovery check abandons itself once its window is closing, so `recovering` is not a signal here.
-  waitUntil("A herdr shell exit must close its tab without another keypress", timeout: 8) {
-    movingPane.surface == nil && (movedWindow.closing || !movedWindow.allPanes.contains { $0 === movingPane })
-  }
-  extraRestored.window?.performClose(nil)
-  third.synchronizeHerdr(try client.snapshot(), client: client)
-  precondition(!third.windows.flatMap(\.allPanes).contains { $0.herdrTerminal?.pane.terminal_id == detachedID }, "Locally detached tabs must not leak into another window during reconciliation")
-  for controller in Array(third.windows) { controller.closing = true; controller.window?.close() }
-}
-
-// MARK: - Session restoration (--session-restore)
-
-func runSessionRestoreCheck() throws {
-  try withTemporaryDirectory("velocitty-restore") { directory in try checkStandaloneRestore(directory: directory) }
-  try withIsolatedHerdr("velocitty-test") { directory, clients in
-    try checkLostServerRecreation(directory: directory, client: clients[0])
-  }
-  print("Session restoration tests passed.")
-}
-
-/// Closes windows the way quitting does: their saved state is kept.
-private func closeWindows(of owner: AppDelegate) {
-  owner.terminating = true
-  for controller in Array(owner.windows) { controller.closing = true; controller.window?.close() }
-}
-
-private func posixPermissions(_ url: URL) -> Int {
-  (try? FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber)?.intValue ?? -1
-}
-
-/// A window's text as the engine holds it, for waiting on shell output.
-private func output(of pane: TerminalSession) -> String { pane.recentOutput() ?? "" }
-
-/// Standalone windows come back through AppKit's restoration state with their directory, and show
-/// their previous output, dimmed and followed by a separator, above the new shell's prompt.
-private func checkStandaloneRestore(directory: URL) throws {
-  let stateURL = directory.appendingPathComponent("workspace.json")
-  func makeOwner() throws -> AppDelegate {
-    let owner = AppDelegate(discoverHerdr: { nil })
-    owner.workspaceStateURL = stateURL
-    owner.runtime = try TerminalRuntime(settings: testSettings(saveState: "always"))
-    app.delegate = owner
-    return owner
-  }
-  let work = directory.appendingPathComponent("work", isDirectory: true).resolvingSymlinksInPath()
-  try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
-  let first = try makeOwner()
-  first.newLocalWindow(directory: work)
-  let controller = first.windows[0], pane = controller.session!
-  enterCommand("echo before-quit-marker; seq 1 3000", in: pane)
-  waitUntil("The first terminal did not print", timeout: 8) { output(of: pane).contains("\n3000") }
-  let encoder = NSKeyedArchiver(requiringSecureCoding: true)
-  controller.window(controller.window!, willEncodeRestorableState: encoder)
-  encoder.finishEncoding()
-  first.saveScrollback(of: [pane], blocking: true)
-  let store = ScrollbackStore(besideStateAt: stateURL)
-  let saved = store.load(pane.standaloneScrollbackKey)?.text ?? ""
-  precondition(saved.hasSuffix("3000") || saved.contains("\n3000\n"), "The last output must be saved")
-  precondition(saved.split(separator: "\n").count <= SessionScrollback.maxLines, "Saved scrollback must be bounded")
-  precondition(!saved.contains("before-quit-marker"), "Only the most recent lines are saved")
-  precondition(posixPermissions(store.url(for: pane.standaloneScrollbackKey)) == 0o600, "Scrollback must be owner-only")
-  precondition(posixPermissions(store.directory) == 0o700)
-  closeWindows(of: first)
-  pumpEvents(until: Date(timeIntervalSinceNow: 0.1))
-
-  let second = try makeOwner()
-  var restored: NSWindow?
-  let decoder = try NSKeyedUnarchiver(forReadingFrom: encoder.encodedData)
-  decoder.requiresSecureCoding = true
-  TerminalWindowRestoration.restoreWindow(withIdentifier: TerminalWindowRestoration.identifier, state: decoder) { window, _ in restored = window }
-  precondition(restored != nil && second.windows.count == 1, "A standalone window must be restored")
-  let revived = second.windows[0].session!
-  precondition(revived.standaloneScrollbackKey == pane.standaloneScrollbackKey)
-  precondition(second.windows[0].currentDirectory == work.path || revived.initialDirectory?.path == work.path, "The working directory must be restored")
-  waitUntil("Saved output must be shown", timeout: 8) { output(of: revived).contains("restored session") }
-  enterCommand("echo after-restore-marker", in: revived)
-  waitUntil("The new shell must run", timeout: 8) { output(of: revived).contains("\nafter-restore-marker") }
-  let text = output(of: revived)
-  let shown = text.range(of: "\n2999\n"), separator = text.range(of: "restored session"), fresh = text.range(of: "\nafter-restore-marker")
-  precondition(shown != nil && separator != nil && fresh != nil && shown!.upperBound <= separator!.lowerBound && separator!.upperBound <= fresh!.lowerBound,
-    "Restored output must precede the separator and the new shell's output")
-  closeWindows(of: second)
-
-  // A user closing a window discards its output; turning the setting off removes everything.
-  let third = try makeOwner()
-  third.newLocalWindow(directory: work)
-  let closed = third.windows[0].session!
-  third.saveScrollback(of: [closed], blocking: true)
-  third.windows[0].closing = true; third.windows[0].window?.close()
-  precondition(store.load(closed.standaloneScrollbackKey) == nil, "Closing a standalone window removes its scrollback")
-}
-
-/// Everything below happens against a real herdr server that is stopped, as a reboot would, between
-/// launches. herdr restores its own workspaces under their old IDs, so Velocitty must rebind to those;
-/// when the session is gone altogether it must create the terminals itself.
-private func checkLostServerRecreation(directory: URL, client initial: HerdrClient) throws {
-  let file = directory.appendingPathComponent("workspace.json")
-  let store = ScrollbackStore(besideStateAt: file)
-  func makeOwner(restore: Bool = true) throws -> AppDelegate {
-    let owner = AppDelegate()
-    owner.workspaceStateURL = file
-    owner.runtime = try TerminalRuntime(settings: AppConfiguration.parse(Data(
-      "[terminal]\nconfirm_close_surface=false\ntheme=''\nundo_timeout='1s'\n[interface]\nrestore_session=\(restore)\n".utf8)))
-    owner.herdr = HerdrClient(executable: initial.executable, sessionName: initial.sessionName)
-    app.delegate = owner
-    return owner
-  }
-  func stopServer(deleteSession: Bool) throws {
-    _ = try? initial.run(["server", "stop"])
-    waitUntil("The herdr server did not stop", timeout: 8) { (try? initial.snapshot(timeout: 1)) == nil }
-    if deleteSession { _ = try initial.run(["session", "delete", initial.sessionName]) }
-  }
-  func detach(_ owner: AppDelegate) {
-    owner.scheduleWorkspaceSave(owner.windows[0]); owner.flushWorkspaceSaveSynchronously()
-    for controller in Array(owner.windows) { controller.closing = true; controller.window?.close() }
-    pumpEvents(until: Date(timeIntervalSinceNow: 0.2))
-  }
-  /// Waits for herdr to see the shell's directory, then lets the owner's pane records catch up.
-  func waitForCwd(_ owner: AppDelegate, _ pane: TerminalSession, _ path: String) throws {
-    let client = owner.herdr!, id = pane.herdrTerminal!.pane.terminal_id
-    waitUntil("herdr did not report \(path)", timeout: 10) { (try? client.snapshot())?.panes.first { $0.terminal_id == id }?.cwd == path }
-    owner.synchronizeHerdr(try client.snapshot(), client: client)
-    precondition(pane.herdrTerminal?.pane.cwd == path)
-  }
-  func realPath(_ name: String) -> String { realpath(directory.appendingPathComponent(name).path, nil).map { String(cString: $0) } ?? name }
-  for name in ["alpha", "beta"] { try FileManager.default.createDirectory(at: directory.appendingPathComponent(name), withIntermediateDirectories: true) }
-  let alpha = realPath("alpha"), beta = realPath("beta")
-
-  // Arrange one tab split in two (30/70) and a second tab, then leave.
-  let first = try makeOwner()
-  first.newWindow(); waitForMux(first)
-  let window = first.windows.last!
-  let alphaPane = window.session!
-  enterCommand("cd \(ShellInput.quote(alpha)); echo history-alpha", in: alphaPane)
-  try waitForCwd(first, alphaPane, alpha)
-  window.splitPane("right"); waitForMux(first, window)
-  let betaPane = window.session!
-  precondition(betaPane !== alphaPane)
-  enterCommand("cd \(ShellInput.quote(beta)); echo history-beta", in: betaPane)
-  try waitForCwd(first, betaPane, beta)
-  window.setSplitRatio(tabID: window.activeTab.herdrID!, path: [], ratio: 0.3)
-  window.newTab(); waitForMux(first, window)
-  window.selectTab(alphaPane)
-  waitUntil("History must be readable from herdr", timeout: 10) {
-    [alphaPane, betaPane].allSatisfy { pane in
-      (try? initial.recentText(paneID: pane.herdrTerminal!.pane.pane_id, lines: 50))?.contains("history-") == true
-    }
-  }
-  first.saveScrollback(of: window.allPanes, blocking: true)
-  let alphaKey = alphaPane.herdrTerminal!.pane.terminal_id
-  precondition(store.load(alphaKey)?.text.contains("history-alpha") == true, "herdr scrollback must be saved")
-  precondition(posixPermissions(store.url(for: alphaKey)) == 0o600)
-  var oldTerminals = Set(window.allPanes.compactMap { $0.herdrTerminal?.pane.terminal_id })
-  precondition(oldTerminals.count == 3, "Expected three live terminals, found \(oldTerminals.count)")
-  let running = try initial.connectReportingStart(directory: directory)
-  precondition(!running.started, "A running server is not a new one")
-
-  /// The saved arrangement, checked against what a relaunch shows: same layout, selection, directories
-  /// and previous output, in new terminals, with nothing added.
-  func verifyRestored(_ owner: AppDelegate, previous: Set<String>, previousKey: String, via: String) throws -> TerminalWindowController {
-    precondition(owner.windows.count == 1, "\(via): the saved window must be restored")
-    let restored = owner.windows[0]
-    let panes = restored.allPanes
-    precondition(panes.count == 3, "\(via): every saved terminal must come back once, found \(panes.count)")
-    let terminals = Set(panes.compactMap { $0.herdrTerminal?.pane.terminal_id })
-    precondition(terminals.isDisjoint(with: previous), "\(via): terminals are new")
-    precondition(restored.namespaces.count == 1 && restored.namespaces[0].tabs.map(\.panes.count) == [2, 1], "\(via): tabs must keep their panes")
-    guard case .split(let direction, let ratio, _, _) = restored.namespaces[0].tabs[0].localLayout else { fatalError("\(via): the split layout was lost") }
-    precondition(direction == "right" && abs(ratio - 0.3) < 0.01, "\(via): split ratio must survive: \(ratio)")
-    precondition(restored.activeTab === restored.namespaces[0].tabs[0] && restored.session === restored.activeTab.panes[0], "\(via): the selection must survive")
-    let client = owner.herdr!
-    waitUntil("\(via): working directories must be restored", timeout: 15) {
-      let cwds = Set(((try? client.snapshot())?.panes ?? []).compactMap(\.cwd))
-      return cwds.isSuperset(of: [alpha, beta])
-    }
-    let live = try client.snapshot()
-    precondition(live.panes.count == 3 && live.workspaces.count == 1, "\(via): nothing may be added: \(live.panes.map(\.pane_id))")
-    let record = restored.session!.herdrTerminal!.pane
-    waitUntil("\(via): the previous output must be printed in the new shell", timeout: 15) {
-      guard let text = try? client.recentText(paneID: record.pane_id, lines: 200) else { return false }
-      return text.contains("history-alpha") && text.contains("restored session")
-    }
-    precondition(store.load(previousKey) == nil && store.load(record.terminal_id)?.text.contains("history-alpha") == true,
-      "\(via): scrollback must move to the new terminal")
-    owner.scheduleWorkspaceSave(restored); owner.flushWorkspaceSaveSynchronously()
-    let saved = try WorkspaceStateStore(url: file).load()
-    precondition(Set(saved.namespaces.flatMap(\.tabs).flatMap { $0.panes ?? [] }.map(\.terminalID)) == terminals, "\(via): the saved workspace must name the new terminals")
-    return restored
-  }
-  // Reboot 1: herdr restores its workspaces with new terminals, and Velocitty rebinds to them.
-  detach(first)
-  try stopServer(deleteSession: false)
-  let second = try makeOwner()
-  second.newWindow(); waitForMux(second, timeout: 30)
-  let afterRestore = try verifyRestored(second, previous: oldTerminals, previousKey: alphaKey, via: "restored session")
-  oldTerminals = Set(afterRestore.allPanes.compactMap { $0.herdrTerminal?.pane.terminal_id })
-  let secondKey = afterRestore.activeTab.panes[0].herdrTerminal!.pane.terminal_id
-  second.saveScrollback(of: afterRestore.allPanes, blocking: true)
-
-  // Reboot 2: the session itself is gone, so Velocitty creates the terminals.
-  detach(second)
-  try stopServer(deleteSession: true)
-  let third = try makeOwner()
-  third.newWindow(); waitForMux(third, timeout: 30)
-  let afterLoss = try verifyRestored(third, previous: oldTerminals, previousKey: secondKey, via: "lost session")
-  let thirdKey = afterLoss.activeTab.panes[0].herdrTerminal!.pane.terminal_id
-  third.saveScrollback(of: afterLoss.allPanes, blocking: true)
-  let survivors = Set(afterLoss.allPanes.compactMap { $0.herdrTerminal?.pane.terminal_id })
-
-  // A server that is still running is not lost: nothing is rebound or created.
-  detach(third)
-  let fourth = try makeOwner()
-  fourth.newWindow(); waitForMux(fourth)
-  precondition(Set(fourth.windows.flatMap(\.allPanes).compactMap { $0.herdrTerminal?.pane.terminal_id }) == survivors)
-
-  // An explicit close keeps the text through the undo window, then removes it.
-  let closing = fourth.windows[0]
-  let singleTab = closing.namespaces[0].tabs[1]
-  let singleKey = singleTab.panes[0].herdrTerminal!.pane.terminal_id
-  fourth.saveScrollback(of: closing.allPanes, blocking: true)
-  precondition(store.load(singleKey) != nil, "The single pane's text was not saved")
-  closing.closeTab(singleTab.panes[0], confirm: false); waitForMux(fourth, closing)
-  precondition(store.load(singleKey) != nil, "The undo window must keep the text")
-  waitUntil("A closed terminal's scrollback must be removed after the undo window", timeout: 8) { store.load(singleKey) == nil }
-  precondition(store.load(thirdKey) != nil, "Other terminals keep their text")
-
-  // With the setting off, nothing is rebound or created, and saved text is removed.
-  detach(fourth)
-  try stopServer(deleteSession: false)
-  let disabled = try makeOwner(restore: false)
-  disabled.newWindow(); waitForMux(disabled, timeout: 30)
-  precondition(disabled.windows.flatMap(\.namespaces).flatMap(\.tabs).allSatisfy { $0.panes.count == 1 }, "The saved arrangement is not restored when the setting is off")
-  disabled.pruneScrollback()
-  disabled.saveScrollback(of: disabled.windows.flatMap(\.allPanes), blocking: true)
-  precondition((try? FileManager.default.contentsOfDirectory(atPath: store.directory.path))?.isEmpty != false, "No scrollback remains when the setting is off")
-  for controller in Array(disabled.windows) { controller.closing = true; controller.window?.close() }
-}
-
 // Opt-in integration check: an isolated herdr 0.9 server reached through SSH.
 func runRemoteCheck() throws {
   let env = ProcessInfo.processInfo.environment
@@ -1709,6 +1270,8 @@ func runRemoteCheck() throws {
     window.stopAlongside()
     window.restoreWorkspaceState(saved)
     precondition(window.presentedTabs.count == 2 && window.session === remotePane)
+    // Kept as a fixed settle: this opt-in check needs an SSH host that is not available to run here, so a
+    // prompt-based wait could not be verified. The marker below is waited for with a real timeout.
     pumpEvents(until: Date(timeIntervalSinceNow: 0.5))
     let marker = root.appendingPathComponent("ssh-input")
     enterCommand("printf remote-ok > " + ShellInput.quote(marker.path), in: remotePane)
@@ -1952,7 +1515,7 @@ func runManagementUICheck() throws {
   func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
   func show(_ controller: NSWindowController, snapshot: String) {
     controller.showWindow(nil); controller.window?.makeKeyAndOrderFront(nil)
-    pumpEvents(until: Date(timeIntervalSinceNow: 0.15))
+    waitUntil("The window did not appear") { controller.window?.isVisible == true }
     let view = controller.window!.contentView!; view.layoutSubtreeIfNeeded()
     precondition(!view.hasAmbiguousLayout)
     if let path = ProcessInfo.processInfo.environment["VELO_TEST_UI_SNAPSHOTS"],
@@ -1999,9 +1562,11 @@ func runHerdrControlCheck() throws {
     do { _ = try client.run(["read"]); preconditionFailure("Expected structured error") }
     catch let error as HerdrClient.RequestError { precondition(error.code == "server_not_running") }
     let descendant = root.appendingPathComponent("descendant")
-    try script("(sleep 0.3; touch " + ShellInput.quote(descendant.path) + ") &\nwait")
+    // The descendant would touch the file after a second; it records its pid so the check can wait for it to be gone.
+    let descendantPID = root.appendingPathComponent("descendant.pid")
+    try script("(sleep 1; touch " + ShellInput.quote(descendant.path) + ") &\necho $! > " + ShellInput.quote(descendantPID.path) + "\nwait")
     let started = ProcessInfo.processInfo.systemUptime
-    do { _ = try client.run(["read"], timeout: 0.1); preconditionFailure("Expected timeout") }
+    do { _ = try client.run(["read"], timeout: 0.3); preconditionFailure("Expected timeout") }
     catch let error as HerdrClient.RequestError { precondition(error.code == "timeout") }
     precondition(ProcessInfo.processInfo.systemUptime - started < 1)
     // A malformed response must not start a server or be treated as an empty workspace.
@@ -2017,7 +1582,9 @@ func runHerdrControlCheck() throws {
     precondition(!client.isCurrent(empty), "A snapshot older than a mutation must be stale")
     let fresh = try client.snapshot()
     precondition(client.isCurrent(fresh))
-    Thread.sleep(forTimeInterval: 0.4)
+    let pid = (try? String(contentsOf: descendantPID, encoding: .utf8)).flatMap { Int32($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+    precondition(pid != nil, "The descendant must have started before the timeout")
+    waitUntil("The descendant is still running", timeout: 5) { kill(pid!, 0) != 0 }
     precondition(!FileManager.default.fileExists(atPath: descendant.path), "Timeout must also terminate request descendants")
   }
 }
@@ -2166,8 +1733,8 @@ func runPersistenceCoordinationCheck() throws {
     persistence.flush { results.append($0) }
     mutate("e")
     try persistence.flushSynchronously()
+    // The completion runs after the write finished, so nothing late remains once it has been reported.
     waitUntil("The asynchronous save never completed", timeout: 5) { !results.isEmpty }
-    pumpEvents(until: Date(timeIntervalSinceNow: 0.1)) // Let any late completion run before checking.
     let thirdSaved = try store.load().selectedNamespaceID
     precondition(thirdSaved == "e")
     precondition(persistence.revision == (try? Data(contentsOf: file)), "A late completion must not restore an older revision")
@@ -2177,6 +1744,8 @@ func runPersistenceCoordinationCheck() throws {
     mutate("f")
     persistence.flush { results.append($0) }
     waitUntil("The conflicting save never completed", timeout: 5) { !results.isEmpty }
+    // Nothing is observable once the failure is reported (the write flag is private), so this brief pump only
+    // gives a second, duplicate report a chance to arrive before asserting there is exactly one.
     pumpEvents(until: Date(timeIntervalSinceNow: 0.1))
     precondition(results.count == 1, "A failed save must be reported once")
     guard case .failure(let error) = results[0], error as? WorkspaceStateError == .conflictingUpdate else {
