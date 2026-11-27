@@ -11,6 +11,9 @@ final class WindowTests: XCTestCase {
   func testWorkspacePersistence() throws {
     try runCheck("WindowChecks", arguments: ["--workspace-persistence"], success: "Workspace persistence tests passed.")
   }
+  func testSessionRestoration() throws {
+    try runCheck("WindowChecks", arguments: ["--session-restore"], timeout: 150, success: "Session restoration tests passed.")
+  }
   func testRelaunchRestoration() throws {
     let files = FileManager.default
     let root = files.temporaryDirectory.appendingPathComponent("velocitty-restoration-" + UUID().uuidString)

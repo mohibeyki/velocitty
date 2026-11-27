@@ -27,6 +27,11 @@ final class TerminalWindowRestoration: NSObject, NSWindowRestoration {
           session.initialDirectory = URL(fileURLWithPath: path, isDirectory: true)
         }
       }
+      if let key = state.decodeObject(of: NSString.self, forKey: "scrollback") as String?, key.hasPrefix("window-") {
+        session.standaloneScrollbackKey = key
+        session.restoredOutput = owner.scrollbackStore(for: session)?.load(key)
+          .map { SessionScrollback.terminalOutput($0.text, savedAt: $0.savedAt) }
+      }
       let controller = TerminalWindowController(session: session, owner: owner)
       owner.windows.append(controller)
       controller.openWindow(restoring: true)
@@ -58,6 +63,7 @@ extension TerminalWindowController {
   func window(_ window: NSWindow, willEncodeRestorableState state: NSCoder) {
     state.encode(1, forKey: "terminalVersion")
     state.encode(currentDirectory, forKey: "directory")
+    if let session, session.herdrTerminal == nil { state.encode(session.standaloneScrollbackKey, forKey: "scrollback") }
     state.encode(windowTitleOverride, forKey: "title")
     state.encode(fullscreenMode, forKey: "fullscreenMode")
     state.encode(normalFrame.map(NSStringFromRect), forKey: "normalFrame")

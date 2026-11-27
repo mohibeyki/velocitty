@@ -26,6 +26,10 @@ or restarting their processes.
   side-by-side tabs, tab-to-window moves, and local focus across servers.
 - [x] **Persistence and recovery:** restore windows, ordering, selections, sidebar,
   and side-by-side presentation; preserve damaged state and reconnect to the same IDs.
+- [x] **Session restore:** after a reboot or lost herdr session, rebind or recreate
+  each saved terminal at its working directory with its tab, split ratios, and
+  selection, and show its recent output above the new prompt. Standalone windows
+  restore their directory and output too. Turn off with `restore_session`.
 - [x] **Close undo:** briefly retain closed terminals, restore their original
   surfaces, and retry unfinished explicit closes after connection failures.
 - [x] **Remote sessions:** TOML connections, SSH transport, multiple servers
@@ -72,7 +76,16 @@ Install **herdr 0.8.2+** for local multiplexing, or **herdr 0.9+ on both ends** 
 remote sessions. Without herdr, Velocitty provides standalone terminal windows.
 The local herdr session is named `velocitty`. Window close and quit detach;
 explicit pane, tab, and namespace closes end their terminals after the undo
-window. Rebooting does not preserve running processes.
+window. Rebooting does not preserve running processes; it does not lose the layout
+either. When a local herdr session starts anew, Velocitty restores each saved tab,
+split, and selection into terminals at their last directory, and prints the
+terminal's last 2000 lines (dimmed, above a "restored session" line) before the
+new prompt. Standalone windows come back the same way through macOS window
+restoration (`window_save_state`). The text is kept in owner-only files in
+`scrollback/` next to `workspace.json`, and is removed when the terminal is closed
+for good. An unreachable or disabled remote still shows its tabs as unavailable
+until it returns. Set `restore_session = false` under `[interface]` to turn this off
+and delete the saved text.
 
 | Work | Default shortcuts |
 | --- | --- |

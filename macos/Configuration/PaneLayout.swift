@@ -12,6 +12,14 @@ public indirect enum PaneLayout: Codable, Equatable, Sendable {
     case .split(_, _, let first, let second): return first.terminals + second.terminals
     }
   }
+  /// The same arrangement over different terminals.
+  public func mapping(_ transform: (String) -> String) -> PaneLayout {
+    switch self {
+    case .terminal(let id): return .terminal(transform(id))
+    case .split(let direction, let ratio, let first, let second):
+      return .split(direction: direction, ratio: ratio, first: first.mapping(transform), second: second.mapping(transform))
+    }
+  }
   public func validated(depth: Int = 0) -> Bool {
     guard depth < 64 else { return false }
     switch self {

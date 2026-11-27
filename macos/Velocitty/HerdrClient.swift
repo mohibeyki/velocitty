@@ -484,7 +484,11 @@ final class HerdrClient {
     return snapshot
   }
 
-  func connect(directory: URL) throws -> Snapshot {
+  func connect(directory: URL) throws -> Snapshot { try connectReportingStart(directory: directory).snapshot }
+
+  /// Connects, starting the session's server when none runs. `started` tells the caller the server is
+  /// new: terminals saved by an earlier server (before a reboot, say) are gone, not merely unreachable.
+  func connectReportingStart(directory: URL) throws -> (snapshot: Snapshot, started: Bool) {
     let version = String(decoding: try run(["--version"]), as: UTF8.self)
     let match = version.range(of: #"^herdr\s+v?([0-9]+\.[0-9]+\.[0-9]+)"#, options: .regularExpression)
     let numbers = match.map { version[$0].split(whereSeparator: { !$0.isNumber }).compactMap { Int($0) } } ?? []
@@ -492,7 +496,7 @@ final class HerdrClient {
     guard Self.version(numbers, isAtLeast: minimum) else {
       throw ConfigurationError("herdr \(minimum.map(String.init).joined(separator: ".")) or newer is required for this connection.")
     }
-    do { return try snapshot() }
+    do { return (try snapshot(), false) }
     catch let error as RequestError where error.code == "server_not_running" { /* Start only an absent server. */ }
     guard machine == nil else { throw ConfigurationError("Start the selected herdr session on " + endpointLabel + " before connecting.") }
     let child = process(["server"])
@@ -502,12 +506,22 @@ final class HerdrClient {
     try child.run()  // Closing the app does not stop this server or its terminals.
     let deadline = Date(timeIntervalSinceNow: 5)
     repeat {
-      if let value = try? snapshot(timeout: min(0.5, max(0.05, deadline.timeIntervalSinceNow))) { return value }
+      if let value = try? snapshot(timeout: min(0.5, max(0.05, deadline.timeIntervalSinceNow))) { return (value, true) }
       Thread.sleep(forTimeInterval: 0.1)
     } while Date() < deadline && child.isRunning
     if child.isRunning { child.terminate() }
     throw ConfigurationError(
       "Could not connect to the herdr session ‘\(sessionName)’. Check herdr's server log.")
+  }
+
+  /// Recent terminal text (scrollback and screen) of a pane, as plain text.
+  func recentText(paneID: String, lines: Int) throws -> String {
+    String(decoding: try run(["pane", "read", paneID, "--source", "recent-unwrapped", "--lines", String(lines)], timeout: 3), as: UTF8.self)
+  }
+
+  /// Types a command into a pane's shell.
+  func runCommand(_ command: String, paneID: String) throws {
+    _ = try run(["pane", "run", paneID, command], timeout: 3)
   }
 
   func gitBranch(directory: String) throws -> String? {

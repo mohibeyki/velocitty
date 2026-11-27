@@ -18,6 +18,10 @@ final class TerminalSession {
   var herdrTerminal: HerdrClient.Terminal?
   var initialDirectory: URL?
   var initialInput: String?
+  /// Identifies a standalone terminal's saved scrollback across relaunches; herdr terminals use their own ID.
+  var standaloneScrollbackKey = "window-" + UUID().uuidString
+  /// Saved output shown once, above the first prompt of a restored standalone terminal.
+  var restoredOutput: String?
   var initialFontSize: Float = 0
   var surfaceContext = GHOSTTY_SURFACE_CONTEXT_WINDOW
   var chrome: TerminalChrome?
@@ -74,6 +78,7 @@ final class TerminalSession {
       view = nil
       return nil
     }
+    showRestoredOutput()
     // A reconnect reuses this view; its clipboard was cancelled with the previous surface.
     terminalView.clipboard.reopen()
     terminalView.updateFocus()

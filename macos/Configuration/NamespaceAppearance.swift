@@ -6,6 +6,7 @@ public enum NamespaceAppearance {
   public static let defaults: [String: String] = [
     "theme": "dark",
     "agent_notifications": "true",
+    "restore_session": "true",
     "chrome_background_color": "#131313", "chrome_foreground_color": "#DEDEDE",
     "chrome_selected_color": "#303030", "chrome_border_color": "#484848",
     "sidebar_width": "220", "agent_icon_size": "22", "agent_border_width": "1",
@@ -19,7 +20,7 @@ public enum NamespaceAppearance {
 
   public static func validate(_ value: String, for key: String) -> Bool {
     guard defaults[key] != nil else { return false }
-    if key == "agent_notifications" { return ["true", "false"].contains(value) }
+    if key == "agent_notifications" || key == "restore_session" { return ["true", "false"].contains(value) }
     if key == "theme" { return ["dark", "light", "auto"].contains(value) }
     if key.hasSuffix("_color") {
       return value.count == 7 && value.first == "#" && UInt32(value.dropFirst(), radix: 16) != nil

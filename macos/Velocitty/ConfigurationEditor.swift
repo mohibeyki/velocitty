@@ -54,6 +54,7 @@ final class SettingsWindow: NSWindowController, NSTableViewDataSource, NSTableVi
     }
     var summary: String {
       if key == "agent_notifications" { return "Notify when an agent needs input or finishes. Notifications focus its terminal when clicked." }
+      if key == "restore_session" { return "Save each terminal's recent output and recreate lost herdr terminals after a reboot. Running processes are not restored." }
       if table == "interface" { return "Workspace appearance. Terminal colors are configured separately." }
       switch key {
       case "font_family": return "Typeface for terminal text. Font fallback remains available in Advanced."

@@ -21,8 +21,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
   private var themePicker: ThemePickerWindow?
   // Test sessions do not read or overwrite the user's workspace file.
   var workspaceStateURL: URL?
-  private let workspacePersistence = WorkspacePersistence()
-  fileprivate var workspaceState: WorkspaceState? {
+  let workspacePersistence = WorkspacePersistence()
+  var workspaceState: WorkspaceState? {
     get { workspacePersistence.state }
     set { workspacePersistence.state = newValue }
   }
@@ -51,6 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
   private let connectionCoordinator = ConnectionCoordinator()
   private var connectionsWindow: ConnectionsWindow?
   private var agentPollTimer: Timer?
+  let scrollbackCapture = ScrollbackCapture()
   private var pollingAgentEndpoints: Set<String> = []
   private var lastAgentPoll: [String: TimeInterval] = [:]
   var connections: [HerdrConnection] = []
@@ -186,6 +187,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     agentPollTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
       self?.pollAgentSnapshots()
     }
+    startScrollbackCapture()
     if herdr == nil { showMuxWarning() }
     if !pendingFiles.isEmpty && !muxOpening {
       drainDockFiles()
@@ -323,6 +325,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     deferredSnapshotTimer = nil
     agentPollTimer?.invalidate()
     agentPollTimer = nil
+    scrollbackCapture.timer?.invalidate()
+    // Before any surface closes, while its text can still be read.
+    saveScrollback(of: windows.flatMap(\.allPanes), blocking: true)
     secureInputOwner.update(wanted: false)
     fullscreenPresentation.update(nil)
     persistCloseIntent()
@@ -477,6 +482,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
 
   func configurationDidChange() {
     updateRestorationPolicy()
+    pruneScrollback()
     for controller in windows {
       for tab in controller.allPanes { tab.chrome?.refreshVisibility() }
       controller.workspaceView.refreshTabs()
@@ -1151,6 +1157,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate, NSToolbarDeleg
   func windowWillClose(_ notification: Notification) {
     owner?.scheduleWorkspaceSave(self)
     owner?.flushWorkspaceSave()
+    owner?.windowPanesClosing(allPanes)
     persistenceReady = false
     pendingMuxActions.removeAll()
     passwordInput = false
@@ -1778,12 +1785,6 @@ extension AppDelegate {
     } else { alert.runModal() }
   }
 
-  private func savedPane(_ pane: HerdrClient.Pane, cwd: String? = nil) -> WorkspaceState.Pane {
-    var result = WorkspaceState.Pane(id: pane.pane_id, terminalID: pane.terminal_id, workspaceID: pane.workspace_id, cwd: cwd ?? pane.cwd)
-    result.tabID = pane.tab_id
-    return result
-  }
-
   fileprivate func savedTab(containing terminalID: String) -> WorkspaceState.Tab? {
     workspaceState?.namespaces.flatMap(\.tabs).first { $0.panes?.contains { $0.terminalID == terminalID } == true }
   }
@@ -1795,7 +1796,7 @@ extension AppDelegate {
       var space = WorkspaceState.Namespace(id: workspace.workspace_id, tabs: snapshot.tabs.filter { $0.workspace_id == workspace.workspace_id }.map { record in
         var tab = WorkspaceState.Tab(id: record.tab_id, selectedPaneID: snapshot.panes.first { $0.tab_id == record.tab_id }?.pane_id)
         tab.title = record.label == String(record.number ?? 1) ? nil : record.label
-        tab.panes = snapshot.panes.filter { $0.tab_id == record.tab_id }.map { savedPane($0) }
+        tab.panes = snapshot.panes.filter { $0.tab_id == record.tab_id }.map { $0.saved() }
         return tab
       }, selectedTabID: nil)
       space.name = workspace.label
@@ -1820,10 +1821,12 @@ extension AppDelegate {
     let inheritedDirectory = activeWindow.flatMap { $0.native.windowInheritsDirectory && $0.session?.herdrTerminal?.client === client ? $0.currentDirectory : nil }
     let directory = inheritedDirectory.map { URL(fileURLWithPath: $0) } ?? runtime.settings.workingDirectory
     let shellEnvironment = client.shellEnvironment(settings: runtime.settings)
-    client.perform({ client -> HerdrClient.Snapshot in
-      let snapshot = try client.connect(directory: directory)
-      if snapshot.panes.contains(where: { !attached.contains($0.terminal_id) }) { return snapshot }
-      return try client.create(workspace: nil, name: "Default", directory: client.machine == nil ? directory.path : inheritedDirectory, environment: shellEnvironment)
+    let connect = connectionWork(for: client, directory: directory)
+    client.perform({ client -> ConnectionResult in
+      var connected = try connect(client)
+      if connected.snapshot.panes.contains(where: { !attached.contains($0.terminal_id) }) { return connected }
+      connected.snapshot = try client.create(workspace: nil, name: "Default", directory: client.machine == nil ? directory.path : inheritedDirectory, environment: shellEnvironment)
+      return connected
     }) { [weak self] result in
       guard let self else { return }
       self.muxOpening = false
@@ -1834,8 +1837,10 @@ extension AppDelegate {
         }
       }
       do {
-        let incoming = try result.get()
+        let connected = try result.get()
+        let incoming = connected.snapshot
         self.loadWorkspaceState(for: client)
+        self.adoptRecreation(connected.replacements)
         self.retryPendingClosures(client, snapshot: incoming)
         let snapshot = incoming.excluding(terminals: self.hiddenTerminalIDs)
         if snapshot.panes.isEmpty {
@@ -2540,7 +2545,8 @@ extension AppDelegate {
       var saved = WorkspaceState.Tab(id: id, selectedPaneID: tab.selected.herdrTerminal?.pane.pane_id, zoomed: tab.zoomed)
       saved.title = tab.title
       tab.ensureLayout(); saved.layout = tab.localLayout
-      saved.panes = tab.panes.compactMap { pane in pane.herdrTerminal.map { savedPane($0.pane, cwd: pane.currentDirectory) } }
+      // herdr tracks each shell's directory; the host sees none of its changes, so it only fills a gap.
+      saved.panes = tab.panes.compactMap { pane in pane.herdrTerminal.map { $0.pane.saved(cwd: $0.pane.cwd == nil ? pane.currentDirectory : nil) } }
       return saved
     }, selectedTabID: namespace.selected.herdrID)
     space.name = namespace.name
@@ -2774,13 +2780,15 @@ extension AppDelegate {
     muxOpening = true
     connectionStatus[client.endpointID] = .connecting; connectionsWindow?.refresh()
     let directory = runtime.settings.workingDirectory
-    client.perform({ try $0.connect(directory: directory) }) { [weak self] result in
+    client.perform(connectionWork(for: client, directory: directory)) { [weak self] result in
       guard let self else { completion?(); return }
       self.muxOpening = false
       defer { self.connectionsWindow?.refresh(); completion?() }
       guard !self.terminating, client.isEnabled else { return }
       do {
-        let incoming = try result.get()
+        let connected = try result.get()
+        let incoming = connected.snapshot
+        self.adoptRecreation(connected.replacements)
         self.connectionStatus[client.endpointID] = .connected
         self.retryPendingClosures(client, snapshot: incoming)
         let authoritative = incoming.excluding(terminals: self.hiddenTerminalIDs)
@@ -2880,6 +2888,7 @@ extension AppDelegate {
 extension AppDelegate {
   fileprivate func endTerminal(_ terminal: HerdrClient.Terminal) {
     closeHistory.pending.insert(terminal.pane.terminal_id)
+    discardScrollback(keys: [terminal.pane.terminal_id])
     guard persistCloseIntent(), terminal.client.isEnabled else { return }
     terminal.client.perform({ try $0.snapshot() }) { [weak self] result in
       if case .success(let snapshot) = result { self?.retryPendingClosures(terminal.client, snapshot: snapshot) }
@@ -2970,6 +2979,7 @@ extension AppDelegate {
     refreshCloseUndoBanner()
     guard operation.applied else { return }
     if operation.destroy { closeHistory.pending.formUnion(operation.terminalIDs) }
+    discardScrollback(of: operation.panes.filter { operation.destroy || $0.herdrTerminal == nil })
     operation.panes.forEach { $0.close() }
     guard persistCloseIntent() else { return }
     let clients = uniqueByEndpoint(operation.panes.compactMap { $0.herdrTerminal?.client })
@@ -3173,7 +3183,7 @@ extension TerminalWindowController {
 }
 
 extension AppDelegate {
-  fileprivate var workspacePersistenceEnabled: Bool { workspacePersistence.store != nil }
+  var workspacePersistenceEnabled: Bool { workspacePersistence.store != nil }
   fileprivate var attachedTerminalIDs: Set<String> { Set(windows.flatMap(\.allPanes).compactMap { $0.herdrTerminal?.pane.terminal_id }) }
   fileprivate func pane(forTerminal id: String) -> TerminalSession? { windows.flatMap(\.allPanes).first { $0.herdrTerminal?.pane.terminal_id == id } }
   fileprivate func uniqueByEndpoint<S: Sequence>(_ clients: S) -> [String: HerdrClient] where S.Element == HerdrClient {
