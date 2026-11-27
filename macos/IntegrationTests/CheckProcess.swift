@@ -28,13 +28,18 @@ extension XCTestCase {
     process.standardOutput = log
     process.standardError = log
     let finished = expectation(description: "\(name) exits")
-    process.terminationHandler = { _ in finished.fulfill() }
+    // An expectation can only be waited on once, so the post-terminate grace uses a semaphore.
+    let exited = DispatchSemaphore(value: 0)
+    process.terminationHandler = { _ in
+      finished.fulfill()
+      exited.signal()
+    }
     try process.run()
     let result = XCTWaiter.wait(for: [finished], timeout: timeout)
     if result != .completed {
       // Make sure the child is gone before the log directory is removed.
       process.terminate()
-      if XCTWaiter.wait(for: [finished], timeout: 2) != .completed, process.isRunning {
+      if exited.wait(timeout: .now() + 2) == .timedOut, process.isRunning {
         kill(process.processIdentifier, SIGKILL)
         process.waitUntilExit()
       }
