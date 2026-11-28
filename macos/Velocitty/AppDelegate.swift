@@ -184,7 +184,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
       self?.pollAgentSnapshots()
     }
     startScrollbackCapture()
-    if herdr == nil { showMuxWarning() }
+    if herdr == nil && !HerdrClient.isDisabledByEnvironment { showMuxWarning() }
     if !pendingFiles.isEmpty && !muxOpening {
       drainDockFiles()
     }

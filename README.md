@@ -74,6 +74,8 @@ engine, pinned toolchain definition, and bundled third-party notices.
 
 Install **herdr 0.8.2+** for local multiplexing, or **herdr 0.9+ on both ends** for
 remote sessions. Without herdr, Velocitty provides standalone terminal windows.
+Set `VELOCITTY_DISABLE_HERDR=1` to launch as if herdr were not installed (no session, workspace or
+scrollback state is read or written). Useful for debugging and benchmarks.
 The local herdr session is named `velocitty`. Window close and quit detach;
 explicit pane, tab, and namespace closes end their terminals after the undo
 window. Rebooting does not preserve running processes; it does not lose the layout

@@ -207,7 +207,15 @@ final class HerdrClient {
     return processes.contains { ($0["pid"] as? Int) != shell }
   }
 
+  /// Set by a non-empty `VELOCITTY_DISABLE_HERDR`: without a client no workspace, scrollback or
+  /// connection state is read or written.
+  static var isDisabledByEnvironment: Bool {
+    !(ProcessInfo.processInfo.environment["VELOCITTY_DISABLE_HERDR"] ?? "").isEmpty
+  }
+
+  /// Nil when herdr is not installed or is disabled by environment.
   static func discover() -> URL? {
+    if isDisabledByEnvironment { return nil }
     let home = FileManager.default.homeDirectoryForCurrentUser.path
     let paths =
       (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map(String.init)
